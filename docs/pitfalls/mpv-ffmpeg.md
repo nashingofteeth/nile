@@ -32,6 +32,17 @@ Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
 - The hash includes `RENDER_VERSION` (`proxy.rs`): bump it when the *meaning*
   of a segment's JSON changes (a filter rewrite), or stale renders are served.
 
+## Preview audio seams
+
+mpv restarts its audio chain when an `edl://` entry switches to a different
+source file. Measured with `--vo=null --ao=null`: raw clip cuts were fine, but
+gap/proxy edges stalled the video/audio clock by ~410 ms. The monitor now
+renders one continuous mixed audio master to `cache/proxy/<hash>.m4a` and adds
+it as an external audio file (`audio-add … select`), leaving the EDL's embedded
+audio unused. A five-second proxy/gap/transition EDL went from
+two ~410 ms stalls to none in the same test. The video EDL still switches; it
+just no longer drags the audio clock with it.
+
 ## Filter-graph gotchas
 
 - `crop`/`scale` are masks: they keep the canvas and pad `black@0` on

@@ -34,7 +34,7 @@ pub(crate) enum PreviewMsg {
         total: usize,
         frac: f64,
     },
-    Done(Result<String, String>),
+    Done(Result<preview::PreviewBuild, String>),
 }
 
 /// What the status row shows while a preview renders.
@@ -117,7 +117,7 @@ pub(crate) fn start_preview(app: &mut App) {
         let mut report = move |done, total, frac| {
             let _ = progress_tx.send(PreviewMsg::Progress { done, total, frac });
         };
-        let result = preview::build_composite_edl_with(&project, &project_path, &mut report)
+        let result = preview::build_composite_preview_with(&project, &project_path, &mut report)
             .map_err(|e| e.to_string());
         let _ = tx.send(PreviewMsg::Done(result));
     });
@@ -154,13 +154,17 @@ pub(crate) fn poll_preview(app: &mut App, player: &dyn Mpv) {
                     // finishing mid-session must not replace that picture
                     // (`exit_extend` reloads when extend leaves).
                     match result {
-                        Ok(url) => {
+                        Ok(build) => {
                             // Keep ignoring the pooled clock until the EDL's
                             // own file reports the landing (see `sync`).
                             if app.pool_on_monitor {
                                 app.pool_handoff = Some(app.playhead);
                             }
-                            player.load(&url, Some(app.playhead));
+                            player.load_with_audio(
+                                &build.url,
+                                Some(app.playhead),
+                                build.audio.as_deref(),
+                            );
                             if let Some(paused) = app.pending_pause.take() {
                                 player.set_pause(paused);
                             }

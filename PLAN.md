@@ -295,6 +295,12 @@ below.)
   each asset's path **and mtime**. The render puts the segment on its own
   track and reuses the export graph compiler, so there's no second
   filter-graph to drift.
+- **Continuous preview audio:** mpv restarts its audio chain when an EDL entry
+  switches source files; measured worst-case stalls were ~410 ms at gap/proxy
+  edges. When the EDL has a gap or proxy entry, the monitor renders the whole
+  timeline's mix once into `cache/proxy/<hash>.m4a`, adds it as an external
+  audio track, and lets the raw/proxy video EDL switch without pulling the
+  audio clock down. Pure raw-cut timelines keep the instant path.
 - **Composited preview:** mpv plays one source per EDL span and can't blend or
   mix, so a window where another unmuted track is audible — a second video
   layer under an overlapping clip, or a separate audio track — is rendered as
@@ -308,8 +314,9 @@ below.)
   [--dry-run]` / `:cache prune` deletes that project's entries older than N
   days (default 30), by mtime — which is the
   render time, since a hit does not touch it. Explicit: nothing sweeps on open
-  or on a timer; a pruned proxy simply re-renders. Only `<hash>.mp4` (and a
-  crashed render's temp) is a candidate, so `nle/black/` is never touched.
+  or on a timer; a pruned proxy simply re-renders. Only `<hash>.mp4`,
+  `<hash>.mkv`, `<hash>.m4a` (and a crashed render's temp) are candidates, so
+  `nle/black/` is never touched.
 - **Verified:** unit tests + real ffmpeg runs — a dissolve reads a ≈50%
   blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
   and `nile edl` renders and references the proxies.
