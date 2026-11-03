@@ -8,7 +8,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,6 +51,7 @@ pub struct MpvPlayer {
     socket_path: PathBuf,
     writer: Mutex<UnixStream>,
     state: Arc<Mutex<PlaybackState>>,
+    pending_audio: Arc<Mutex<Option<PathBuf>>>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -114,15 +115,29 @@ impl MpvPlayer {
                 return Err(MpvError::Ipc(e.to_string()));
             }
         };
+        let reader_writer = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(MpvError::Ipc(e.to_string()));
+            }
+        };
         let state = Arc::new(Mutex::new(PlaybackState::default()));
+        let pending_audio = Arc::new(Mutex::new(None));
         let reader_state = Arc::clone(&state);
-        let reader = std::thread::spawn(move || read_loop(reader_stream, reader_state));
+        let reader_pending = Arc::clone(&pending_audio);
+        let reader = std::thread::spawn(move || {
+            read_loop(reader_stream, reader_writer, reader_state, reader_pending)
+        });
 
         Ok(Self {
             child,
             socket_path,
             writer: Mutex::new(stream),
             state,
+            pending_audio,
             reader: Some(reader),
         })
     }
@@ -154,6 +169,13 @@ impl MpvPlayer {
     /// opens the file) — no race with the ready event, so edits restore
     /// the playhead reliably.
     pub fn load(&self, url: &str, start: Option<f64>) {
+        self.load_audio(url, start, None);
+    }
+
+    fn load_audio(&self, url: &str, start: Option<f64>, audio: Option<&Path>) {
+        if let Ok(mut pending) = self.pending_audio.lock() {
+            *pending = audio.map(Path::to_path_buf);
+        }
         let cmd = match start {
             Some(t) => serde_json::json!(["loadfile", url, "replace", 0, format!("start={t:.6}")]),
             None => serde_json::json!(["loadfile", url, "replace", 0]),
@@ -204,6 +226,12 @@ impl MpvPlayer {
 pub trait Mpv {
     fn state(&self) -> PlaybackState;
     fn load(&self, url: &str, start: Option<f64>);
+    /// Load with an optional continuous external audio master. The default
+    /// ignores `audio` for test doubles and single-source previews.
+    fn load_with_audio(&self, url: &str, start: Option<f64>, audio: Option<&Path>) {
+        let _ = audio;
+        self.load(url, start);
+    }
     fn set_pause(&self, on: bool);
     fn toggle_pause(&self);
     fn seek_absolute(&self, target: f64);
@@ -217,6 +245,9 @@ impl Mpv for MpvPlayer {
     }
     fn load(&self, url: &str, start: Option<f64>) {
         MpvPlayer::load(self, url, start)
+    }
+    fn load_with_audio(&self, url: &str, start: Option<f64>, audio: Option<&Path>) {
+        self.load_audio(url, start, audio);
     }
     fn set_pause(&self, on: bool) {
         MpvPlayer::set_pause(self, on)
@@ -276,7 +307,12 @@ enum IpcMessage {
     },
 }
 
-fn read_loop(stream: UnixStream, state: Arc<Mutex<PlaybackState>>) {
+fn read_loop(
+    stream: UnixStream,
+    mut writer: UnixStream,
+    state: Arc<Mutex<PlaybackState>>,
+    pending_audio: Arc<Mutex<Option<PathBuf>>>,
+) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
@@ -306,7 +342,23 @@ fn read_loop(stream: UnixStream, state: Arc<Mutex<PlaybackState>>) {
                         reason,
                     } => match event.as_str() {
                         "property-change" => apply_property(&mut st, name.as_deref(), data),
-                        "file-loaded" => st.file_loaded = true,
+                        "file-loaded" => {
+                            st.file_loaded = true;
+                            let audio = pending_audio
+                                .lock()
+                                .ok()
+                                .and_then(|mut pending| pending.take());
+                            if let Some(audio) = audio {
+                                let path = audio.display().to_string();
+                                let _ = writeln!(
+                                    writer,
+                                    "{}",
+                                    serde_json::json!({
+                                        "command": ["audio-add", path, "select"]
+                                    })
+                                );
+                            }
+                        }
                         "end-file" => {
                             st.file_loaded = false;
                             if let Some(r) = reason
@@ -338,6 +390,37 @@ fn apply_property(st: &mut PlaybackState, name: Option<&str>, data: Option<serde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loaded_file_adds_the_pending_audio_master() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        // Two socket pairs: the loop reads mpv events from one and writes its
+        // own commands to the other, exactly like the real plumbing.
+        let (nile_read, mut mpv_write) = UnixStream::pair().unwrap();
+        let (nile_write, mpv_read) = UnixStream::pair().unwrap();
+        let state = Arc::new(Mutex::new(PlaybackState::default()));
+        let pending = Arc::new(Mutex::new(Some(PathBuf::from("/tmp/preview.m4a"))));
+        let loop_state = Arc::clone(&state);
+        let loop_pending = Arc::clone(&pending);
+        let handle =
+            std::thread::spawn(move || read_loop(nile_read, nile_write, loop_state, loop_pending));
+
+        mpv_write
+            .write_all(b"{\"event\":\"file-loaded\"}\n")
+            .unwrap();
+        let mut commands = BufReader::new(mpv_read);
+        let mut line = String::new();
+        commands.read_line(&mut line).unwrap();
+        let msg: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(msg["command"][0], "audio-add");
+        assert_eq!(msg["command"][1], "/tmp/preview.m4a");
+        assert_eq!(msg["command"][2], "select");
+
+        drop(mpv_write);
+        let _ = handle.join();
+    }
 
     #[test]
     fn parses_property_change_events() {
