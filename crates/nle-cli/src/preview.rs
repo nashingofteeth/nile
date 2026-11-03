@@ -10,9 +10,12 @@
 //! longer than the black file (mpv can't address past a segment's source
 //! length), so one black file per geometry serves every gap length.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 use nle_core::timeline::{Effect, Segment as TimelineSegment, Track, TransitionSource};
 use nle_core::{Project, Seconds, format_seconds};
@@ -34,6 +37,30 @@ pub enum PreviewError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Proxy(#[from] crate::proxy::ProxyError),
+}
+
+/// A monitor build: the video EDL plus an optional continuous audio master.
+/// The audio master is played as an external file so mpv does not rebuild its
+/// audio chain at every EDL source switch.
+#[derive(Debug, Clone)]
+pub struct PreviewBuild {
+    pub url: String,
+    pub audio: Option<PathBuf>,
+}
+
+impl From<String> for PreviewBuild {
+    fn from(url: String) -> Self {
+        Self { url, audio: None }
+    }
+}
+
+impl From<&str> for PreviewBuild {
+    fn from(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            audio: None,
+        }
+    }
 }
 
 /// Quote an EDL value with the `%len%` scheme. Allowed (and required) when
@@ -648,17 +675,78 @@ pub fn build_composite_edl(project: &Project, project_path: &Path) -> Result<Str
     )
 }
 
-/// [`build_composite_edl`] with render progress.
-pub fn build_composite_edl_with(
+/// Build the monitor's EDL and render its continuous audio master. The audio
+/// master is optional: if it fails, the EDL still plays its own per-segment
+/// audio (with the known seam hiccups).
+pub fn build_composite_preview_with(
     project: &Project,
     project_path: &Path,
     progress: ProgressFn<'_>,
-) -> Result<String, PreviewError> {
-    edl_from_segments(
-        project,
-        project_path,
-        &composite_segments_with(project, project_path, progress)?,
-    )
+) -> Result<PreviewBuild, PreviewError> {
+    let segs = composite_segments_with(project, project_path, progress)?;
+    let needs_audio = segs.iter().any(|s| match s {
+        Segment::Gap { .. } => true,
+        Segment::Clip { path, .. } => !project.media.iter().any(|a| &a.path == path),
+    });
+    let url = edl_from_segments(project, project_path, &segs)?;
+    let audio = if needs_audio {
+        ensure_audio_master(project, project_path)
+    } else {
+        None
+    };
+    Ok(PreviewBuild { url, audio })
+}
+
+/// The monitor's continuous audio master for the whole timeline. It is
+/// keyed by the project (playhead excluded) and source mtimes, rendered once
+/// into the proxy cache, and reused across preview reloads.
+fn ensure_audio_master(project: &Project, project_path: &Path) -> Option<PathBuf> {
+    if !project.media.iter().any(|a| a.probe.has_audio()) {
+        return None;
+    }
+    let dir = crate::proxy::proxy_cache_dir(project_path);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    let hash = audio_hash(project);
+    let path = dir.join(format!("{hash:016x}.m4a"));
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
+        return Some(path);
+    }
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("{hash:016x}.tmp-"))
+        .suffix(".m4a")
+        .tempfile_in(&dir)
+        .ok()?;
+    if let Err(e) = nle_ffmpeg::export_audio_quiet(project, temp.path()) {
+        crate::log::line(&format!("preview audio master failed: {e}"));
+        return None;
+    }
+    std::fs::rename(temp.path(), &path).ok()?;
+    Some(path)
+}
+
+const AUDIO_PREVIEW_VERSION: u64 = 1;
+
+fn audio_hash(project: &Project) -> u64 {
+    let mut h = DefaultHasher::new();
+    AUDIO_PREVIEW_VERSION.hash(&mut h);
+    let mut p = project.clone();
+    p.playhead = Seconds::from_integer(0);
+    serde_json::to_vec(&p).unwrap_or_default().hash(&mut h);
+    for asset in &project.media {
+        asset.path.hash(&mut h);
+        if let Ok(meta) = std::fs::metadata(&asset.path) {
+            meta.len().hash(&mut h);
+            if let Ok(modified) = meta.modified()
+                && let Ok(since) = modified.duration_since(UNIX_EPOCH)
+            {
+                since.as_secs().hash(&mut h);
+                since.subsec_nanos().hash(&mut h);
+            }
+        }
+    }
+    h.finish()
 }
 
 /// Render preview segments to an `edl://` URL, generating the cached black
@@ -1182,6 +1270,68 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn a_continuous_audio_master_is_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("audio-source.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=320x240:r=30:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&media)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate test media");
+
+        let probe = nle_ffmpeg::probe(&media).unwrap();
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        p.video = Some(VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (asset, _) = p.add_asset(media, probe);
+        p.timeline.tracks[0].segments = vec![
+            TimelineSegment::Clip(TimelineClip {
+                id: 1,
+                asset,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(1),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::new(1, 2),
+            }),
+        ];
+        let project_path = dir.path().join("nile.json");
+        let build = build_composite_preview_with(&p, &project_path, &mut |_, _, _| {}).unwrap();
+        let audio = build.audio.expect("audio master");
+        assert!(audio.is_file(), "{}", audio.display());
+        assert!(nle_ffmpeg::probe(&audio).unwrap().has_audio());
+        let again = build_composite_preview_with(&p, &project_path, &mut |_, _, _| {}).unwrap();
+        assert_eq!(again.audio, Some(audio), "the master is cached");
     }
 
     #[test]
