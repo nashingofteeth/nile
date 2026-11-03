@@ -264,7 +264,7 @@ enum Cmd {
         /// Where the cut is (seconds or timecode)
         #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: String,
-        /// Length in frames (default: one second)
+        /// Length in frames (default: 12)
         #[arg(long, allow_negative_numbers = true)]
         frames: Option<i64>,
         /// Length as a time (alternative to --frames)

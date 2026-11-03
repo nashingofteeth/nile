@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use nle_core::action::{EffectArgs, effect_from_args};
 use nle_core::timeline::{Effect, TrackKind, TransitionKind};
-use nle_core::{Action, EditError, TransitionLen, edit, secs_f64};
+use nle_core::{Action, DEFAULT_TRANSITION_FRAMES, EditError, TransitionLen, edit, secs_f64};
 
 use crate::mpv::Mpv;
 
@@ -469,13 +469,11 @@ pub(crate) fn form_effect(form: &FxForm) -> Result<Effect, String> {
 
 /// Add a cross-dissolve at the playhead (`X`, or `xx` from Normal — the first
 /// `x` opens the panel and the second lands here). A count is the length in
-/// frames; without one it is a second.
-/// Add a cross-dissolve at the playhead (`X`, or `xx` from Normal — the first
-/// `x` opens the panel and the second lands here). Returns whether it landed.
+/// frames; without one it is 12 frames. Returns whether it landed.
 pub(crate) fn add_transition(app: &mut App, player: &dyn Mpv, frames: Option<i64>) -> bool {
     let len = match frames {
         Some(n) => TransitionLen::Frames(n),
-        None => TransitionLen::Seconds(1.0),
+        None => TransitionLen::Frames(DEFAULT_TRANSITION_FRAMES),
     };
     run_action(
         app,

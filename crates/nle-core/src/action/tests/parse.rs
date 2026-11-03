@@ -38,6 +38,19 @@ fn every_action_has_a_colon_spelling() {
 }
 
 #[test]
+fn transition_defaults_to_twelve_frames() {
+    assert_eq!(
+        parse("transition --at 3", &defaults()),
+        Ok(Action::Transition {
+            track: 5,
+            at: 3.0,
+            kind: TransitionKind::Dissolve,
+            len: TransitionLen::Frames(DEFAULT_TRANSITION_FRAMES),
+        })
+    );
+}
+
+#[test]
 fn the_colon_grammar_mirrors_the_cli_flags() {
     assert_eq!(
         parse("delete --at 3 --ripple --track 2", &defaults()),

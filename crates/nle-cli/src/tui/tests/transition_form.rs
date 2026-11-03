@@ -29,14 +29,14 @@ fn x_on_a_transition_opens_the_length_form() {
     app.loaded = true;
     app.playhead = 3.0;
     let fake = FakeMpv::new();
-    handle_key(&mut app, &fake, key('X')); // a 1 s dissolve at the clip|gap cut
-    assert_eq!(app.playhead, 2.5, "inside the new blend");
+    handle_key(&mut app, &fake, key('X')); // a 12-frame dissolve at the clip|gap cut
+    assert_eq!(app.playhead, 2.8, "inside the new blend");
 
     handle_key(&mut app, &fake, key('x'));
     let Mode::Transition(form) = &app.mode else {
         panic!("expected the transition form, got {:?}", app.mode)
     };
-    assert_eq!((form.current, form.start), (30, 2.0));
+    assert_eq!((form.current, form.start), (12, 2.6));
     assert!(matches!(form.kind, TransitionKind::Dissolve));
 
     for c in "15".chars() {
@@ -77,7 +77,7 @@ fn x_and_a_count_edit_the_transition_frames() {
         panic!("expected the transition form, got {:?}", app.mode)
     };
     assert_eq!(form.frames, "15", "the count pre-fills the field");
-    assert_eq!(form.current, 30);
+    assert_eq!(form.current, 12);
     handle_key(
         &mut app,
         &fake,
@@ -166,7 +166,11 @@ fn r_on_a_transition_prefills_the_rate_command() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(blend.dur, Seconds::from_integer(2), "50% is twice as long");
+    assert_eq!(
+        blend.dur,
+        Seconds::new(4, 5),
+        "50% doubles the 12-frame default"
+    );
 }
 
 // `X` lands in the middle of the new blend — the cut the transition was
@@ -178,7 +182,7 @@ fn x_lands_on_the_transition_midpoint() {
     app.playhead = 3.0; // asset_project's clip|gap cut
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('X'));
-    assert_eq!(app.playhead, 2.5, "the middle of the 1 s blend");
+    assert_eq!(app.playhead, 2.8, "the middle of the 12-frame blend");
     let track = app.project.timeline.video_track().unwrap();
     let blend = track
         .segments
@@ -219,7 +223,7 @@ fn xx_adds_a_transition_and_exits_effects_mode() {
             .any(|s| matches!(s, TimelineSegment::Transition(_))),
         "the transition landed"
     );
-    assert_eq!(app.playhead, 2.5, "the new blend's midpoint");
+    assert_eq!(app.playhead, 2.8, "the new blend's midpoint");
 
     // Not on a cut: the add fails, so the panel stays open.
     let mut app = App::new(asset_project(), temp_project_path("xx-fail"));

@@ -10,8 +10,8 @@ use nle_core::action::{EffectArgs, effect_from_args};
 use nle_core::edit;
 use nle_core::timeline::TrackKind;
 use nle_core::{
-    Action, Asset, Document, Edge, GapLen, Project, Target, TransitionKind, TransitionLen,
-    format_seconds, load_register, parse_signed_time, save_register,
+    Action, Asset, DEFAULT_TRANSITION_FRAMES, Document, Edge, GapLen, Project, Target,
+    TransitionKind, TransitionLen, format_seconds, load_register, parse_signed_time, save_register,
 };
 
 use crate::{
@@ -217,7 +217,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     }
                     TransitionLen::Percent(*p)
                 }
-                (None, None, None) => TransitionLen::Seconds(1.0),
+                (None, None, None) => TransitionLen::Frames(DEFAULT_TRANSITION_FRAMES),
             };
             Ok(Action::Transition {
                 track,
