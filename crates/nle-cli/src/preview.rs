@@ -15,7 +15,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nle_core::timeline::{Effect, Segment as TimelineSegment, Track, TransitionSource};
 use nle_core::{Project, Seconds, format_seconds};
@@ -41,7 +41,7 @@ pub enum PreviewError {
 
 /// A monitor build: the video EDL plus an optional continuous audio master.
 /// The audio master is played as an external file so mpv does not rebuild its
-/// audio chain at every EDL source switch.
+/// audio chain at every EDL source switch. It lives under `cache/audio`.
 #[derive(Debug, Clone)]
 pub struct PreviewBuild {
     pub url: String,
@@ -697,14 +697,34 @@ pub fn build_composite_preview_with(
     Ok(PreviewBuild { url, audio })
 }
 
+/// The cache directory for continuous preview audio masters.
+pub fn preview_audio_cache_dir(project_path: &Path) -> PathBuf {
+    nle_core::state::cache_dir(project_path).join("audio")
+}
+
+/// Prune this project's continuous preview audio masters.
+pub fn prune_audio(
+    project_path: &Path,
+    max_age: Duration,
+    dry_run: bool,
+) -> Result<crate::proxy::PruneReport, crate::proxy::ProxyError> {
+    crate::proxy::prune_at(
+        &preview_audio_cache_dir(project_path),
+        max_age,
+        SystemTime::now(),
+        dry_run,
+    )
+}
+
 /// The monitor's continuous audio master for the whole timeline. It is
-/// keyed by the project (playhead excluded) and source mtimes, rendered once
-/// into the proxy cache, and reused across preview reloads.
+/// keyed by the audio-relevant timeline content (ignoring clip ids and raw
+/// split boundaries), rendered once into the audio cache, and reused across
+/// preview reloads.
 fn ensure_audio_master(project: &Project, project_path: &Path) -> Option<PathBuf> {
     if !project.media.iter().any(|a| a.probe.has_audio()) {
         return None;
     }
-    let dir = crate::proxy::proxy_cache_dir(project_path);
+    let dir = preview_audio_cache_dir(project_path);
     if std::fs::create_dir_all(&dir).is_err() {
         return None;
     }
@@ -726,14 +746,123 @@ fn ensure_audio_master(project: &Project, project_path: &Path) -> Option<PathBuf
     Some(path)
 }
 
-const AUDIO_PREVIEW_VERSION: u64 = 1;
+const AUDIO_PREVIEW_VERSION: u64 = 2;
+
+#[derive(Hash)]
+struct AudioKeySide {
+    path: Option<PathBuf>,
+    src_in: (i64, i64),
+    src_out: (i64, i64),
+}
+
+#[derive(Hash)]
+enum AudioKeySeg {
+    Clip {
+        path: PathBuf,
+        start: (i64, i64),
+        end: (i64, i64),
+        speed: (i64, i64),
+    },
+    Gap((i64, i64)),
+    Transition {
+        kind: u8,
+        dur: (i64, i64),
+        a: AudioKeySide,
+        b: AudioKeySide,
+    },
+}
+
+fn pair(t: &Seconds) -> (i64, i64) {
+    (*t.numer(), *t.denom())
+}
+
+fn audio_key_side(project: &Project, side: &TransitionSource) -> AudioKeySide {
+    match side {
+        TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+            ..
+        } => AudioKeySide {
+            path: project.asset(*asset).map(|a| a.path.clone()),
+            src_in: pair(src_in),
+            src_out: pair(src_out),
+        },
+        TransitionSource::Black => AudioKeySide {
+            path: None,
+            src_in: (0, 1),
+            src_out: (0, 1),
+        },
+    }
+}
 
 fn audio_hash(project: &Project) -> u64 {
     let mut h = DefaultHasher::new();
     AUDIO_PREVIEW_VERSION.hash(&mut h);
-    let mut p = project.clone();
-    p.playhead = Seconds::from_integer(0);
-    serde_json::to_vec(&p).unwrap_or_default().hash(&mut h);
+    project.fps.map(|f| pair(&f)).hash(&mut h);
+    for track in &project.timeline.tracks {
+        format!("{:?}", track.kind).hash(&mut h);
+        track.muted.hash(&mut h);
+        let mut segs: Vec<AudioKeySeg> = Vec::new();
+        for seg in &track.segments {
+            match seg {
+                TimelineSegment::Clip(c) => {
+                    let path = project
+                        .asset(c.asset)
+                        .map(|a| a.path.clone())
+                        .unwrap_or_default();
+                    let start = pair(&c.asset_in);
+                    let end = pair(&c.asset_out);
+                    let speed = pair(&c.speed);
+                    // A split of an unchanged-speed clip is just two adjacent
+                    // source spans; the mixed audio is identical. Leave
+                    // retimes unmerged because an atempo chain may not be
+                    // byte-identical across an artificial seam.
+                    if c.speed == Seconds::from_integer(1)
+                        && let Some(AudioKeySeg::Clip {
+                            path: last_path,
+                            end: last_end,
+                            speed: last_speed,
+                            ..
+                        }) = segs.last_mut()
+                        && *last_path == path
+                        && *last_end == start
+                        && *last_speed == speed
+                    {
+                        *last_end = end;
+                        continue;
+                    }
+                    segs.push(AudioKeySeg::Clip {
+                        path,
+                        start,
+                        end,
+                        speed,
+                    });
+                }
+                TimelineSegment::Gap(g) => {
+                    if let Some(AudioKeySeg::Gap((n, d))) = segs.last_mut() {
+                        let total = Seconds::new(*n, *d) + g.duration;
+                        *n = *total.numer();
+                        *d = *total.denom();
+                    } else {
+                        segs.push(AudioKeySeg::Gap(pair(&g.duration)));
+                    }
+                }
+                TimelineSegment::Transition(t) => {
+                    segs.push(AudioKeySeg::Transition {
+                        kind: match t.kind {
+                            nle_core::TransitionKind::Dissolve => 0,
+                            nle_core::TransitionKind::FadeBlack => 1,
+                        },
+                        dur: pair(&t.dur),
+                        a: audio_key_side(project, &t.a),
+                        b: audio_key_side(project, &t.b),
+                    });
+                }
+            }
+        }
+        segs.hash(&mut h);
+    }
     for asset in &project.media {
         asset.path.hash(&mut h);
         if let Ok(meta) = std::fs::metadata(&asset.path) {
