@@ -264,7 +264,10 @@ nile effect clear --clip 3
 
 Effects are rendered at export; the monitor plays a cached proxy for clips
 with effects, speed changes, transitions, or a picture size that differs from
-the sequence.
+the sequence. When the EDL has gaps or proxy entries, the preview also
+renders one continuous audio master; mpv plays that as an external audio
+track, so an EDL source switch does not restart the audio chain and stall the
+picture.
 
 ### Import, detect, and export
 
@@ -325,7 +328,7 @@ video/
         ├── history.json
         ├── clipboard.json
         └── cache/
-            ├── proxy/
+            ├── proxy/         # video proxies + continuous audio masters
             ├── export/
             └── black/
 ```
@@ -334,8 +337,8 @@ Multiple projects in one directory get separate `.nile/<stem>/` folders.
 Legacy adjacent `*.history.json` / `*.clipboard.json` files are copied into
 the state directory on first load; old `nle.json` projects still open with
 `--project nle.json`. The old global `~/.cache/nile` is no longer used, and
-`nile cache prune` only touches the current project’s cache — proxy renders
-and completed export chunks.
+`nile cache prune` only touches the current project’s cache — proxy renders,
+preview audio masters, and completed export chunks.
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a

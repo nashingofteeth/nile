@@ -14,7 +14,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nle_core::project::Asset;
 use nle_core::timeline::{Clip, Effect, Segment, TrackKind, TransitionKind, TransitionSource};
@@ -691,6 +691,37 @@ pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, Export
 /// screen. A failure still carries ffmpeg's reason.
 pub fn export_quiet(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
     run_export(project, spec, false, None, None)
+}
+
+/// Render only the project's mixed audio to `output`. The video branch is
+/// attached to a null sink so the filter graph is complete, but no video is
+/// encoded; this is the continuous audio master used by the monitor to avoid
+/// mpv reinitialising its audio chain at every EDL source switch.
+pub fn export_audio_quiet(project: &Project, output: &Path) -> Result<ExportPlan, ExportError> {
+    let plan = compile_export(project)?;
+    let mut graph = plan.graph.clone();
+    graph.push_str(";\n[vout]nullsink\n");
+    let script = NamedTempFile::new()?;
+    std::fs::write(script.path(), &graph)?;
+
+    let mut args: Vec<String> = vec!["-y".into()];
+    for path in &plan.inputs {
+        args.push("-i".into());
+        args.push(path.display().to_string());
+    }
+    args.push("-/filter_complex".into());
+    args.push(script.path().display().to_string());
+    args.push("-map".into());
+    args.push("[aout]".into());
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-b:a".into());
+    args.push("192k".into());
+    args.push("-vn".into());
+    args.push("--".into());
+    args.push(output.display().to_string());
+    run_ffmpeg_opt(&args, false)?;
+    Ok(plan)
 }
 
 /// [`export_quiet`] reporting the output position (seconds) as it renders —
