@@ -328,7 +328,8 @@ video/
         ├── history.json
         ├── clipboard.json
         └── cache/
-            ├── proxy/         # video proxies + continuous audio masters
+            ├── proxy/         # rendered video proxies
+            ├── audio/         # continuous preview audio masters
             ├── export/
             └── black/
 ```

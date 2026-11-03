@@ -181,10 +181,10 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   retimes, transitions, foreign picture sizes, audible-mix spans — using the
   *export* graph (no second filter chain to drift), cached under
   `.nile/<stem>/cache/proxy`. When an EDL has gaps/proxy entries it also
-  renders a continuous audio master (`.m4a`) and adds it as an external mpv
-  audio track, so EDL source switches don't restart the audio chain. Pure
-  raw-cut timelines keep the instant path. See
-  `docs/pitfalls/mpv-ffmpeg.md`.
+  renders a continuous audio master under `cache/audio` (`.m4a`) and adds it
+  as an external mpv audio track, so EDL source switches don't restart the
+  audio chain. Its key ignores clip ids/raw split seams; pure raw-cut
+  timelines keep the instant path. See `docs/pitfalls/mpv-ffmpeg.md`.
 - **Export presets are local.** `preview` is VAAPI 6M with CPU fallback,
   `balanced` x264 fast CRF 22, `max` x265 medium CRF 20; direct flags
   override. The chunk scheduler is opt-in (`--parallel N`), cuts at cut
