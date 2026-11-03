@@ -590,13 +590,18 @@ pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> 
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
+    let audio = match crate::preview::prune_audio(&app.path, age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
     let export = match crate::cmd::schedule::prune_export(&app.path, age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
     Some(format!(
-        "{}; export: {}",
+        "{}; audio: {}; export: {}",
         proxy.summary_named(dry_run, "proxy render"),
+        audio.summary_named(dry_run, "preview audio"),
         export.summary_named(dry_run, "export chunk")
     ))
 }
