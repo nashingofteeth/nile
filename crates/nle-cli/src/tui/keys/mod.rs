@@ -301,7 +301,7 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             }
         }
         // `X` — cross-dissolve at the boundary; a count is the duration in
-        // frames (default 1 s). On an existing blend the same key opens its
+        // frames (default 12). On an existing blend the same key opens its
         // length form, with the count pre-filled.
         KeyCode::Char('X') => {
             if transition_target(app).is_some() {

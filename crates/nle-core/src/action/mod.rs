@@ -17,6 +17,9 @@ use crate::project::Project;
 use crate::time::{Seconds, frame_of, grid_time, secs_f64};
 use crate::timeline::{Effect, Segment, TrackKind, TransitionKind};
 
+/// Default crossfade length, in project frames.
+pub const DEFAULT_TRANSITION_FRAMES: i64 = 12;
+
 /// What an action addresses: the segment under a timeline position, a
 /// clip by id (stable across edits), or a segment by index (as printed
 /// by `nile show`).

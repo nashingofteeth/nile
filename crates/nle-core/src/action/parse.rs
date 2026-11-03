@@ -5,7 +5,7 @@ use crate::edit::EditError;
 use crate::time::{Seconds, frames_to_seconds, parse_signed_time, secs_f64};
 use crate::timeline::{Effect, MAX_TIMELINE_SECONDS, TrackKind, TransitionKind};
 
-use super::{Action, Edge, GapLen, Target, TransitionLen};
+use super::{Action, DEFAULT_TRANSITION_FRAMES, Edge, GapLen, Target, TransitionLen};
 
 /// Defaults for the `:cmd` parser — the TUI supplies the playhead, the
 /// active track, and the clip under the playhead so commands can omit
@@ -484,7 +484,7 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     }
                     TransitionLen::Percent(p)
                 }
-                (None, None, None) => TransitionLen::Seconds(1.0),
+                (None, None, None) => TransitionLen::Frames(DEFAULT_TRANSITION_FRAMES),
             };
             f.finish(
                 ":transition [dissolve|fade] [--at T] [--track N] \

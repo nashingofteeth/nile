@@ -703,6 +703,24 @@ fn transitions() {
 }
 
 #[test]
+fn transition_defaults_to_twelve_frames() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["transition", "--at", "2"]);
+    let shown = s.ok(&["show"]);
+    assert!(
+        shown.contains("(12f)"),
+        "default should be 12 frames:\n{shown}"
+    );
+    s.export("default-transition.mp4");
+    s.assert_dur(
+        "default-transition.mp4",
+        5.6,
+        "12 frames at 30 fps removes 0.4 s from the timeline",
+    );
+}
+
+#[test]
 fn parallel_export_splits_at_a_transition_midpoint() {
     let s = Sandbox::new();
     s.base();

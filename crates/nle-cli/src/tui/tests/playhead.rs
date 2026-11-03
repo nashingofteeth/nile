@@ -39,7 +39,7 @@ fn playhead_placement_after_each_action() {
         (
             "lll",
             "X",
-            2.5,
+            2.8,
             "a transition lands in the middle of the blend",
         ),
         ("lll", "dd", 3.0, "deleting the gap lands on the seam"),
