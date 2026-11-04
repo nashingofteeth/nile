@@ -167,7 +167,11 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
         let x0 = marker_col(cum, total, bar.width);
         let start = cum;
         cum += len;
-        let x1 = marker_col(cum, total, bar.width);
+        let x1 = if cum >= total - 1e-9 {
+            bar.width
+        } else {
+            marker_col(cum, total, bar.width)
+        };
         match seg {
             TimelineSegment::Gap(_) => {}
             TimelineSegment::Transition(_) => {
