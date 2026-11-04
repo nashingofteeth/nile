@@ -162,9 +162,12 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
     }
     let cell = total / f64::from(bar.width);
     let gap_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
-    let band_style = Style::default().bg(Color::Green);
-    let wave_style = Style::default().fg(Color::LightGreen).bg(Color::Green);
-    let divider_style = Style::default().fg(Color::Black).bg(Color::Green);
+    // A dark green band under bright green peaks keeps the row green while
+    // making the waveform readable; plain Green on LightGreen was too close.
+    let band = Color::Rgb(0, 72, 0);
+    let band_style = Style::default().bg(band);
+    let wave_style = Style::default().fg(Color::LightGreen).bg(band);
+    let divider_style = Style::default().fg(Color::Black).bg(band);
     let trans_style = Style::default().fg(Color::Black).bg(Color::Magenta);
     let mut cells: Vec<(char, Style)> = vec![(' ', gap_style); bar.width as usize];
     let mut cum = 0.0f64;
