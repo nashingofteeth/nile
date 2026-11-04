@@ -97,14 +97,12 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 
 ## Model invariants
 
-- **Compatibility: none, by design.** Single-user project; project files are
-  local state, not a distributed format. `nile.json` and the files under
-  `.nile/<stem>/` may change shape any time; old files are **rejected with a
-  clear error** (never silently misread) and the fix is "rebuild it"
-  (`./demo.sh`). Bump the format
-  version; don't write migration code. The project file is plain JSON with
-  exact rational times (`"30000/1001"`); floats appear only at ffmpeg/IPC
-  boundaries.
+- **Compatibility: none, by design.** Single-user project; `nile.json` and
+  `.nile/<stem>/` are local state, not a distributed format. They may change
+  shape any time; old files are **rejected with a clear error** (never silently
+  misread) and the fix is "rebuild it" (`./demo.sh`). Bump the version; no
+  migration code. Times are exact rationals (`"30000/1001"`); floats only at
+  the ffmpeg/IPC boundary.
 - **Frames are 0-based everywhere** (`f0` = first frame). A timeline of `dur`
   spans `[0, dur)`; the last representable position is `dur - 1/fps`.
 - **Every write path clamps clips to their media.** `Document::save` clamps
@@ -125,11 +123,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   sub-frame stump; the renderer skips zero-width segments.
 - **Speed.** `Clip.speed` is a rational rate; timeline duration = source /
   speed. Cross the boundary only via `source_span` (edits) or `Clip::source_at`
-  / `timeline_offset_of` (everything else) — the playhead anchor once missed
-  the factor. A speed change always ripples, and the monitor proxies any
-  non-1× clip because an EDL entry can't retime. The CLI/TUI take a
-  **percentage** (100 = normal); convert at that boundary only — the model and
-  `nile show` keep the rate (`@2×`).
+  / `timeline_offset_of` (everything else). A speed change always ripples and
+  the monitor proxies any non-1× clip (an EDL entry can't retime). The CLI/TUI
+  take a **percentage** (100 = normal); the model keeps the rate (`@2×`).
 - **Transitions.** Trimming beside or through a blend moves the blend, never a
   gap; a retime scales each side's span, not its rate. A blend is opaque,
   video-only and keeps its sides contiguous at the neighbour's rate. Full
@@ -150,19 +146,16 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   the next undo refuses ("history entry does not apply"). Both stacks persist.
   Track add/mute/rm are whole-list changes (`Change::Tracks`), verified by
   exact equality.
-- **State lives with the project.** `nile.json` is the project; its
-  `.nile/<stem>/` directory holds `history.json`, `clipboard.json`, and
-  `cache/{proxy,black}`. A directory default can be set with
-  `nile default FILE` (`.nile/config.json`); `--project` overrides it.
-  Legacy adjacent sidecars are copied in once; don't add new scattered state
-  files. The playhead stays in `Project.playhead`.
-  The TUI adopts foreign changes (project, history, register, playhead) and
+- **State lives with the project.** `nile.json` plus `.nile/<stem>/`
+  (`history.json`, `clipboard.json`, `cache/`); `nile default FILE` sets a
+  directory default (`.nile/config.json`), `--project` overrides. Legacy
+  adjacent sidecars are copied in once — don't add scattered state files. The
+  playhead stays in `Project.playhead`. The TUI adopts foreign changes and
   refuses to clobber (`persist_playhead` → `Ok(false)`).
 - **Gaps and the pool.** `Mode::Pool(PoolState)` keeps "pool open" and its
   selection together; tracks are 1-based (0 refused); a shorter track pads
   with a trailing gap in the row and the preview. The pool remembers the
-  selected asset (by id), preview clock, and timeline resume across toggles
-  and command detours (`remember_pool`); closing restores the cursor.
+  selected asset, preview clock and timeline resume (`remember_pool`).
 - **One quantizer per axis.** Draw from the same function the playhead/cut
   indicator uses (`marker_col`), or drawn edges drift from real cuts.
 
@@ -180,19 +173,10 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - **The monitor proxies whatever `edl://` can't express** — effects, non-1×
   retimes, transitions, foreign picture sizes, audible-mix spans — using the
   *export* graph (no second filter chain to drift), cached under
-  `.nile/<stem>/cache/proxy`. When an EDL has gaps/proxy entries it also
-  renders a continuous audio master under `cache/audio` (`.m4a`) and adds it
-  as an external mpv audio track, so EDL source switches don't restart the
-  audio chain. Its key ignores clip ids/raw split seams; pure raw-cut
-  timelines keep the instant path. See `docs/pitfalls/mpv-ffmpeg.md`.
-- **Export presets are local.** `preview` is VAAPI 6M with CPU fallback,
-  `balanced` x264 fast CRF 22, `max` x265 medium CRF 20; direct flags
-  override. The chunk scheduler is opt-in (`--parallel N`), cuts at cut
-  points and transition midpoints; video chunks are stream-copied and their
-  PCM audio is encoded AAC once at the final mux. Chunks cache under
-  `.nile/<stem>/cache/export`; it falls back to one encoder when segment
-  durations or source cuts are off the frame grid. Auto stays single-worker
-  until a benchmark shows a win.
+  `.nile/<stem>/cache/proxy`; a gap/proxy EDL also gets a continuous audio
+  master (`cache/audio`). See `docs/pitfalls/mpv-ffmpeg.md`.
+- **Export presets and the chunk scheduler are local design choices.** Auto
+  stays single-worker; details and benchmarks: `PLAN.md` (M6).
 - **Export stays byte-identical for the simple case:** one video track + no
   audio track keeps the classic concat path; otherwise every track is padded
   to the timeline length, video layers `overlay` bottom→top (upper gaps
