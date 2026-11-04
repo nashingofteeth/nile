@@ -171,13 +171,7 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
         match seg {
             TimelineSegment::Gap(_) => {}
             TimelineSegment::Transition(_) => {
-                for (x, cell) in cells
-                    .iter_mut()
-                    .enumerate()
-                    .take(x1 as usize)
-                    .skip(x0 as usize)
-                {
-                    let _ = x;
+                for cell in cells.iter_mut().take(x1 as usize).skip(x0 as usize) {
                     *cell = ('~', Style::default().fg(Color::Magenta));
                 }
             }
@@ -189,7 +183,7 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                     continue;
                 }
                 for x in x0..x1 {
-                    let t = start + (f64::from(x) + 0.5) * cell;
+                    let t = (f64::from(x) + 0.5) * cell;
                     let offset = (t - start).max(0.0);
                     let source =
                         c.source_at(Seconds::new((offset * 1_000_000.0) as i64, 1_000_000));
