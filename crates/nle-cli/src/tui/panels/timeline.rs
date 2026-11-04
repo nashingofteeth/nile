@@ -231,10 +231,10 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                 // *into* a gap is dark.
                 let gap = matches!(seg, TimelineSegment::Gap(_));
                 let bg = if gap { Color::DarkGray } else { Color::Green };
-                // A half-cell block is visible at terminal sizes. The
-                // segment background (green for clip cuts, dark for gap
-                // boundaries) keeps it from reading as a hole.
-                cells[x as usize] = ('▌', Style::default().fg(Color::Black).bg(bg));
+                // A half-cell block is visible at terminal sizes. Use a
+                // light foreground: black-on-green can disappear in themes
+                // that map black to the terminal background.
+                cells[x as usize] = ('▌', Style::default().fg(Color::White).bg(bg));
             }
         }
     }
