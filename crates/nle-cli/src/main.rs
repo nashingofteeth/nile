@@ -17,6 +17,7 @@ mod preview;
 mod proxy;
 #[cfg(feature = "tui")]
 mod tui;
+mod waveform;
 
 // Declared after the macros: a child module only sees a macro_rules! that
 // precedes the `mod` declaration.

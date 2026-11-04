@@ -30,7 +30,13 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     } else {
         app.project.timeline.tracks.len()
     };
-    let (timeline_h, keys, msg_h) = panel_heights(track_count, f.area().height);
+    let wave_rows = usize::from(
+        !pool_strip_active(app)
+            && app
+                .track()
+                .is_some_and(|t| t.kind == nle_core::TrackKind::Audio),
+    );
+    let (timeline_h, keys, msg_h) = panel_heights(track_count, wave_rows, f.area().height);
     // The add form carries its own key hints and needs the rows for its
     // fields; drop the bottom cheat-sheet while it is open.
     let keys = if is_fx(app) && fx_state(app).is_some_and(|st| st.form.is_some()) {
@@ -70,10 +76,12 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 /// one row per track plus the marker row and two borders, and the keys/message
 /// panels are dropped before a track has to be hidden. Returns
 /// `(timeline_h, keys_h, msg_h)`. Pure so the sizing is testable.
-pub(crate) fn panel_heights(track_count: usize, height: u16) -> (u16, u16, u16) {
+pub(crate) fn panel_heights(track_count: usize, wave_rows: usize, height: u16) -> (u16, u16, u16) {
     let track_rows = track_count.max(1) as u16;
-    // Two borders + one row per track + the marker row.
-    let want_tl = track_rows.saturating_add(3);
+    // Two borders + one row per track + the optional waveform row + marker.
+    let want_tl = track_rows
+        .saturating_add(wave_rows as u16)
+        .saturating_add(3);
     // The status row is always present; keep a few rows for the info panel.
     let min_info = 3u16;
     let max_tl = height.saturating_sub(1 + min_info).max(4);

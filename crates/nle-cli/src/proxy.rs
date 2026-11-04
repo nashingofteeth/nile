@@ -203,13 +203,13 @@ pub fn prune_at(
 }
 
 /// A cache entry's name: `<hash>.mp4`, or a crashed render's
-/// `<hash>.tmp-<token>.mp4/mkv/m4a`. The hash is written as `{hash:x}`, so it
-/// is 1–16 hex digits; anything else in the directory is not ours to delete.
+/// `<hash>.tmp-<token>.mp4/mkv/m4a/wave`. The hash is written as `{hash:x}`,
+/// so it is 1–16 hex digits; anything else is not ours to delete.
 fn is_entry_name(name: &str) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
-    if ext != "mp4" && ext != "mkv" && ext != "m4a" {
+    if ext != "mp4" && ext != "mkv" && ext != "m4a" && ext != "wave" {
         return false;
     }
     let (hash, pid) = match stem.split_once(".tmp-") {
@@ -896,6 +896,7 @@ mod tests {
             "dead.tmp-1.mp4",
             "dead.mkv",
             "dead.m4a",
+            "dead.wave",
             "dead.tmp-1.mkv",
             "dead.tmp-A1b2.mkv",
         ] {

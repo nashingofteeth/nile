@@ -8,8 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use nle_core::project::Project;
-use nle_core::timeline::{Segment as TimelineSegment, Track};
+use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind};
 use nle_core::track_label;
+use nle_core::{Seconds, secs_f64};
 
 use super::super::motion::{marker_col, on_boundary, truncate_label};
 use super::super::{App, Mode, pool_strip_active, secs};
@@ -49,8 +50,10 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         app.total().max(0.001)
     };
 
-    // One row per visible track; the marker row takes the row below them.
-    let capacity = inner.height.saturating_sub(1) as usize;
+    // One row per visible track, an optional waveform row for an active
+    // audio track, then the marker row.
+    let wave_rows = usize::from(track_kind(&app.project, app.active()) == Some(TrackKind::Audio));
+    let capacity = inner.height.saturating_sub(1 + wave_rows as u16) as usize;
     let (start, count) = track_window(n, app.active(), capacity.max(1));
 
     for (row, ti) in (start..start + count).enumerate() {
@@ -92,7 +95,36 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         );
     }
 
-    let marker_y = inner.y + count as u16;
+    let wave_y = inner.y + count as u16;
+    if wave_rows > 0 && wave_y < inner.y + inner.height {
+        if label_w > 0 {
+            let gutter = Rect {
+                x: inner.x,
+                y: wave_y,
+                width: label_w,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "  ~ ",
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                gutter,
+            );
+        }
+        let bar = Rect {
+            x: inner.x + label_w,
+            y: wave_y,
+            width: bar_w,
+            height: 1,
+        };
+        draw_waveform_row(f, bar, app, &tracks[app.active()], total);
+    }
+
+    let marker_y = wave_y + wave_rows as u16;
+    if marker_y >= inner.y + inner.height {
+        return;
+    }
     let bar = Rect {
         x: inner.x + label_w,
         y: marker_y,
@@ -100,6 +132,83 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         height: 1,
     };
     draw_marker_row(f, bar, app, total, in_extend);
+}
+
+fn track_kind(project: &Project, ti: usize) -> Option<TrackKind> {
+    project.timeline.track(ti).map(|t| t.kind)
+}
+
+const WAVE_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Draw one row of audio peaks for the active audio track. Peaks are cached
+/// by the waveform worker; a cold asset shows a flat row until it arrives.
+fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64) {
+    if bar.width == 0 {
+        return;
+    }
+    let cell = total / f64::from(bar.width);
+    let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); bar.width as usize];
+    let mut cum = 0.0f64;
+    for seg in &track.segments {
+        let len = secs(&seg.duration());
+        let x0 = marker_col(cum, total, bar.width);
+        let start = cum;
+        cum += len;
+        let x1 = marker_col(cum, total, bar.width);
+        match seg {
+            TimelineSegment::Gap(_) => {}
+            TimelineSegment::Transition(_) => {
+                for (x, cell) in cells
+                    .iter_mut()
+                    .enumerate()
+                    .take(x1 as usize)
+                    .skip(x0 as usize)
+                {
+                    let _ = x;
+                    *cell = ('~', Style::default().fg(Color::Magenta));
+                }
+            }
+            TimelineSegment::Clip(c) => {
+                let Some(wave) = app.waveforms.get(&c.asset) else {
+                    continue;
+                };
+                if wave.duration <= 0.0 || wave.peaks.is_empty() {
+                    continue;
+                }
+                for x in x0..x1 {
+                    let t = start + (f64::from(x) + 0.5) * cell;
+                    let offset = (t - start).max(0.0);
+                    let source =
+                        c.source_at(Seconds::new((offset * 1_000_000.0) as i64, 1_000_000));
+                    let pos = secs_f64(&source) / wave.duration;
+                    let idx = (pos * wave.peaks.len() as f64).floor() as usize;
+                    let peak = wave
+                        .peaks
+                        .get(idx.min(wave.peaks.len() - 1))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let level = (peak.sqrt() * 8.0).round() as usize;
+                    cells[x as usize] = (
+                        WAVE_BLOCKS[level.min(WAVE_BLOCKS.len() - 1)],
+                        Style::default().fg(Color::Green),
+                    );
+                }
+            }
+        }
+    }
+
+    let mut spans: Vec<Span> = Vec::new();
+    let mut i = 0usize;
+    while i < cells.len() {
+        let style = cells[i].1;
+        let mut text = String::new();
+        while i < cells.len() && cells[i].1 == style {
+            text.push(cells[i].0);
+            i += 1;
+        }
+        spans.push(Span::styled(text, style));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), bar);
 }
 
 /// Which tracks to show: all of them when they fit, else a window of

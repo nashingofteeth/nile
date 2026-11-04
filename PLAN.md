@@ -302,6 +302,9 @@ below.)
   ignoring split ids/seams), adds it as an external audio track, and lets the
   raw/proxy video EDL switch without pulling the audio clock down. Pure
   raw-cut timelines keep the instant path.
+- **Waveform overview:** an active audio track gets a waveform row from cached
+  low-rate peaks under `cache/wave`; peaks are keyed by asset path + mtime and
+  mapped through clip source spans/speed. Rendering is pure once loaded.
 - **Composited preview:** mpv plays one source per EDL span and can't blend or
   mix, so a window where another unmuted track is audible — a second video
   layer under an overlapping clip, or a separate audio track — is rendered as
