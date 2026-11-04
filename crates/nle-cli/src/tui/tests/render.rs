@@ -240,6 +240,14 @@ fn the_active_audio_track_shows_a_waveform_row() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     let mut p = asset_project();
+    p.media[0].probe.streams.push(nle_core::media::RawStream {
+        index: 1,
+        codec_type: Some("audio".into()),
+        codec_name: Some("aac".into()),
+        sample_rate: Some("48000".into()),
+        channels: Some(2),
+        ..Default::default()
+    });
     let ti = p.timeline.add_track(TrackKind::Audio);
     p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(nle_core::Clip {
         id: 2,
@@ -277,6 +285,54 @@ fn the_active_audio_track_shows_a_waveform_row() {
         .flat_map(|y| (0..40).map(move |x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')))
         .collect();
     assert!(text.contains('█'), "waveform blocks should render:\n{text}");
+}
+
+// Embedded audio in a video track is still audio: the active video track
+// gets the same waveform row as an audio track.
+#[test]
+fn a_video_tracks_embedded_audio_shows_a_waveform_row() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut p = asset_project();
+    p.media[0].probe.streams.push(nle_core::media::RawStream {
+        index: 1,
+        codec_type: Some("audio".into()),
+        codec_name: Some("aac".into()),
+        sample_rate: Some("48000".into()),
+        channels: Some(2),
+        ..Default::default()
+    });
+    let mut app = App::new(p, temp_project_path("wave-video"));
+    app.active_track = 0;
+    app.waveforms.insert(
+        1,
+        Waveform {
+            peaks: vec![1.0; 8],
+            duration: 10.0,
+        },
+    );
+    let mut term = Terminal::new(TestBackend::new(40, 8)).unwrap();
+    term.draw(|f| {
+        render_timeline(
+            f,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 8,
+            },
+            &app,
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let text: String = (0..8)
+        .flat_map(|y| (0..40).map(move |x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')))
+        .collect();
+    assert!(
+        text.contains('█'),
+        "video audio should render a waveform:\n{text}"
+    );
 }
 
 // The full render shows every track's gutter on a normal terminal.

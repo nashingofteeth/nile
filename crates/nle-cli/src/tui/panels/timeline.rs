@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use nle_core::project::Project;
-use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind};
+use nle_core::timeline::{Segment as TimelineSegment, Track};
 use nle_core::track_label;
 use nle_core::{Seconds, secs_f64};
 
@@ -50,9 +50,13 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         app.total().max(0.001)
     };
 
-    // One row per visible track, an optional waveform row for an active
-    // audio track, then the marker row.
-    let wave_rows = usize::from(track_kind(&app.project, app.active()) == Some(TrackKind::Audio));
+    // One row per visible track, an optional waveform row for the active
+    // track when it carries audio (including audio embedded in video), then
+    // the marker row.
+    let wave_rows = usize::from(
+        app.track()
+            .is_some_and(|track| track_has_audio(&app.project, track)),
+    );
     let capacity = inner.height.saturating_sub(1 + wave_rows as u16) as usize;
     let (start, count) = track_window(n, app.active(), capacity.max(1));
 
@@ -134,8 +138,17 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     draw_marker_row(f, bar, app, total, in_extend);
 }
 
-fn track_kind(project: &Project, ti: usize) -> Option<TrackKind> {
-    project.timeline.track(ti).map(|t| t.kind)
+pub(crate) fn track_has_audio(project: &Project, track: &Track) -> bool {
+    !track.muted
+        && track.segments.iter().any(|seg| match seg {
+            TimelineSegment::Clip(c) => project.asset(c.asset).is_some_and(|a| a.probe.has_audio()),
+            TimelineSegment::Transition(t) => [&t.a, &t.b].into_iter().any(|side| {
+                side.asset()
+                    .and_then(|id| project.asset(id))
+                    .is_some_and(|a| a.probe.has_audio())
+            }),
+            TimelineSegment::Gap(_) => false,
+        })
 }
 
 const WAVE_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
