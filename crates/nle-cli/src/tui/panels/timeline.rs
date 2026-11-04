@@ -162,7 +162,9 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
     }
     let cell = total / f64::from(bar.width);
     let gap_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
-    let clip_style = Style::default().fg(Color::Black).bg(Color::Green);
+    let band_style = Style::default().bg(Color::Green);
+    let wave_style = Style::default().fg(Color::LightGreen).bg(Color::Green);
+    let divider_style = Style::default().fg(Color::Black).bg(Color::Green);
     let trans_style = Style::default().fg(Color::Black).bg(Color::Magenta);
     let mut cells: Vec<(char, Style)> = vec![(' ', gap_style); bar.width as usize];
     let mut cum = 0.0f64;
@@ -209,7 +211,7 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                         let level = (peak.sqrt() * 8.0).round() as usize;
                         ch = WAVE_BLOCKS[level.min(WAVE_BLOCKS.len() - 1)];
                     }
-                    cells[x as usize] = (ch, clip_style);
+                    cells[x as usize] = (ch, if ch == ' ' { band_style } else { wave_style });
                 }
             }
         }
@@ -233,7 +235,7 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                 let style = match seg {
                     TimelineSegment::Gap(_) => gap_style,
                     TimelineSegment::Transition(_) => trans_style,
-                    TimelineSegment::Clip(_) => clip_style,
+                    TimelineSegment::Clip(_) => divider_style,
                 };
                 cells[x as usize] = ('▏', style);
             }
