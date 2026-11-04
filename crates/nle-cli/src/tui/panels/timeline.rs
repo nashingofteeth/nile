@@ -167,7 +167,6 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
     let band = Color::Rgb(0, 72, 0);
     let band_style = Style::default().bg(band);
     let wave_style = Style::default().fg(Color::LightGreen).bg(band);
-    let divider_style = Style::default().fg(Color::Black).bg(band);
     let trans_style = Style::default().fg(Color::Black).bg(Color::Magenta);
     let mut cells: Vec<(char, Style)> = vec![(' ', gap_style); bar.width as usize];
     let mut cum = 0.0f64;
@@ -216,31 +215,6 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                     }
                     cells[x as usize] = (ch, if ch == ' ' { band_style } else { wave_style });
                 }
-            }
-        }
-    }
-
-    // Mirror the label row's cut dividers. A transition boundary is soft;
-    // everything else gets the target segment's background plus a black
-    // `▏`, exactly like the video track.
-    cum = 0.0;
-    for (i, seg) in track.segments.iter().enumerate() {
-        let start = cum;
-        cum += secs(&seg.duration());
-        if i > 0 {
-            let soft = matches!(seg, TimelineSegment::Transition(_))
-                || track
-                    .segments
-                    .get(i - 1)
-                    .is_some_and(|s| matches!(s, TimelineSegment::Transition(_)));
-            if !soft {
-                let x = marker_col(start, total, bar.width);
-                let style = match seg {
-                    TimelineSegment::Gap(_) => gap_style,
-                    TimelineSegment::Transition(_) => trans_style,
-                    TimelineSegment::Clip(_) => divider_style,
-                };
-                cells[x as usize] = ('▏', style);
             }
         }
     }
