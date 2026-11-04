@@ -1,7 +1,8 @@
 name: check
 
 # The same gates as scripts/check.sh, minus the parts that only make sense on
-# the developer's machine (`cargo install`, which just rewrites ~/.cargo/bin).
+# the developer's machine (`scripts/install.sh`, which rewrites ~/.cargo/bin),
+# except for one smoke check that the alias it creates still runs.
 # demo.sh is included: its pixel assertions are the end-to-end contract.
 
 on:
@@ -36,7 +37,7 @@ jobs:
       # lld: .cargo/config.toml links through clang with `-fuse-ld=lld`, and
       #      targets the runner's CPU (-C target-cpu=native).
       # xxd: demo.sh samples pixels with it.
-      # shellcheck: the two scripts below are part of the contract.
+      # shellcheck: the scripts below are part of the contract.
       - name: Install system tools
         run: |
           sudo apt-get update
@@ -87,6 +88,15 @@ jobs:
 
       - name: Build release
         run: cargo build --locked --release
+
+      # The install path is a documented compatibility promise (README: `nile`
+      # plus an `nle` alias), and it is the one gate check.sh has that CI did
+      # not. The runner is discarded, so installing here is free.
+      - name: Install and alias
+        run: |
+          ./scripts/install.sh
+          nile --version
+          nle --version
 
       - name: Demo (pixel checks)
         run: ./demo.sh

@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 cargo fmt --all --check                      # formatting is enforced
 if command -v shellcheck >/dev/null; then    # CI always has it
-  shellcheck scripts/check.sh demo.sh
+  shellcheck scripts/check.sh scripts/install.sh demo.sh
 else
   echo "shellcheck not installed — skipping (CI runs it)" >&2
 fi
