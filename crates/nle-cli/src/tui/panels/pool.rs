@@ -181,7 +181,7 @@ pub(crate) fn render_pool_strip(f: &mut Frame, area: Rect, app: &App, st: &PoolS
         width: inner.width,
         height: 1,
     };
-    draw_track_row(f, row, app, &track, total, false);
+    draw_track_row(f, row, app, &track, total, false, app.active());
     let marker = Rect {
         x: inner.x,
         y: inner.y + 1,

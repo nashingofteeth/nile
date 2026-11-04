@@ -349,12 +349,18 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - **Deferred:** auto-enabling multi-lane scheduling on a workload where a
   local benchmark shows a win; this machine's x264/VAAPI short exports did not.
 
+## Visual selection (shipped)
+
+- `v` selects whole segments on the active track; motions extend the range.
+- `d` deletes the selected range as one undo step; `y` copies it into a
+  session visual register; `p` pastes it at a cut; `V` narrows to one segment.
+- Range delete refuses transitions (their neighbour spans need the normal
+  delete path); paste requires a cut and reassigns clip/transition ids.
+
 ## Open / deferred
 
 - Pool **keyframe `j`/`k`** — discussed, not built.
-- `v` visual/select mode — deferred.
 
 ## Open decisions (non-blocking)
 
-1. `v` visual/select semantics.
-2. M7 GUI technology.
+1. M7 GUI technology.

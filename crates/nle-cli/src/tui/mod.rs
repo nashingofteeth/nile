@@ -41,11 +41,21 @@ use jobs::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
     Normal,
+    Visual(VisualState),
     Command(String),
     Extend(ExtendState),
     Pool(PoolState),
     Fx(FxState),
     Transition(TransitionForm),
+}
+
+/// Visual segment selection on one track. `anchor` and `cursor` are segment
+/// indices; the selected set is the inclusive range between them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisualState {
+    pub track: usize,
+    pub anchor: usize,
+    pub cursor: usize,
 }
 
 /// Extend-mode session state. All bounds are timeline seconds; `hi` is
@@ -254,6 +264,8 @@ pub struct App {
     pub active_track: usize,
     /// The background render/import, if one is running.
     job: Option<Job>,
+    /// Segments copied by visual-mode `y`; session-only, like a vim register.
+    pub(crate) visual_register: Vec<nle_core::timeline::Segment>,
     /// Cached peak arrays for the waveform strip, by asset id.
     pub(crate) waveforms: HashMap<u32, Waveform>,
     /// The waveform decode worker, if one is running.
@@ -306,6 +318,7 @@ impl App {
             fx_scale_lock: true,
             active_track: 0,
             job: None,
+            visual_register: Vec::new(),
             waveforms: HashMap::new(),
             wave_job: None,
             preview: None,
@@ -848,6 +861,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     // simply discards a stale worker's results.
     app.waveforms.clear();
     app.wave_job = None;
+    app.visual_register.clear();
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())

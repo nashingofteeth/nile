@@ -25,6 +25,7 @@ pub(crate) mod command;
 pub(crate) mod extend;
 pub(crate) mod fx;
 pub(crate) mod pool;
+pub(crate) mod visual;
 
 pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     // Ctrl-C quits even in raw mode (no SIGINT is generated). One guard for
@@ -42,6 +43,8 @@ pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         command_key(app, player, buf, key);
     } else if matches!(app.mode, Mode::Extend(_)) {
         extend_key(app, player, key);
+    } else if matches!(app.mode, Mode::Visual(_)) {
+        visual::visual_key(app, player, key);
     } else if is_pool(app) {
         pool_key(app, player, key);
     } else if matches!(app.mode, Mode::Transition(_)) {
@@ -290,6 +293,7 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 },
             );
         }
+        KeyCode::Char('v') => visual::enter_visual(app),
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('m') => open_pool(app, player),
         // `x` — the effects panel for the clip under the playhead, or the

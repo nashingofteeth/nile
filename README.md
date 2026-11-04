@@ -97,6 +97,7 @@ edits keep NLE mnemonics (`i`/`o` are trim in/out; `s`/`S` split).
 |---|---|
 | `i` / `o` | Trim in/out; uppercase (`I`/`O`) ripples |
 | `s` / `S` | Split at the playhead |
+| `v` | Visual segment selection |
 | `_` | Insert a gap (count = frames) |
 | `dd` / `D` | Delete (leave a gap) / delete and ripple |
 | `yy` | Yank clip or gap into the shared register |
@@ -117,6 +118,11 @@ edits keep NLE mnemonics (`i`/`o` are trim in/out; `s`/`S` split).
 | `[` / `]` | Enter extend mode on the right/left side of a cut |
 | `r` | Speed command prompt (100 = normal) |
 | `R` | Reload the project from disk |
+
+**Visual mode.** `v` selects whole segments on the active track; motions
+(`h/l`, `j/k`, `w/b`, `n/N`, `gg/G`, counts) extend the range. `d` deletes the
+selected range, `y` copies it into the session visual register, and `p` pastes
+it at a cut. `V` narrows the selection to one segment; `v` or `Esc` cancels.
 
 **Effects panel.** `j`/`k` select, `1`–`9` edit that row, `Enter` edits, `d`
 drops, `D` clears. Add crop/scale/eq/offset with `c`/`s`/`e`/`o`; LUTs are
