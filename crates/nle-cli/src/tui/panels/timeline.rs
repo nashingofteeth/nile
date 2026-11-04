@@ -204,6 +204,26 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
         }
     }
 
+    // Mirror the label row's cut dividers across the waveform strip. A
+    // transition boundary is soft (the blend owns both sides); everything
+    // else gets a hard divider so audio cuts are visible.
+    cum = 0.0;
+    for (i, seg) in track.segments.iter().enumerate() {
+        let start = cum;
+        cum += secs(&seg.duration());
+        if i > 0 {
+            let soft = matches!(seg, TimelineSegment::Transition(_))
+                || track
+                    .segments
+                    .get(i - 1)
+                    .is_some_and(|s| matches!(s, TimelineSegment::Transition(_)));
+            if !soft {
+                let x = marker_col(start, total, bar.width);
+                cells[x as usize] = ('▏', Style::default().fg(Color::DarkGray));
+            }
+        }
+    }
+
     let mut spans: Vec<Span> = Vec::new();
     let mut i = 0usize;
     while i < cells.len() {
