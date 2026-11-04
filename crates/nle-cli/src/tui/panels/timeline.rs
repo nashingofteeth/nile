@@ -223,7 +223,16 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                     .is_some_and(|s| matches!(s, TimelineSegment::Transition(_)));
             if !soft {
                 let x = marker_col(start, total, bar.width);
-                cells[x as usize] = ('▏', Style::default().fg(Color::DarkGray));
+                // A bare glyph on the black waveform row reads as a missing
+                // block; fill the divider cell with the neighbouring row
+                // background so it reads as a cut.
+                let gap = matches!(seg, TimelineSegment::Gap(_))
+                    || track
+                        .segments
+                        .get(i - 1)
+                        .is_some_and(|s| matches!(s, TimelineSegment::Gap(_)));
+                let bg = if gap { Color::DarkGray } else { Color::Green };
+                cells[x as usize] = ('▏', Style::default().fg(Color::Black).bg(bg));
             }
         }
     }
