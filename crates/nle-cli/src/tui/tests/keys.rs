@@ -138,6 +138,23 @@ fn completes_gg_needs_both_keys() {
 }
 
 #[test]
+fn both_split_keys_split_at_the_playhead() {
+    for split in ['s', 'S'] {
+        let mut app = App::new(asset_project(), temp_project_path("split-alias"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        let before = app.project.timeline.video_track().unwrap().segments.len();
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key(split));
+        assert_eq!(
+            app.project.timeline.video_track().unwrap().segments.len(),
+            before + 1,
+            "{split} should split the clip"
+        );
+    }
+}
+
+#[test]
 fn speed_key_opens_the_rate_prompt() {
     let mut app = App::new(asset_project(), temp_project_path("speed-key"));
     let fake = FakeMpv::new();

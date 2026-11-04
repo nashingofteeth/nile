@@ -231,7 +231,9 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 },
             );
         }
-        KeyCode::Char('s') => {
+        // `s` is the NLE split mnemonic; `S` is a free shifted alias, so
+        // both hands and both vim/NLE habits land on the same action.
+        KeyCode::Char('s') | KeyCode::Char('S') => {
             run_action(
                 app,
                 player,

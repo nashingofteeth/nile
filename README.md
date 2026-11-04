@@ -72,7 +72,9 @@ automatically. Shell commands and an open TUI adopt each other's changes.
 ## TUI
 
 Run `nile edit`. The timeline panel shows one row per track; navigation, edits,
-and the monitor follow the **active track**.
+and the monitor follow the **active track**. The keymap is vim-flavored rather
+than a vim clone: motions and pending operators use vim vocabulary, while
+edits keep NLE mnemonics (`i`/`o` are trim in/out; `s`/`S` split).
 
 ### Transport and motion
 
@@ -94,7 +96,7 @@ and the monitor follow the **active track**.
 | Key | Action |
 |---|---|
 | `i` / `o` | Trim in/out; uppercase (`I`/`O`) ripples |
-| `s` | Split at the playhead |
+| `s` / `S` | Split at the playhead |
 | `_` | Insert a gap (count = frames) |
 | `dd` / `D` | Delete (leave a gap) / delete and ripple |
 | `yy` | Yank clip or gap into the shared register |
