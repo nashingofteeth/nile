@@ -153,14 +153,18 @@ pub(crate) fn track_has_audio(project: &Project, track: &Track) -> bool {
 
 const WAVE_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// Draw one row of audio peaks for the active audio track. Peaks are cached
-/// by the waveform worker; a cold asset shows a flat row until it arrives.
+/// Draw one row of audio peaks for the active audio track. The band uses the
+/// same visual grammar as the video row: green clips, dark-gray gaps, and
+/// black cut dividers.
 fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64) {
     if bar.width == 0 {
         return;
     }
     let cell = total / f64::from(bar.width);
-    let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); bar.width as usize];
+    let gap_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
+    let clip_style = Style::default().fg(Color::Black).bg(Color::Green);
+    let trans_style = Style::default().fg(Color::Black).bg(Color::Magenta);
+    let mut cells: Vec<(char, Style)> = vec![(' ', gap_style); bar.width as usize];
     let mut cum = 0.0f64;
     for seg in &track.segments {
         let len = secs(&seg.duration());
@@ -173,44 +177,47 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
             marker_col(cum, total, bar.width)
         };
         match seg {
-            TimelineSegment::Gap(_) => {}
+            TimelineSegment::Gap(_) => {
+                for cell in cells.iter_mut().take(x1 as usize).skip(x0 as usize) {
+                    *cell = (' ', gap_style);
+                }
+            }
             TimelineSegment::Transition(_) => {
                 for cell in cells.iter_mut().take(x1 as usize).skip(x0 as usize) {
-                    *cell = ('~', Style::default().fg(Color::Magenta));
+                    *cell = ('~', trans_style);
                 }
             }
             TimelineSegment::Clip(c) => {
-                let Some(wave) = app.waveforms.get(&c.asset) else {
-                    continue;
-                };
-                if wave.duration <= 0.0 || wave.peaks.is_empty() {
-                    continue;
-                }
+                let wave = app.waveforms.get(&c.asset);
                 for x in x0..x1 {
-                    let t = (f64::from(x) + 0.5) * cell;
-                    let offset = (t - start).max(0.0);
-                    let source =
-                        c.source_at(Seconds::new((offset * 1_000_000.0) as i64, 1_000_000));
-                    let pos = secs_f64(&source) / wave.duration;
-                    let idx = (pos * wave.peaks.len() as f64).floor() as usize;
-                    let peak = wave
-                        .peaks
-                        .get(idx.min(wave.peaks.len() - 1))
-                        .copied()
-                        .unwrap_or(0.0);
-                    let level = (peak.sqrt() * 8.0).round() as usize;
-                    cells[x as usize] = (
-                        WAVE_BLOCKS[level.min(WAVE_BLOCKS.len() - 1)],
-                        Style::default().fg(Color::Green),
-                    );
+                    let mut ch = ' ';
+                    if let Some(wave) = wave
+                        && wave.duration > 0.0
+                        && !wave.peaks.is_empty()
+                    {
+                        let t = (f64::from(x) + 0.5) * cell;
+                        let offset = (t - start).max(0.0);
+                        let source =
+                            c.source_at(Seconds::new((offset * 1_000_000.0) as i64, 1_000_000));
+                        let pos = secs_f64(&source) / wave.duration;
+                        let idx = (pos * wave.peaks.len() as f64).floor() as usize;
+                        let peak = wave
+                            .peaks
+                            .get(idx.min(wave.peaks.len() - 1))
+                            .copied()
+                            .unwrap_or(0.0);
+                        let level = (peak.sqrt() * 8.0).round() as usize;
+                        ch = WAVE_BLOCKS[level.min(WAVE_BLOCKS.len() - 1)];
+                    }
+                    cells[x as usize] = (ch, clip_style);
                 }
             }
         }
     }
 
-    // Mirror the label row's cut dividers across the waveform strip. A
-    // transition boundary is soft (the blend owns both sides); everything
-    // else gets a hard divider so audio cuts are visible.
+    // Mirror the label row's cut dividers. A transition boundary is soft;
+    // everything else gets the target segment's background plus a black
+    // `▏`, exactly like the video track.
     cum = 0.0;
     for (i, seg) in track.segments.iter().enumerate() {
         let start = cum;
@@ -223,18 +230,12 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                     .is_some_and(|s| matches!(s, TimelineSegment::Transition(_)));
             if !soft {
                 let x = marker_col(start, total, bar.width);
-                // A bare glyph on the black waveform row reads as a missing
-                // block; fill the divider cell with the neighbouring row
-                // background so it reads as a cut.
-                // A clip entering after a gap should start on green, not on a
-                // dark cell that reads as another gap. Only the boundary
-                // *into* a gap is dark.
-                let gap = matches!(seg, TimelineSegment::Gap(_));
-                let bg = if gap { Color::DarkGray } else { Color::Green };
-                // A half-cell block is visible at terminal sizes. Use a
-                // light foreground: black-on-green can disappear in themes
-                // that map black to the terminal background.
-                cells[x as usize] = ('▌', Style::default().fg(Color::White).bg(bg));
+                let style = match seg {
+                    TimelineSegment::Gap(_) => gap_style,
+                    TimelineSegment::Transition(_) => trans_style,
+                    TimelineSegment::Clip(_) => clip_style,
+                };
+                cells[x as usize] = ('▏', style);
             }
         }
     }
