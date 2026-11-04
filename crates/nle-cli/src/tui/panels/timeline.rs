@@ -231,7 +231,10 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                 // *into* a gap is dark.
                 let gap = matches!(seg, TimelineSegment::Gap(_));
                 let bg = if gap { Color::DarkGray } else { Color::Green };
-                cells[x as usize] = ('▏', Style::default().fg(Color::Black).bg(bg));
+                // A half-cell block is visible at terminal sizes; `▏` is
+                // only an eighth-cell at many fonts and disappears against
+                // the green waveform.
+                cells[x as usize] = ('▌', Style::default().fg(Color::Black).bg(bg));
             }
         }
     }
