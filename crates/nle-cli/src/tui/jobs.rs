@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::mpv::Mpv;
 use crate::preview;
+use crate::waveform::{self, Waveform};
 
 use super::keys::extend::extend_state;
 use super::{App, is_pool, reload_project};
@@ -20,6 +21,10 @@ pub(crate) struct Job {
 
 /// A monitor preview rebuild in flight. Proxy renders are seconds of ffmpeg,
 /// so the EDL is built on a worker while the status row shows progress.
+pub(crate) struct WaveJob {
+    pub(crate) rx: std::sync::mpsc::Receiver<(u32, Result<Waveform, String>)>,
+}
+
 pub(crate) struct PreviewJob {
     pub(crate) rx: std::sync::mpsc::Receiver<PreviewMsg>,
     /// When the build started — the status row waits a moment before
@@ -91,6 +96,57 @@ pub(crate) fn poll_job(app: &mut App, player: &dyn Mpv) {
     }
 }
 
+/// Load any audio-master peaks the timeline needs, off-thread. Cached files
+/// finish almost immediately; a cold decode must not stall a keystroke.
+pub(crate) fn start_waveforms(app: &mut App) {
+    if !app.preview_enabled || app.wave_job.is_some() {
+        return;
+    }
+    let missing: Vec<_> = app
+        .project
+        .media
+        .iter()
+        .filter(|a| a.probe.has_audio() && !app.waveforms.contains_key(&a.id))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let project_path = app.path.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.wave_job = Some(WaveJob { rx });
+    std::thread::spawn(move || {
+        for asset in missing {
+            let id = asset.id;
+            let result = waveform::load(&project_path, &asset).map_err(|e| e.to_string());
+            if tx.send((id, result)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+pub(crate) fn poll_waveforms(app: &mut App) {
+    loop {
+        let Some(job) = app.wave_job.as_ref() else {
+            return;
+        };
+        match job.rx.try_recv() {
+            Ok((id, Ok(wave))) => {
+                app.waveforms.insert(id, wave);
+            }
+            Ok((_, Err(e))) => {
+                crate::log::line(&format!("waveform load failed: {e}"));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                app.wave_job = None;
+                return;
+            }
+        }
+    }
+}
+
 /// Rebuild the monitor's EDL at the current playhead, off-thread: a proxy
 /// render is seconds of ffmpeg, and blocking the key handler froze the UI.
 /// A second edit while one runs just marks it dirty — the finished render
@@ -99,6 +155,7 @@ pub(crate) fn start_preview(app: &mut App) {
     if !app.preview_enabled {
         return;
     }
+    start_waveforms(app);
     if app.preview.is_some() {
         app.preview_dirty = true;
         return;

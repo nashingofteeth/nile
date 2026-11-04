@@ -389,12 +389,14 @@ pub(crate) fn cmd_cache(project_path: &Path, action: &CacheCmd) -> Result<()> {
             let max_age = std::time::Duration::from_secs(days.saturating_mul(86_400));
             let report = proxy::prune(project_path, max_age, *dry_run)?;
             let audio = crate::preview::prune_audio(project_path, max_age, *dry_run)?;
+            let wave = crate::waveform::prune(project_path, max_age, *dry_run)?;
             let export = super::schedule::prune_export(project_path, max_age, *dry_run)?;
             let prefix = if *dry_run { "prune --dry-run" } else { "prune" };
             say!(
-                "{prefix}: {}; audio: {}; export: {}",
+                "{prefix}: {}; audio: {}; wave: {}; export: {}",
                 report.summary_named(*dry_run, "proxy render"),
                 audio.summary_named(*dry_run, "preview audio"),
+                wave.summary_named(*dry_run, "waveform"),
                 export.summary_named(*dry_run, "export chunk")
             );
             Ok(())

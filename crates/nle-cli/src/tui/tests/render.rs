@@ -7,6 +7,7 @@ use super::super::panels::pool::{asset_metadata, render_pool};
 use super::super::panels::timeline::{render_timeline, track_parts, track_window};
 use super::super::panels::{hints_for, panel_heights, render};
 use super::*;
+use crate::waveform::Waveform;
 use nle_core::edit;
 use nle_core::time::Seconds;
 use nle_core::timeline::Effect;
@@ -221,14 +222,61 @@ fn a_clip_with_effects_is_marked_in_the_track_row() {
 // before a track is hidden.
 #[test]
 fn panel_heights_show_every_track_when_they_fit() {
-    let (tl, keys, msg) = panel_heights(3, 24);
+    let (tl, keys, msg) = panel_heights(3, 0, 24);
     assert!(tl >= 3 + 3, "3 tracks + marker + borders: {tl}");
     assert_eq!((keys, msg), (8, 3), "bottom panels still fit");
     // It grows with the track count instead of windowing.
-    assert!(panel_heights(6, 24).0 > panel_heights(2, 24).0);
+    assert!(panel_heights(6, 0, 24).0 > panel_heights(2, 0, 24).0);
     // Too short: the bottom panels go first.
-    assert_eq!(panel_heights(6, 14).1, 0);
-    assert_eq!(panel_heights(6, 14).2, 0);
+    assert_eq!(panel_heights(6, 0, 14).1, 0);
+    assert_eq!(panel_heights(6, 0, 14).2, 0);
+    // An active audio track reserves one more row for its waveform.
+    assert_eq!(panel_heights(2, 1, 24).0, panel_heights(2, 0, 24).0 + 1);
+}
+
+// The active audio track gets a waveform row; cached peaks render as blocks.
+#[test]
+fn the_active_audio_track_shows_a_waveform_row() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut p = asset_project();
+    let ti = p.timeline.add_track(TrackKind::Audio);
+    p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(nle_core::Clip {
+        id: 2,
+        asset: 1,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(3),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+    let mut app = App::new(p, temp_project_path("wave-render"));
+    app.active_track = ti;
+    app.waveforms.insert(
+        1,
+        Waveform {
+            peaks: vec![1.0; 8],
+            duration: 3.0,
+        },
+    );
+    let mut term = Terminal::new(TestBackend::new(40, 9)).unwrap();
+    term.draw(|f| {
+        render_timeline(
+            f,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 9,
+            },
+            &app,
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let text: String = (0..9)
+        .flat_map(|y| (0..40).map(move |x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')))
+        .collect();
+    assert!(text.contains('█'), "waveform blocks should render:\n{text}");
 }
 
 // The full render shows every track's gutter on a normal terminal.
@@ -364,7 +412,7 @@ fn every_mode_hints_fit_the_keys_panel() {
     }
     // At the default 24-row terminal the panel really is six inner rows:
     // if this changes, the ceiling above must follow.
-    let (_, keys_h, _) = panel_heights(3, 24);
+    let (_, keys_h, _) = panel_heights(3, 0, 24);
     assert_eq!(keys_h, 8, "six inner rows for the hint sheet");
 }
 

@@ -5,6 +5,7 @@
 //! command line. Playback keys are sent to mpv; state flows back through
 //! the reader thread and is rendered on the next tick (~20fps redraw).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -15,6 +16,7 @@ use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
 use nle_core::{Armed, Clip, Document, History, Project, frame_of, load_register, track_label};
 
 use crate::mpv::{Mpv, PlaybackState};
+use crate::waveform::Waveform;
 
 mod motion;
 mod panels;
@@ -29,7 +31,10 @@ mod croc;
 mod jobs;
 
 use croc::{CrocAct, CrocState};
-use jobs::{Job, PreviewJob, PreviewProgress, poll_job, poll_preview, start_preview};
+use jobs::{
+    Job, PreviewJob, PreviewProgress, WaveJob, poll_job, poll_preview, poll_waveforms,
+    start_preview,
+};
 
 // ------------------------------------------------------------ app state
 
@@ -249,6 +254,10 @@ pub struct App {
     pub active_track: usize,
     /// The background render/import, if one is running.
     job: Option<Job>,
+    /// Cached peak arrays for the waveform strip, by asset id.
+    pub(crate) waveforms: HashMap<u32, Waveform>,
+    /// The waveform decode worker, if one is running.
+    wave_job: Option<WaveJob>,
     /// The monitor's EDL being built off-thread (proxy renders); `None` when
     /// idle.
     preview: Option<PreviewJob>,
@@ -297,6 +306,8 @@ impl App {
             fx_scale_lock: true,
             active_track: 0,
             job: None,
+            waveforms: HashMap::new(),
+            wave_job: None,
             preview: None,
             preview_dirty: false,
             preview_enabled: false,
@@ -697,6 +708,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         // rewrote the project).
         poll_job(&mut app, &player);
         poll_preview(&mut app, &player);
+        poll_waveforms(&mut app);
 
         // The stored playhead follows the transport: after a moment of
         // stillness, write where the cursor landed (`nile seek` reads it).
@@ -832,6 +844,10 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     // Everything on disk is ours again.
     app.note_seen();
     app.reload_pending = false;
+    // Re-key both caches against the reloaded timeline; a dropped receiver
+    // simply discards a stale worker's results.
+    app.waveforms.clear();
+    app.wave_job = None;
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())

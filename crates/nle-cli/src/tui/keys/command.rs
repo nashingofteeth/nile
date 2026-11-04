@@ -13,7 +13,7 @@ use nle_core::{History, frame_of, track_label};
 use crate::mpv::Mpv;
 
 use super::super::actions::{clip_under, run_action};
-use super::super::jobs::start_job;
+use super::super::jobs::{start_job, start_waveforms};
 use super::super::keys::pool::leave_pool_command;
 use super::super::motion::fmt_timecode;
 use super::super::{App, Mode, persist_playhead, secs};
@@ -62,6 +62,7 @@ pub(crate) fn import_command(app: &mut App, cmd: &str) -> String {
             return format!("imported {new} — history save failed: {e}");
         }
         app.note_seen();
+        start_waveforms(app);
     }
     let mut msg = format!("imported {new} new, {existing} already pooled");
     if !failed.is_empty() {
@@ -594,14 +595,19 @@ pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> 
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
+    let wave = match crate::waveform::prune(&app.path, age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
     let export = match crate::cmd::schedule::prune_export(&app.path, age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
     Some(format!(
-        "{}; audio: {}; export: {}",
+        "{}; audio: {}; wave: {}; export: {}",
         proxy.summary_named(dry_run, "proxy render"),
         audio.summary_named(dry_run, "preview audio"),
+        wave.summary_named(dry_run, "waveform"),
         export.summary_named(dry_run, "export chunk")
     ))
 }
