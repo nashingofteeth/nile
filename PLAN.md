@@ -357,9 +357,18 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - Range delete refuses transitions (their neighbour spans need the normal
   delete path); paste requires a cut and reassigns clip/transition ids.
 
+## Pool keyframes (shipped)
+
+- `J`/`K` seek the pool preview to the next/previous video keyframe.
+- The probe runs on a worker (packet flags first, keyframe-only frame scan as
+  a fallback) and is cached under `.nile/<stem>/cache/keyframes/`, keyed by
+  source path + mtime. Audio-only assets and files with no keyframes report
+  that instead of seeking.
+
 ## Open / deferred
 
-- Pool **keyframe `j`/`k`** — discussed, not built.
+- Per-track waveform overviews (currently only the active audio-bearing track).
+- Thumbnails and M7 GUI.
 
 ## Open decisions (non-blocking)
 

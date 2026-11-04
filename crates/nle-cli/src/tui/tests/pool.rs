@@ -296,6 +296,57 @@ fn pool_step_moves_one_frame_and_clamps() {
     assert!((tl - last).abs() < 1e-9, "clamped to the last frame");
 }
 
+// `J`/`K` step the preview between cached keyframe timestamps. A keyframe
+// under the playhead is skipped so repeated presses always advance.
+#[test]
+fn pool_keyframes_step_forward_and_back() {
+    let mut app = App::new(asset_project(), temp_project_path("pool-keyframes"));
+    app.loaded = true;
+    open_pool_mode(&mut app, 0);
+    app.keyframes
+        .insert(app.project.media[0].id, vec![0.0, 2.0, 5.0, 9.0]);
+
+    let fake = FakeMpv::new();
+    set_pool_pos(&mut app, 3.0);
+    handle_key(&mut app, &fake, key('J'));
+    assert_eq!(pool_pos(&app), 5.0);
+    assert_eq!(fake.calls(), vec![Call::SeekAbs(5.0)]);
+    assert_eq!(app.message, "keyframe 3/4");
+
+    // Already on 5.0: the next press lands on 9.0, not 5.0 again.
+    handle_key(&mut app, &fake, key('J'));
+    assert_eq!(pool_pos(&app), 9.0);
+
+    handle_key(&mut app, &fake, key('K'));
+    assert_eq!(pool_pos(&app), 5.0);
+    handle_key(&mut app, &fake, key('K'));
+    assert_eq!(pool_pos(&app), 2.0);
+    handle_key(&mut app, &fake, key('K'));
+    assert_eq!(pool_pos(&app), 0.0);
+}
+
+// At the ends of the keyframe list the preview stays put and says why.
+#[test]
+fn pool_keyframes_report_when_there_is_no_next_or_previous() {
+    let mut app = App::new(asset_project(), temp_project_path("pool-keyframes-end"));
+    app.loaded = true;
+    open_pool_mode(&mut app, 0);
+    app.keyframes
+        .insert(app.project.media[0].id, vec![0.0, 2.0, 5.0]);
+
+    let fake = FakeMpv::new();
+    set_pool_pos(&mut app, 5.0);
+    handle_key(&mut app, &fake, key('J'));
+    assert_eq!(pool_pos(&app), 5.0);
+    assert!(fake.calls().is_empty());
+    assert!(app.message.contains("no next"));
+
+    set_pool_pos(&mut app, 0.0);
+    handle_key(&mut app, &fake, key('K'));
+    assert_eq!(pool_pos(&app), 0.0);
+    assert!(app.message.contains("no previous"));
+}
+
 // The pool clock's last frame is one frame before the asset duration.
 #[test]
 fn pool_last_frame_is_one_before_duration() {

@@ -13,6 +13,7 @@ mod mpv;
 mod preview;
 // The proxy cache renders what `edl://` can't (effects, transitions); the
 // preview uses it, so it shares preview's fate outside the TUI.
+mod keyframes;
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod proxy;
 #[cfg(feature = "tui")]
