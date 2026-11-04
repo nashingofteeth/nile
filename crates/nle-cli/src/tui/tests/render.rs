@@ -335,6 +335,57 @@ fn a_video_tracks_embedded_audio_shows_a_waveform_row() {
     );
 }
 
+// A two-clip track must map each clip's peaks from its own timeline start,
+// not from the whole-track x coordinate (the old bug truncated the row).
+#[test]
+fn a_second_clip_gets_its_own_waveform_region() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut p = asset_project();
+    p.media[0].probe.streams.push(nle_core::media::RawStream {
+        index: 1,
+        codec_type: Some("audio".into()),
+        codec_name: Some("aac".into()),
+        sample_rate: Some("48000".into()),
+        channels: Some(2),
+        ..Default::default()
+    });
+    let mut app = App::new(p, temp_project_path("wave-second"));
+    app.active_track = 0;
+    app.waveforms.insert(
+        1,
+        Waveform {
+            // Only the first half of a source has signal. If the second
+            // clip is mapped from its own start, it has blocks; the old
+            // global-x mapping lands in the silent half.
+            peaks: vec![1.0; 4].into_iter().chain(vec![0.0; 4]).collect(),
+            duration: 10.0,
+        },
+    );
+    let mut term = Terminal::new(TestBackend::new(40, 8)).unwrap();
+    term.draw(|f| {
+        render_timeline(
+            f,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 8,
+            },
+            &app,
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let row: String = (0..40)
+        .map(|x| buf[(x, 2)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    assert!(
+        row.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count() > 8,
+        "both clips need waveform blocks:\n{row}"
+    );
+}
+
 // The full render shows every track's gutter on a normal terminal.
 #[test]
 fn all_tracks_are_visible_in_the_timeline_panel() {
