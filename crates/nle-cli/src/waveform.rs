@@ -35,7 +35,7 @@ pub struct Waveform {
     pub duration: f64,
 }
 
-const WAVE_VERSION: u32 = 1;
+const WAVE_VERSION: u32 = 2;
 const WAVE_BINS: usize = 2048;
 const SAMPLE_RATE: u32 = 8_000;
 
@@ -103,10 +103,12 @@ fn peaks_from_pcm(pcm: &[u8], bins: usize, rate: u32, asset: &Asset) -> Waveform
                 .unwrap_or(0.0),
         };
     }
-    let per_bin = samples.div_ceil(bins).max(1);
     for (i, pair) in pcm.as_chunks::<2>().0.iter().enumerate() {
         let v = i16::from_le_bytes([pair[0], pair[1]]) as i32;
-        let bin = (i / per_bin).min(bins - 1);
+        // Distribute all samples across all bins; integer ceil-division
+        // leaves the tail bins empty for non-multiples (visible as a gap at
+        // the end of short clips).
+        let bin = i.saturating_mul(bins) / samples;
         let amp = v.unsigned_abs() as f32 / 32768.0;
         if amp > peaks[bin] {
             peaks[bin] = amp;
@@ -231,6 +233,20 @@ mod tests {
         let second = load(&project_path, &asset).unwrap();
         assert_eq!(second.peaks, first.peaks);
         assert_eq!(cache_dir(&project_path).read_dir().unwrap().count(), cached);
+    }
+
+    #[test]
+    fn the_tail_samples_fill_the_last_bin() {
+        let pcm: Vec<u8> = [100i16, 200, 300, 400]
+            .into_iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let w = peaks_from_pcm(&pcm, 3, 8000, &asset());
+        assert!(
+            w.peaks[2] > 0.0,
+            "the last bin must not be empty: {:?}",
+            w.peaks
+        );
     }
 
     #[test]
