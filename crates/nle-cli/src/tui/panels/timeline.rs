@@ -96,6 +96,7 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
             &tracks[ti],
             total,
             in_extend && ti == app.active(),
+            ti,
         );
     }
 
@@ -340,8 +341,15 @@ pub(crate) fn draw_track_row(
     track: &Track,
     total: f64,
     notch: bool,
+    ti: usize,
 ) {
     let parts = track_parts(&app.project, track, total);
+    let selected = match &app.mode {
+        Mode::Visual(st) if st.track == ti => {
+            Some((st.anchor.min(st.cursor), st.anchor.max(st.cursor)))
+        }
+        _ => None,
+    };
     let mut cum: f64 = 0.0;
     let mut cells: Vec<(u16, String, Style)> = Vec::new();
     for (i, (dur, label, style, soft)) in parts.iter().enumerate() {
@@ -370,7 +378,12 @@ pub(crate) fn draw_track_row(
             let bar = if *soft { ' ' } else { '▏' };
             format!("{bar}{}", truncate_label(label, width.saturating_sub(1)))
         };
-        cells.push((start_x, text, *style));
+        let style = if selected.is_some_and(|(a, b)| i >= a && i <= b) {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            *style
+        };
+        cells.push((start_x, text, style));
     }
 
     let mut spans: Vec<Span> = Vec::new();

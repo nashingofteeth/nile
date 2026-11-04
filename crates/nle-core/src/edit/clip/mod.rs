@@ -518,3 +518,96 @@ pub fn paste_ripple_on(
         desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
     })
 }
+
+/// Remove a contiguous inclusive range of whole segments in one undo step.
+/// Transitions carry neighbour spans and are deliberately excluded.
+pub fn delete_range_on(
+    project: &Project,
+    track: usize,
+    start: usize,
+    end: usize,
+) -> Result<Batch, EditError> {
+    let tr = track_at(project, track)?;
+    if start > end || end >= tr.segments.len() {
+        return Err(EditError::SegmentNotFound(start.min(end)));
+    }
+    if tr.segments[start..=end]
+        .iter()
+        .any(|s| matches!(s, Segment::Transition(_)))
+    {
+        return Err(EditError::RangeTransition);
+    }
+    let mut ops = Vec::with_capacity(end - start + 1);
+    for index in (start..=end).rev() {
+        ops.push(EditOp::Remove {
+            track,
+            index,
+            segment: tr.segments[index].clone(),
+        });
+    }
+    Ok(Batch {
+        ops,
+        desc: format!("deleted {} segment(s)", end - start + 1),
+    })
+}
+
+/// Insert whole segments at a cut, giving copied clips/transitions fresh ids.
+/// No overwrite: this is the `P`/ripple-insert shape. Visual paste uses it.
+pub fn insert_segments_on(
+    project: &Project,
+    track: usize,
+    at: f64,
+    segments: &[Segment],
+) -> Result<Batch, EditError> {
+    if segments.is_empty() {
+        return Err(EditError::NoSegment);
+    }
+    let t = snap(project, at)?;
+    let tr = track_at(project, track)?;
+    let on_cut = t == Seconds::from_integer(0)
+        || t == tr.end()
+        || tr
+            .segments
+            .iter()
+            .enumerate()
+            .any(|(i, _)| tr.start_of(i) == t);
+    if !on_cut {
+        return Err(EditError::NotACut(stamp(project, &t)));
+    }
+    let index = if t >= tr.end() {
+        tr.segments.len()
+    } else {
+        tr.index_at(t).unwrap_or(tr.segments.len())
+    };
+    let mut next = project.next_clip_id();
+    let mut payloads = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let mut segment = segment.clone();
+        match &mut segment {
+            Segment::Clip(c) => {
+                c.id = next;
+                next += 1;
+            }
+            Segment::Transition(t) => {
+                t.id = next;
+                next += 1;
+            }
+            Segment::Gap(_) => {}
+        }
+        payloads.push(segment);
+    }
+    let count = payloads.len();
+    let ops = payloads
+        .into_iter()
+        .enumerate()
+        .map(|(i, segment)| EditOp::Insert {
+            track,
+            index: index + i,
+            segment,
+        })
+        .collect();
+    Ok(Batch {
+        ops,
+        desc: format!("inserted {} segment(s) at {}", count, stamp(project, &t)),
+    })
+}

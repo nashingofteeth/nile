@@ -132,6 +132,13 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
             "more    :show :seek :purge :detect :edl-import :otio-import :export",
         ];
     }
+    if matches!(app.mode, Mode::Visual(_)) {
+        return vec![
+            "visual — whole segments; motions extend the selection",
+            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G ends",
+            "d delete · y yank · p paste at a cut · V one segment · v/esc cancel",
+        ];
+    }
     if matches!(app.mode, Mode::Extend(_)) {
         return vec![
             "extend mode — move the armed edge, then commit",

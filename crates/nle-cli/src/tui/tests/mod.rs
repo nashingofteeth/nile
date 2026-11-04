@@ -25,6 +25,7 @@ mod render;
 mod status;
 mod sync;
 mod transition_form;
+mod visual;
 
 fn asset_project() -> Project {
     // [Clip #1 [0..3) src 1..4] [Gap 2 @3..5] [Clip #2 [5..7) src 0..2],

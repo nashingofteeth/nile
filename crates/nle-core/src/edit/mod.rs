@@ -27,9 +27,9 @@ mod util;
 pub use clamp::{clamp_project, clamp_to_media, purge_stumps};
 pub use clip::{
     delete_clip_by_id, delete_clip_by_id_on, delete_clip_ripple_by_id, delete_clip_ripple_by_id_on,
-    delete_ripple, delete_ripple_on, delete_segment, delete_segment_on, delete_under,
-    delete_under_on, insert_gap, insert_gap_on, paste, paste_on, paste_ripple, paste_ripple_on,
-    split, split_on, trim_consume_target, trim_consume_target_on,
+    delete_range_on, delete_ripple, delete_ripple_on, delete_segment, delete_segment_on,
+    delete_under, delete_under_on, insert_gap, insert_gap_on, insert_segments_on, paste, paste_on,
+    paste_ripple, paste_ripple_on, split, split_on, trim_consume_target, trim_consume_target_on,
 };
 pub use effects::{
     add_effect, add_effect_on, clear_effects_on, remove_effect_on, replace_effect_on,
@@ -72,6 +72,10 @@ pub enum EditError {
     SegmentNotFound(usize),
     #[error("a transition can't be split or trimmed — remove it (dd) instead")]
     Transition,
+    #[error("a range can't contain a transition — delete it separately")]
+    RangeTransition,
+    #[error("paste at a cut, not {0}")]
+    NotACut(String),
     #[error("no transition at {0} — --percent only retimes an existing blend")]
     NoTransition(String),
     #[error("a fade's black side has no clip to trim through")]

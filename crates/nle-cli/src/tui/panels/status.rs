@@ -41,6 +41,7 @@ pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {
     };
     let mode = match &app.mode {
         Mode::Normal => "NORMAL".to_string(),
+        Mode::Visual(_) => "VISUAL".to_string(),
         Mode::Command(buf) => format!(":{buf}▏"),
         Mode::Extend(st) => {
             if st.ripple {
