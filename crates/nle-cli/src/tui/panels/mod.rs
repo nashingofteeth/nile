@@ -11,7 +11,7 @@ use self::fx::{form_hint, render_fx, render_transition_form};
 use self::info::render_info;
 use self::pool::render_pool;
 use self::status::render_status;
-use self::timeline::render_timeline;
+use self::timeline::{render_timeline, track_has_audio};
 use super::{App, Mode, fx_state, is_fx, is_pool, pool_strip_active};
 
 pub(super) mod fx;
@@ -34,7 +34,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         !pool_strip_active(app)
             && app
                 .track()
-                .is_some_and(|t| t.kind == nle_core::TrackKind::Audio),
+                .is_some_and(|t| track_has_audio(&app.project, t)),
     );
     let (timeline_h, keys, msg_h) = panel_heights(track_count, wave_rows, f.area().height);
     // The add form carries its own key hints and needs the rows for its
