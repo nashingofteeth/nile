@@ -162,7 +162,7 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
     vec![
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
         "motion     j/k cuts · w/b clips · n/N gaps · < > (, .) clip start/end",
-        "edit       i/o trim · I/O ripple · s split · _ gap · dd/D del · yy/p/P",
+        "edit       i/o trim · I/O ripple · s/S split · _ gap · dd/D del · yy/p/P",
         "           r speed · X transition · e/E extend · [ ] side · m pool",
         "effects    x panel · c/s/e/o add/edit · d/D drop · u undo · Ctrl-r redo",
         "tracks     t/T cycle · <N>t jump · :track add · : cmd · Esc · q quit",
