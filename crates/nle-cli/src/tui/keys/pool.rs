@@ -11,7 +11,7 @@ use nle_core::timeline::{Clip, Segment as TimelineSegment};
 use crate::mpv::Mpv;
 
 use super::super::actions::run_action;
-use super::super::jobs::start_preview;
+use super::super::jobs::{start_keyframes, start_preview};
 use super::super::keys::completes_gg;
 use super::super::keys::count_digit;
 use super::super::keys::do_redo;
@@ -54,6 +54,9 @@ pub(crate) fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => pool_move(app, player, -1, n),
         KeyCode::Char('{') => pool_select(app, player, 0),
         KeyCode::Char('}') => pool_select(app, player, n.saturating_sub(1)),
+        // Keyframe navigation (file, not list).
+        KeyCode::Char('J') => pool_keyframe(app, player, 1),
+        KeyCode::Char('K') => pool_keyframe(app, player, -1),
         // Preview ends (file, not list): gg / 0 = start, G / $ = end.
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('G') | KeyCode::Char('$') => pool_seek_end(app, player),
@@ -179,6 +182,7 @@ pub(crate) fn load_pool_preview_at(app: &mut App, player: &dyn Mpv, start: f64) 
     app.pending_pause = None;
     app.eof = false; // a freshly loaded file is not at EOF
     player.load(&path.display().to_string(), Some(start));
+    start_keyframes(app);
 }
 
 /// Open the pool: remember the timeline playhead, preview the last row.
@@ -270,6 +274,54 @@ pub(crate) fn pool_last_frame(app: &App, dur: f64) -> f64 {
 
 pub(crate) fn pool_seek_rel(app: &mut App, player: &dyn Mpv, delta: f64) {
     pool_seek_abs(app, player, pool_pos(app) + delta);
+}
+
+/// Seek the pool preview to the previous/next keyframe of the selected
+/// asset. The probe runs on a worker; until it lands, the key says so.
+pub(crate) fn pool_keyframe(app: &mut App, player: &dyn Mpv, dir: i64) {
+    if !app.loaded {
+        return;
+    }
+    let Some(sel) = pool_sel(app) else { return };
+    let Some(asset) = app.project.media.get(sel) else {
+        return;
+    };
+    let id = asset.id;
+    if !asset.probe.has_video() {
+        app.set_message("keyframes need a video stream");
+        return;
+    }
+    if !app.keyframes.contains_key(&id) {
+        if app.keyframe_job.as_ref().is_some_and(|j| j.asset == id) {
+            app.set_message("probing keyframes…");
+        } else {
+            start_keyframes(app);
+            app.set_message("probing keyframes…");
+        }
+        return;
+    }
+    let times = app.keyframes[&id].clone();
+    if times.is_empty() {
+        app.set_message("this asset has no keyframes");
+        return;
+    }
+    let pos = pool_pos(app);
+    let found = if dir > 0 {
+        times.iter().position(|t| *t > pos + 1e-6)
+    } else {
+        times.iter().rposition(|t| *t < pos - 1e-6)
+    };
+    match found {
+        Some(i) => {
+            pool_seek_abs(app, player, times[i]);
+            app.set_message(&format!("keyframe {}/{}", i + 1, times.len()));
+        }
+        None => app.set_message(if dir > 0 {
+            "no next keyframe"
+        } else {
+            "no previous keyframe"
+        }),
+    }
 }
 
 /// Frame-step the pool preview: move on the asset's frame grid and seek

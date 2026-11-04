@@ -136,10 +136,12 @@ typing a count pre-fills it. `r` opens the rate command. A transition is part
 of both neighbours, so trimming/extending nearby moves the blend’s edge.
 
 **Media pool.** `j`/`k` (and `{`/`}`) move; `space` plays/restarts the asset;
-`h`/`l`, `f`/`F`, `gg`/`0`, `G`/`$` seek; `enter` inserts at the timeline
-cursor and returns; `d` removes the asset; `i` imports; `u` undoes. While the
-pool is open, the timeline row and monitor show the selected asset; reopening
-returns to the same asset and preview clock.
+`h`/`l`, `f`/`F`, `gg`/`0`, `G`/`$` seek; `J`/`K` jump to the next/previous
+video keyframe (probed on a worker and cached under `.nile/<stem>/cache/`);
+`enter` inserts at the timeline cursor and returns; `d` removes the asset;
+`i` imports; `u` undoes. While the pool is open, the timeline row and monitor
+show the selected asset; reopening returns to the same asset and preview
+clock.
 
 ### Extend mode
 

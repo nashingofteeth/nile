@@ -149,9 +149,9 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
     if is_pool(app) {
         return vec![
             "media pool — the monitor previews the selected file",
-            "j/k assets · { } ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
-            "space play · enter insert · i import · d remove · u undo · m/esc close",
-            "tracks     t/T target · <N>t jump · insert goes to the active track",
+            "j/k assets · { } ends · J/K keyframe · gg/0 start · G/$ end",
+            "h/l ±1s · H/L ±5s · f/F frame · space play · enter insert",
+            "i import · d remove · u undo · t/T target · m/esc close",
         ];
     }
     if matches!(app.mode, Mode::Transition(_)) {

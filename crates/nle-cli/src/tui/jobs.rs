@@ -3,12 +3,13 @@
 
 use std::time::Instant;
 
+use crate::keyframes::{self, Keyframes};
 use crate::mpv::Mpv;
 use crate::preview;
 use crate::waveform::{self, Waveform};
 
 use super::keys::extend::extend_state;
-use super::{App, is_pool, reload_project};
+use super::{App, is_pool, pool_sel, reload_project};
 /// A background job (an ffmpeg render, a heavy import): its label for
 /// notices, whether the project file changed underneath us (reload after),
 /// and the channel its worker reports on. One at a time — the monitor
@@ -23,6 +24,13 @@ pub(crate) struct Job {
 /// so the EDL is built on a worker while the status row shows progress.
 pub(crate) struct WaveJob {
     pub(crate) rx: std::sync::mpsc::Receiver<(u32, Result<Waveform, String>)>,
+}
+
+/// A keyframe probe for the pooled asset. One at a time; the result is
+/// keyed by asset id so a stale selection can't seek the wrong file.
+pub(crate) struct KeyframeJob {
+    pub(crate) asset: u32,
+    pub(crate) rx: std::sync::mpsc::Receiver<(u32, Result<Keyframes, String>)>,
 }
 
 pub(crate) struct PreviewJob {
@@ -145,6 +153,55 @@ pub(crate) fn poll_waveforms(app: &mut App) {
             }
         }
     }
+}
+
+/// Start probing the pooled asset's keyframes, off-thread. The pool preview
+/// still works while it runs; `J`/`K` say the probe is in flight.
+pub(crate) fn start_keyframes(app: &mut App) {
+    if !is_pool(app) || app.keyframe_job.is_some() {
+        return;
+    }
+    let Some(sel) = pool_sel(app) else { return };
+    let Some(asset) = app.project.media.get(sel).cloned() else {
+        return;
+    };
+    if !asset.probe.has_video() || app.keyframes.contains_key(&asset.id) {
+        return;
+    }
+    let id = asset.id;
+    let project_path = app.path.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.keyframe_job = Some(KeyframeJob { asset: id, rx });
+    std::thread::spawn(move || {
+        let result = keyframes::load(&project_path, &asset).map_err(|e| e.to_string());
+        let _ = tx.send((id, result));
+    });
+}
+
+pub(crate) fn poll_keyframes(app: &mut App) {
+    let Some(job) = app.keyframe_job.as_ref() else {
+        return;
+    };
+    match job.rx.try_recv() {
+        Ok((id, Ok(keyframes))) => {
+            app.keyframes.insert(id, keyframes.times);
+        }
+        Ok((_, Err(e))) => {
+            crate::log::line(&format!("keyframe probe failed: {e}"));
+            // Don't immediately respawn the same failing probe; a press of
+            // `J`/`K` retries, and selecting another asset starts its own.
+            app.keyframe_job = None;
+            return;
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            app.keyframe_job = None;
+            return;
+        }
+    }
+    app.keyframe_job = None;
+    // The selection may have moved while this probe ran; catch up.
+    start_keyframes(app);
 }
 
 /// Rebuild the monitor's EDL at the current playhead, off-thread: a proxy

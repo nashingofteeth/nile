@@ -32,8 +32,8 @@ mod jobs;
 
 use croc::{CrocAct, CrocState};
 use jobs::{
-    Job, PreviewJob, PreviewProgress, WaveJob, poll_job, poll_preview, poll_waveforms,
-    start_preview,
+    Job, KeyframeJob, PreviewJob, PreviewProgress, WaveJob, poll_job, poll_keyframes, poll_preview,
+    poll_waveforms, start_preview,
 };
 
 // ------------------------------------------------------------ app state
@@ -270,6 +270,10 @@ pub struct App {
     pub(crate) waveforms: HashMap<u32, Waveform>,
     /// The waveform decode worker, if one is running.
     wave_job: Option<WaveJob>,
+    /// Cached keyframe timestamps for the pool preview, by asset id.
+    pub(crate) keyframes: HashMap<u32, Vec<f64>>,
+    /// The keyframe probe, if one is running.
+    keyframe_job: Option<KeyframeJob>,
     /// The monitor's EDL being built off-thread (proxy renders); `None` when
     /// idle.
     preview: Option<PreviewJob>,
@@ -321,6 +325,8 @@ impl App {
             visual_register: Vec::new(),
             waveforms: HashMap::new(),
             wave_job: None,
+            keyframes: HashMap::new(),
+            keyframe_job: None,
             preview: None,
             preview_dirty: false,
             preview_enabled: false,
@@ -722,6 +728,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         poll_job(&mut app, &player);
         poll_preview(&mut app, &player);
         poll_waveforms(&mut app);
+        poll_keyframes(&mut app);
 
         // The stored playhead follows the transport: after a moment of
         // stillness, write where the cursor landed (`nile seek` reads it).
@@ -861,6 +868,8 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     // simply discards a stale worker's results.
     app.waveforms.clear();
     app.wave_job = None;
+    app.keyframes.clear();
+    app.keyframe_job = None;
     app.visual_register.clear();
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
