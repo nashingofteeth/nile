@@ -317,7 +317,7 @@ below.)
   render time, since a hit does not touch it. Explicit: nothing sweeps on open
   or on a timer; a pruned proxy simply re-renders. Only `<hash>.mp4`,
   `<hash>.mkv`, `<hash>.m4a` (and a crashed render's temp) are candidates, so
-  `nle/black/` is never touched. Audio masters live in `cache/audio/` and are
+  `cache/black/` is never touched. Audio masters live in `cache/audio/` and are
   pruned by the same command.
 - **Verified:** unit tests + real ffmpeg runs — a dissolve reads a ≈50%
   blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
