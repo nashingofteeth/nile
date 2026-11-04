@@ -384,7 +384,7 @@ fn a_second_clip_gets_its_own_waveform_region() {
         row.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count() > 8,
         "both clips need waveform blocks:\n{row}"
     );
-    assert!(row.contains('▌'), "audio cuts need dividers:\n{row}");
+    assert!(row.contains('▏'), "audio cuts need dividers:\n{row}");
 }
 
 // The full render shows every track's gutter on a normal terminal.
