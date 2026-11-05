@@ -175,4 +175,26 @@ mod tests {
             Err(KeyframeError::NoVideo)
         ));
     }
+
+    // The cache is `<hash>.json`, but the prune sweep only knows the render
+    // extensions; it reported zero forever until `.json` was added to
+    // `proxy::is_entry_name`.
+    #[test]
+    fn a_stale_keyframe_list_is_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join("nile.json");
+        let cache = cache_dir(&project_path);
+        std::fs::create_dir_all(&cache).unwrap();
+        let path = cache.join("0123456789abcdef.json");
+        std::fs::write(&path, r#"{"times":[0.0]}"#).unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(3600)),
+        )
+        .unwrap();
+
+        let report = prune(&project_path, Duration::ZERO, false).unwrap();
+        assert_eq!(report.removed, 1, "{report:?}");
+        assert!(!path.exists(), "the stale keyframe list is gone");
+    }
 }
