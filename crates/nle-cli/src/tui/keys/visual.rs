@@ -128,6 +128,7 @@ fn delete_selected(app: &mut App, player: &dyn Mpv, state: VisualState) {
         }
     };
     let frame = frame_of(app.project.fps.as_ref(), start_time);
+    let notice = batch.desc.clone();
     if let Err(e) = app.project.apply(batch, frame) {
         app.fail(&e.to_string());
         return;
@@ -136,7 +137,7 @@ fn delete_selected(app: &mut App, player: &dyn Mpv, state: VisualState) {
     app.mode = Mode::Normal;
     app.playhead = start_time.clamp(0.0, app.last_frame());
     app.croc.play(CrocAct::Chomp);
-    app.set_message(&format!("deleted {} segment(s)", end - start + 1));
+    app.set_message(&notice);
     persist_and_refresh(app, player);
 }
 
