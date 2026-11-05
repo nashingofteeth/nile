@@ -13,11 +13,15 @@ mod mpv;
 mod preview;
 // The proxy cache renders what `edl://` can't (effects, transitions); the
 // preview uses it, so it shares preview's fate outside the TUI.
-mod keyframes;
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod proxy;
+// Keyframe timestamps back the pool's J/K keys; `prune` is used headless.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+mod keyframes;
 #[cfg(feature = "tui")]
 mod tui;
+// Waveform peaks back the timeline's audio row; `prune` is used headless.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod waveform;
 
 // Declared after the macros: a child module only sees a macro_rules! that
