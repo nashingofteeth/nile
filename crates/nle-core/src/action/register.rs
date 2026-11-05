@@ -81,6 +81,17 @@ pub fn register_path(project_path: &Path) -> PathBuf {
 /// The yanked segment a project's register holds, if any. A legacy adjacent
 /// sidecar is copied into the state directory on first read.
 pub fn load_register(project_path: &Path) -> Option<Register> {
+    load_register_with(project_path, true)
+}
+
+/// Like [`load_register`], but reads a legacy sidecar without copying it into
+/// the state directory. Diagnostics (`edit --dump`) use this so inspecting a
+/// project never writes to it.
+pub fn load_register_without_migration(project_path: &Path) -> Option<Register> {
+    load_register_with(project_path, false)
+}
+
+fn load_register_with(project_path: &Path, migrate: bool) -> Option<Register> {
     let path = register_path(project_path);
     let mut legacy = None;
     let text = match std::fs::read_to_string(&path) {
@@ -97,7 +108,7 @@ pub fn load_register(project_path: &Path) -> Option<Register> {
     if file.version != REGISTER_VERSION {
         return None;
     }
-    if let Some(old) = legacy {
+    if migrate && let Some(old) = legacy {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

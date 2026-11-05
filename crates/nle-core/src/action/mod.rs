@@ -751,7 +751,10 @@ pub use parse::{
     EFFECT_USAGE, EffectArgs, Flags, ParseDefaults, ParseError, TRACK_USAGE, effect_from_args,
     parse, split_args,
 };
-pub use register::{REGISTER_VERSION, Register, load_register, register_path, save_register};
+pub use register::{
+    REGISTER_VERSION, Register, load_register, load_register_without_migration, register_path,
+    save_register,
+};
 
 // ------------------------------------------------------------ parsing
 

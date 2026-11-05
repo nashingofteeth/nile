@@ -13,7 +13,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use nle_core::action;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
-use nle_core::{Armed, Clip, Document, History, Project, frame_of, load_register, track_label};
+use nle_core::{
+    Armed, Clip, Document, History, Project, frame_of, load_register,
+    load_register_without_migration, track_label,
+};
 
 use crate::mpv::{Mpv, PlaybackState};
 use crate::waveform::Waveform;
@@ -616,7 +619,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     // every save land in the scratch copy's state dir.
     app.project
         .set_history(History::load(&History::sidecar_path(&path)).unwrap_or_default());
-    app.register = load_register(&path);
+    app.register = load_register_without_migration(&path);
     // The handlers guard on this (mpv "loaded"); the dump has no monitor.
     app.loaded = true;
     let player = NullMpv;
