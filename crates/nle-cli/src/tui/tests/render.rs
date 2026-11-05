@@ -103,6 +103,30 @@ fn the_dump_does_not_touch_the_project() {
 }
 
 #[test]
+fn the_dump_does_not_migrate_a_legacy_register() {
+    let path = temp_project_path("dump-legacy-register");
+    asset_project().save(&path).unwrap();
+    let reg = nle_core::Register {
+        segment: TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(2),
+        }),
+        path: None,
+    };
+    nle_core::save_register(&path, Some(&reg)).unwrap();
+    let new = nle_core::register_path(&path);
+    let legacy = path.with_extension("clipboard.json");
+    std::fs::copy(&new, &legacy).unwrap();
+    std::fs::remove_file(&new).unwrap();
+
+    let _ = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "");
+    assert!(
+        !new.exists(),
+        "the dump must not copy a legacy register into the source state dir"
+    );
+    assert!(legacy.exists(), "the legacy sidecar is left alone");
+}
+
+#[test]
 fn the_dump_carries_the_saved_undo_history() {
     let path = temp_project_path("dump-undo");
     let mut doc = Document::new(asset_project());

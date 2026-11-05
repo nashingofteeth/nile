@@ -90,3 +90,27 @@ fn an_old_adjacent_register_is_copied_into_the_state_directory() {
     assert!(!new.exists());
     assert!(!legacy.exists(), "clearing removes the legacy copy too");
 }
+
+#[test]
+fn the_read_only_loader_leaves_a_legacy_register_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("nile.json");
+    let reg = Register {
+        segment: Segment::Gap(Gap {
+            duration: Seconds::from_integer(2),
+        }),
+        path: None,
+    };
+    save_register(&project, Some(&reg)).unwrap();
+    let new = register_path(&project);
+    let legacy = dir.path().join("nile.clipboard.json");
+    std::fs::copy(&new, &legacy).unwrap();
+    std::fs::remove_file(&new).unwrap();
+
+    assert_eq!(load_register_without_migration(&project), Some(reg));
+    assert!(
+        !new.exists(),
+        "a diagnostic read must not create the state-directory sidecar"
+    );
+    assert!(legacy.exists(), "the legacy sidecar is left alone");
+}
