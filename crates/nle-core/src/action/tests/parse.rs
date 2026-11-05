@@ -435,6 +435,24 @@ fn explicit_flags_work_without_defaults() {
 }
 
 #[test]
+fn track_mute_names_a_bad_position() {
+    // A non-number used to be swallowed by `unwrap_or(0)` and reported as
+    // "1-based, got 0", which points at the wrong problem.
+    assert_eq!(
+        parse("track mute 2", &defaults()),
+        Ok(Action::TrackMute { track: 1 })
+    );
+    assert!(matches!(
+        parse("track mute abc", &defaults()),
+        Err(ParseError::Invalid(msg)) if msg.contains("expects a number")
+    ));
+    assert!(matches!(
+        parse("track mute 0", &defaults()),
+        Err(ParseError::Invalid(msg)) if msg.contains("1-based")
+    ));
+}
+
+#[test]
 fn unknown_verbs_and_bad_flags_stay_apart() {
     // Unknown verbs may be another front-end's command; bad flags on a
     // known verb are always an error.

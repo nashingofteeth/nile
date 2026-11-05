@@ -675,7 +675,14 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                 }
                 "mute" => {
                     let track = match f.positional() {
-                        Some(n) => zero_based(n.parse().unwrap_or(0), ":track mute [N]")?,
+                        Some(n) => {
+                            let n = n.parse::<usize>().map_err(|_| {
+                                ParseError::Invalid(format!(
+                                    ":track mute expects a number, got {n:?}"
+                                ))
+                            })?;
+                            zero_based(n, ":track mute [N]")?
+                        }
                         None => d.track,
                     };
                     f.finish(":track mute [N]")?;
