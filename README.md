@@ -342,6 +342,7 @@ video/
             ├── proxy/         # rendered video proxies
             ├── audio/         # continuous preview audio masters
             ├── wave/          # cached audio peaks for the waveform
+            ├── keyframes/     # cached video keyframe timestamps
             ├── export/
             └── black/
 ```
@@ -351,7 +352,8 @@ Legacy adjacent `*.history.json` / `*.clipboard.json` files are copied into
 the state directory on first load; old `nle.json` projects still open with
 `--project nle.json`. The old global `~/.cache/nile` is no longer used, and
 `nile cache prune` only touches the current project’s cache — proxy renders,
-preview audio masters, waveform peaks, and completed export chunks.
+preview audio masters, waveform peaks, keyframe lists, and completed export
+chunks.
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a
