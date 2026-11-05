@@ -211,11 +211,16 @@ impl Project {
                     }
                     // A transition owns its source spans too, so its assets
                     // must be pooled exactly like a clip's (`remove_asset`
-                    // already refuses to strand one).
+                    // already refuses to strand one) — and carry picture: the
+                    // export's xfade reads `[input:v]`, so an audio-only side
+                    // would only fail inside ffmpeg.
                     Segment::Transition(tr) => {
                         for side in [&tr.a, &tr.b] {
-                            if let Some(asset) = side.asset() {
-                                self.pooled(asset)?;
+                            if let Some(asset_id) = side.asset() {
+                                let asset = self.pooled(asset_id)?;
+                                if let Some(reason) = asset.wrong_kind(TrackKind::Video) {
+                                    return Err(ProjectError::Asset(asset_id, reason));
+                                }
                             }
                         }
                     }
@@ -633,6 +638,51 @@ mod tests {
             p.validate(),
             Err(ProjectError::Asset(999, ref why)) if why.contains("media pool")
         ));
+    }
+
+    #[test]
+    fn validate_rejects_a_transition_side_without_picture() {
+        // A transition is rendered with xfade, which reads `[input:v]`; an
+        // audio-only side would only fail inside ffmpeg. The clip rule
+        // (`wrong_kind`) applies to transition sides too.
+        let mut p = sample_project();
+        let (music, _) = p.add_asset(
+            "/media/music.m4a".into(),
+            RawProbe {
+                streams: vec![RawStream {
+                    index: 0,
+                    codec_type: Some("audio".into()),
+                    codec_name: Some("aac".into()),
+                    ..Default::default()
+                }],
+                format: RawFormat {
+                    format_name: "m4a".into(),
+                    duration: Some("10".into()),
+                    ..Default::default()
+                },
+            },
+        );
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(Segment::Transition(Transition {
+                id: 99,
+                dur: Seconds::from_integer(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: music,
+                    src_in: Seconds::from_integer(0),
+                    src_out: Seconds::from_integer(1),
+                    effects: Vec::new(),
+                },
+                b: TransitionSource::Black,
+            }));
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Asset(id, ref why)) if id == music && why.contains("no video stream")),
+            "{:?}",
+            p.validate()
+        );
     }
 
     #[test]
