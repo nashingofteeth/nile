@@ -218,8 +218,14 @@ impl Project {
                         for side in [&tr.a, &tr.b] {
                             if let Some(asset_id) = side.asset() {
                                 let asset = self.pooled(asset_id)?;
-                                if let Some(reason) = asset.wrong_kind(TrackKind::Video) {
-                                    return Err(ProjectError::Asset(asset_id, reason));
+                                if asset.wrong_kind(TrackKind::Video).is_some() {
+                                    return Err(ProjectError::Asset(
+                                        asset_id,
+                                        format!(
+                                            "{} has no video stream — a transition side needs picture",
+                                            asset.path.display()
+                                        ),
+                                    ));
                                 }
                             }
                         }
@@ -679,7 +685,7 @@ mod tests {
                 b: TransitionSource::Black,
             }));
         assert!(
-            matches!(p.validate(), Err(ProjectError::Asset(id, ref why)) if id == music && why.contains("no video stream")),
+            matches!(p.validate(), Err(ProjectError::Asset(id, ref why)) if id == music && why.contains("no video stream") && why.contains("transition side")),
             "{:?}",
             p.validate()
         );
