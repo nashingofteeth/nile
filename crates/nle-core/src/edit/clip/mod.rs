@@ -18,8 +18,8 @@ use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Transition};
 
 use super::extend::extend_gap_ending_at;
 use super::util::{
-    at_least_a_frame, clip_at, replace_with_many, segment_note, snap, source_span, split_sides,
-    stamp, track_at, video_track_index,
+    at_least_a_frame, clip_at, merge_pair, replace_with_many, segment_note, snap, source_span,
+    split_sides, stamp, track_at, video_track_index,
 };
 use super::{Batch, EditError, EditOp};
 
@@ -545,10 +545,32 @@ pub fn delete_range_on(
             segment: tr.segments[index].clone(),
         });
     }
-    Ok(Batch {
-        ops,
-        desc: format!("deleted {} segment(s)", end - start + 1),
-    })
+    // The removal joins the two survivors: fold them when seamless, exactly
+    // as a one-segment delete does — two adjacent gaps (or two halves of one
+    // clip) must not be left behind. The descending removals put the right
+    // neighbour at `start`.
+    let seam = (start > 0 && end + 1 < tr.segments.len())
+        .then(|| merge_pair(&tr.segments[start - 1], &tr.segments[end + 1]))
+        .flatten();
+    let merged = seam.is_some();
+    if let Some(joined) = seam {
+        ops.push(EditOp::Replace {
+            track,
+            index: start - 1,
+            before: tr.segments[start - 1].clone(),
+            after: joined,
+        });
+        ops.push(EditOp::Remove {
+            track,
+            index: start,
+            segment: tr.segments[end + 1].clone(),
+        });
+    }
+    let mut desc = format!("deleted {} segment(s)", end - start + 1);
+    if merged {
+        desc += " (merged the new seam)";
+    }
+    Ok(Batch { ops, desc })
 }
 
 /// Insert whole segments at a cut, giving copied clips/transitions fresh ids.
