@@ -150,10 +150,12 @@ pub fn prune(
 /// The sweep itself, with the directory and the clock injected so tests can
 /// backdate entries instead of sleeping.
 ///
-/// Scope is strict: only `<hash>.mp4` and a crashed render's
-/// `<hash>.tmp-<pid>.mp4` are candidates. The black filler files live in a
-/// sibling directory (`nle/black/`) and are never touched; neither is any
-/// other file that happens to share the directory.
+/// Scope is strict: only `<hash>.<ext>` (and a crashed write's
+/// `<hash>.tmp-<token>.<ext>`) are candidates, for the extensions the
+/// per-project caches use — `.mp4` proxies, `.mkv` export chunks, `.m4a`
+/// audio masters, `.wave` waveforms and `.json` keyframe lists. The black
+/// filler files live in a sibling directory (`nle/black/`) and are never
+/// touched; neither is any other file that happens to share the directory.
 pub fn prune_at(
     dir: &Path,
     max_age: Duration,
@@ -202,14 +204,14 @@ pub fn prune_at(
     Ok(report)
 }
 
-/// A cache entry's name: `<hash>.mp4`, or a crashed render's
-/// `<hash>.tmp-<token>.mp4/mkv/m4a/wave`. The hash is written as `{hash:x}`,
-/// so it is 1–16 hex digits; anything else is not ours to delete.
+/// A cache entry's name: `<hash>.<ext>`, or a crashed write's
+/// `<hash>.tmp-<token>.<ext>`. The hash is written as `{hash:x}`, so it is
+/// 1–16 hex digits; anything else is not ours to delete.
 fn is_entry_name(name: &str) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
-    if ext != "mp4" && ext != "mkv" && ext != "m4a" && ext != "wave" {
+    if !matches!(ext, "mp4" | "mkv" | "m4a" | "wave" | "json") {
         return false;
     }
     let (hash, pid) = match stem.split_once(".tmp-") {
@@ -897,8 +899,10 @@ mod tests {
             "dead.mkv",
             "dead.m4a",
             "dead.wave",
+            "dead.json",
             "dead.tmp-1.mkv",
             "dead.tmp-A1b2.mkv",
+            "dead.tmp-1.json",
         ] {
             assert!(is_entry_name(ok), "{ok}");
         }
@@ -910,6 +914,7 @@ mod tests {
             "dead.tmp-.mp4",
             "dead.mp4.bak",
             "dead.mkv.bak",
+            "notes.json", // not a cache hash
         ] {
             assert!(!is_entry_name(no), "{no}");
         }
