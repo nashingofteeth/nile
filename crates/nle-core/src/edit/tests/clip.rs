@@ -17,6 +17,58 @@ fn s_splits_a_clip() {
 }
 
 #[test]
+fn range_delete_folds_the_new_neighbours() {
+    let mut p = fixture();
+    let a = p.media[0].id;
+    let clip = |id, in_, out| {
+        Segment::Clip(Clip {
+            id,
+            asset: a,
+            asset_in: Seconds::from_integer(in_),
+            asset_out: Seconds::from_integer(out),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })
+    };
+
+    // [gap 1][clip #1][gap 1][clip #2]: deleting only clip #1 joins the two
+    // gaps; the model must never hold two adjacent Gap segments.
+    p.timeline.video_track_mut().unwrap().segments = vec![
+        Segment::Gap(Gap {
+            duration: Seconds::from_integer(1),
+        }),
+        clip(1, 0, 2),
+        Segment::Gap(Gap {
+            duration: Seconds::from_integer(1),
+        }),
+        clip(2, 2, 4),
+    ];
+    let batch = delete_range_on(&p, 0, 1, 1).unwrap();
+    assert!(batch.desc.contains("merged"), "{}", batch.desc);
+    let mut h = History::default();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 2, "{segs:?}");
+    assert!(matches!(&segs[0], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+    assert!(matches!(&segs[1], Segment::Clip(c) if c.id == 2));
+    h.undo(&mut p).unwrap();
+    assert_eq!(p.timeline.video_track().unwrap().segments.len(), 4);
+
+    // Two contiguous halves around the deleted middle clip merge back.
+    let mut p = fixture();
+    p.timeline.video_track_mut().unwrap().segments =
+        vec![clip(1, 0, 2), clip(2, 2, 3), clip(3, 2, 5)];
+    let mut h = History::default();
+    let batch = delete_range_on(&p, 0, 1, 1).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 1, "{segs:?}");
+    assert!(
+        matches!(&segs[0], Segment::Clip(c) if c.id == 1 && c.asset_out == Seconds::from_integer(5))
+    );
+}
+
+#[test]
 fn dd_replaces_clip_with_gap_d_removes() {
     let mut p = fixture();
     let mut h = History::default();
