@@ -609,18 +609,14 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
             .unwrap_or_else(|| std::ffi::OsStr::new("dump.json")),
     );
     project.save(&copy).expect("save the dump copy");
-    // Bring the session state along (undo depth, the register) so the dump
-    // shows the same thing, but every save lands in the scratch dir.
-    for sidecar in [
-        nle_core::edit::History::sidecar_path(&path),
-        path.with_extension("clipboard.json"),
-    ] {
-        if let (Ok(bytes), Some(name)) = (std::fs::read(&sidecar), sidecar.file_name()) {
-            let _ = std::fs::write(dir.join(name), bytes);
-        }
-    }
-
     let mut app = App::new(project, copy);
+    // Bring the session state along (undo depth, the register) so the dump
+    // shows the same thing. Read the source sidecars directly — not
+    // `History::load_project`, whose legacy migration would write — and let
+    // every save land in the scratch copy's state dir.
+    app.project
+        .set_history(History::load(&History::sidecar_path(&path)).unwrap_or_default());
+    app.register = load_register(&path);
     // The handlers guard on this (mpv "loaded"); the dump has no monitor.
     app.loaded = true;
     let player = NullMpv;
