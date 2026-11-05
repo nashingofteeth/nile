@@ -103,6 +103,25 @@ fn the_dump_does_not_touch_the_project() {
 }
 
 #[test]
+fn the_dump_carries_the_saved_undo_history() {
+    let path = temp_project_path("dump-undo");
+    let mut doc = Document::new(asset_project());
+    doc.edit_tracks(0, |p| {
+        p.timeline.add_track(TrackKind::Audio);
+        Ok("added track a1".to_string())
+    })
+    .unwrap();
+    doc.save(&path).unwrap();
+    doc.save_history(&History::sidecar_path(&path)).unwrap();
+
+    // `u` only works if the dump loaded the sidecar: `App::new` starts with
+    // an empty stack, so this is the distinguishing case.
+    let out = dump(Project::load(&path).unwrap(), path, (40, 8), "u");
+    assert!(out.contains("message: \"undo: added track a1\""), "{out}");
+    assert!(!out.contains("  a1"), "the added track is undone:\n{out}");
+}
+
+#[test]
 fn track_labels_number_within_kind() {
     let mut p = asset_project();
     p.timeline.add_track(TrackKind::Audio); // index 1
