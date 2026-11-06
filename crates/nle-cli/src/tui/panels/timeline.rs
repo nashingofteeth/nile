@@ -50,20 +50,22 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         app.total().max(0.001)
     };
 
-    // One row per visible track, an optional waveform row for the active
-    // track when it carries audio (including audio embedded in video), then
-    // the marker row.
-    let wave_rows = usize::from(
-        app.track()
-            .is_some_and(|track| track_has_audio(&app.project, track)),
-    );
-    let capacity = inner.height.saturating_sub(1 + wave_rows as u16) as usize;
-    let (start, count) = track_window(n, app.active(), capacity.max(1));
-
-    for (row, ti) in (start..start + count).enumerate() {
-        let y = inner.y + row as u16;
+    // Each visible track gets its own row; an audio-bearing track also gets
+    // a waveform row directly beneath it. The marker row always takes one.
+    let heights: Vec<usize> = tracks
+        .iter()
+        .map(|track| 1 + usize::from(track_has_audio(&app.project, track)))
+        .collect();
+    let capacity = inner.height.saturating_sub(1) as usize;
+    let (start, count) = track_window_rows(&heights, app.active(), capacity.max(1));
+    let marker_limit = inner.y + inner.height.saturating_sub(1);
+    let mut y = inner.y;
+    for (ti, track) in tracks.iter().enumerate().skip(start).take(count) {
+        if y >= marker_limit {
+            break;
+        }
+        let active = ti == app.active();
         if label_w > 0 {
-            let active = ti == app.active();
             let style = if active {
                 Style::default()
                     .fg(Color::White)
@@ -89,50 +91,42 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
             width: bar_w,
             height: 1,
         };
-        draw_track_row(
-            f,
-            bar,
-            app,
-            &tracks[ti],
-            total,
-            in_extend && ti == app.active(),
-            ti,
-        );
-    }
+        draw_track_row(f, bar, app, track, total, in_extend && active, ti);
+        y += 1;
 
-    let wave_y = inner.y + count as u16;
-    if wave_rows > 0 && wave_y < inner.y + inner.height {
-        if label_w > 0 {
-            let gutter = Rect {
-                x: inner.x,
-                y: wave_y,
-                width: label_w,
+        if track_has_audio(&app.project, track) && y < marker_limit {
+            if label_w > 0 {
+                let gutter = Rect {
+                    x: inner.x,
+                    y,
+                    width: label_w,
+                    height: 1,
+                };
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "  ~ ",
+                        Style::default().fg(Color::DarkGray),
+                    ))),
+                    gutter,
+                );
+            }
+            let bar = Rect {
+                x: inner.x + label_w,
+                y,
+                width: bar_w,
                 height: 1,
             };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "  ~ ",
-                    Style::default().fg(Color::DarkGray),
-                ))),
-                gutter,
-            );
+            draw_waveform_row(f, bar, app, track, total, active);
+            y += 1;
         }
-        let bar = Rect {
-            x: inner.x + label_w,
-            y: wave_y,
-            width: bar_w,
-            height: 1,
-        };
-        draw_waveform_row(f, bar, app, &tracks[app.active()], total);
     }
 
-    let marker_y = wave_y + wave_rows as u16;
-    if marker_y >= inner.y + inner.height {
+    if y >= inner.y + inner.height {
         return;
     }
     let bar = Rect {
         x: inner.x + label_w,
-        y: marker_y,
+        y,
         width: bar_w,
         height: 1,
     };
@@ -154,10 +148,11 @@ pub(crate) fn track_has_audio(project: &Project, track: &Track) -> bool {
 
 const WAVE_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// Draw one row of audio peaks for the active audio track. The band uses the
+/// Draw one row of audio peaks for an audio-bearing track. The band uses the
 /// same visual grammar as the video row: green clips, dark-gray gaps, and
-/// black cut dividers.
-fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64) {
+/// black cut dividers. The active track keeps the brighter peaks; the others
+/// are dimmer so the focus still reads.
+fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64, active: bool) {
     if bar.width == 0 {
         return;
     }
@@ -165,9 +160,13 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
     let gap_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
     // A dark green band under bright green peaks keeps the row green while
     // making the waveform readable; plain Green on LightGreen was too close.
-    let band = Color::Rgb(0, 72, 0);
+    let (band, peaks) = if active {
+        (Color::Rgb(0, 72, 0), Color::LightGreen)
+    } else {
+        (Color::Rgb(0, 48, 0), Color::Rgb(112, 176, 112))
+    };
     let band_style = Style::default().bg(band);
-    let wave_style = Style::default().fg(Color::LightGreen).bg(band);
+    let wave_style = Style::default().fg(peaks).bg(band);
     let divider_style = Style::default().fg(Color::Black).bg(band);
     let trans_style = Style::default().fg(Color::Black).bg(Color::Magenta);
     let mut cells: Vec<(char, Style)> = vec![(' ', gap_style); bar.width as usize];
@@ -260,14 +259,42 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
     f.render_widget(Paragraph::new(Line::from(spans)), bar);
 }
 
-/// Which tracks to show: all of them when they fit, else a window of
-/// `capacity` centred on the active track.
-pub(crate) fn track_window(n: usize, active: usize, capacity: usize) -> (usize, usize) {
-    if n <= capacity {
+/// Which tracks to show: all of them when their rows fit, else the largest
+/// window centred on the active track. `heights` holds each track's row count
+/// (a track plus its waveform row, when it has audio), so waveform rows are
+/// never counted as free space.
+pub(crate) fn track_window_rows(
+    heights: &[usize],
+    active: usize,
+    capacity: usize,
+) -> (usize, usize) {
+    let n = heights.len();
+    if n == 0 {
+        return (0, 0);
+    }
+    let active = active.min(n - 1);
+    if heights.iter().sum::<usize>() <= capacity {
         return (0, n);
     }
-    let start = active.saturating_sub(capacity / 2).min(n - capacity);
-    (start, capacity)
+    // Largest window that fits; prefer the centred one, then any other
+    // valid start (uneven row counts can make the centre too wide).
+    for count in (1..=n).rev() {
+        let lo = active.saturating_sub(count - 1).min(n - count);
+        let hi = active.min(n - count);
+        let preferred = active
+            .saturating_sub(count / 2)
+            .min(n - count)
+            .clamp(lo, hi);
+        let starts =
+            std::iter::once(preferred).chain((lo..=hi).filter(|start| *start != preferred));
+        for start in starts {
+            let end = start + count;
+            if heights[start..end].iter().sum::<usize>() <= capacity {
+                return (start, count);
+            }
+        }
+    }
+    (active, 1)
 }
 
 /// One track's segments as (duration, label, style) parts, plus a trailing

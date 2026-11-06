@@ -274,7 +274,8 @@ nile effect clear --clip 3
 
 Effects are rendered at export; the monitor plays a cached proxy for clips
 with effects, speed changes, transitions, or a picture size that differs from
-the sequence. The active audio track also gets a cached peak waveform row.
+the sequence. Every unmuted audio-bearing track also gets a cached peak
+waveform row directly beneath it (the active track is brighter).
 When the EDL has gaps or proxy entries, the preview also
 renders one continuous audio master; mpv plays that as an external audio
 track, so an EDL source switch does not restart the audio chain and stall the
