@@ -30,12 +30,16 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     } else {
         app.project.timeline.tracks.len()
     };
-    let wave_rows = usize::from(
-        !pool_strip_active(app)
-            && app
-                .track()
-                .is_some_and(|t| track_has_audio(&app.project, t)),
-    );
+    let wave_rows = if pool_strip_active(app) {
+        0
+    } else {
+        app.project
+            .timeline
+            .tracks
+            .iter()
+            .filter(|t| track_has_audio(&app.project, t))
+            .count()
+    };
     let (timeline_h, keys, msg_h) = panel_heights(track_count, wave_rows, f.area().height);
     // The add form carries its own key hints and needs the rows for its
     // fields; drop the bottom cheat-sheet while it is open.

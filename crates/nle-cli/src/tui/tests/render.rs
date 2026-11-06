@@ -4,7 +4,7 @@ use super::super::keys::handle_key;
 use super::super::motion::marker_col;
 use super::super::panels::fx::render_transition_form;
 use super::super::panels::pool::{asset_metadata, render_pool};
-use super::super::panels::timeline::{render_timeline, track_parts, track_window};
+use super::super::panels::timeline::{render_timeline, track_parts, track_window_rows};
 use super::super::panels::{hints_for, panel_heights, render};
 use super::*;
 use crate::waveform::Waveform;
@@ -156,11 +156,18 @@ fn track_labels_number_within_kind() {
 }
 
 #[test]
-fn track_window_centres_on_the_active_track() {
-    assert_eq!(track_window(2, 0, 4), (0, 2), "all fit");
-    assert_eq!(track_window(10, 0, 4), (0, 4));
-    assert_eq!(track_window(10, 9, 4), (6, 4), "clamped to the end");
-    assert_eq!(track_window(10, 5, 4), (3, 4), "centred");
+fn track_window_rows_centre_on_the_active_track() {
+    assert_eq!(track_window_rows(&[1; 2], 0, 4), (0, 2), "all fit");
+    assert_eq!(track_window_rows(&[1; 10], 0, 4), (0, 4));
+    assert_eq!(
+        track_window_rows(&[1; 10], 9, 4),
+        (6, 4),
+        "clamped to the end"
+    );
+    assert_eq!(track_window_rows(&[1; 10], 5, 4), (3, 4), "centred");
+    // Audio tracks take two rows, so fewer tracks fit in the same space.
+    assert_eq!(track_window_rows(&[2, 2, 1, 1], 0, 5), (0, 3));
+    assert_eq!(track_window_rows(&[2, 2, 1, 1], 2, 5), (1, 3));
 }
 
 #[test]
@@ -375,6 +382,71 @@ fn a_video_tracks_embedded_audio_shows_a_waveform_row() {
     assert!(
         text.contains('█'),
         "video audio should render a waveform:\n{text}"
+    );
+}
+
+// Every unmuted audio-bearing track gets its own waveform row; a muted
+// track keeps its segment row but drops the waveform.
+#[test]
+fn every_audio_bearing_track_gets_a_waveform_row() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut p = asset_project();
+    p.media[0].probe.streams.push(nle_core::media::RawStream {
+        index: 1,
+        codec_type: Some("audio".into()),
+        codec_name: Some("aac".into()),
+        sample_rate: Some("48000".into()),
+        channels: Some(2),
+        ..Default::default()
+    });
+    let audio = p.timeline.add_track(TrackKind::Audio);
+    p.timeline.tracks[audio].segments = vec![seg_clip(2, 3)];
+    let muted = p.timeline.add_track(TrackKind::Audio);
+    p.timeline.tracks[muted].segments = vec![seg_clip(3, 3)];
+    p.timeline.tracks[muted].muted = true;
+
+    let mut app = App::new(p, temp_project_path("wave-all-tracks"));
+    app.active_track = audio;
+    app.waveforms.insert(
+        1,
+        Waveform {
+            peaks: vec![1.0; 8],
+            duration: 10.0,
+        },
+    );
+    let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    term.draw(|f| {
+        render_timeline(
+            f,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 10,
+            },
+            &app,
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let rows: Vec<String> = (0..10)
+        .map(|y| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        rows.iter().filter(|row| row.contains('█')).count(),
+        2,
+        "embedded video audio + the audio track; the muted track has none:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.contains('~')).count(),
+        2,
+        "one waveform gutter per unmuted audio-bearing track"
     );
 }
 
