@@ -186,12 +186,17 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 ## Editing and TUI conventions
 
 - **One action catalog, three front-ends.** Every timeline edit is an `Action`
-  (`nle-core/src/action.rs`) run by `run_action`; keys, the `:cmd` line and
+  (`nle-core/src/action/mod.rs`) run by `run_action`; keys, the `:cmd` line and
   the CLI all use it, and the `:cmd` grammar *is* the CLI grammar (same flags;
   `--at`/`--track`/`--clip` default to the playhead/active track/clip-under in
   the TUI). A new action = an `Action` variant + a slot in `Action::slot`
-  (exhaustive) + both parity tests. Session state (playhead, register) is not
-  an action.
+  (exhaustive) + both parity tests. Session state (playhead, register
+  contents) is not an action.
+- **Visual range ops are catalog actions.** `DeleteRange`, `YankRange`, and
+  `PasteRange` back visual `d`/`y`/`p`; front-ends call `run_action`, never
+  `edit::delete_range_on`/`insert_segments_on` directly. The shared register
+  may hold a range; normal `p` refuses it (`RangeRegister`) and
+  `:paste-range`/visual `p` consume it.
 - **`--clip N` finds the clip's own track** (`resolve_track`); `--track`
   addresses position-based targets only. Tracks are 1-based — 0 is refused
   (`cli_index`), never silently "track 1".

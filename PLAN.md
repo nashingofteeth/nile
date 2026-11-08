@@ -214,12 +214,16 @@ below.)
 
 ## CLI/TUI action parity — shipped
 
-- **The action catalog** (`nle-core/src/action.rs`): one `Action` enum with
+- **The action catalog** (`nle-core/src/action/mod.rs`): one `Action` enum with
   explicit addressing (`--at` position, `--clip` id, `--seg` index — no
   hidden playhead) and one `run_action` executor over `Project` + `History`
   + the yank register. Three front-ends build the same values: TUI keybinds
   (high-frequency actions only), the TUI `:cmd` line (**every** action), and
   CLI subcommands (every action).
+- **Range operations are in the catalog:** `DeleteRange`/`YankRange`/
+  `PasteRange` back visual `d`/`y`/`p` and
+  `nile delete-range`/`yank-range`/`paste-range`. The shared register may hold
+  a range; normal `p` refuses it and `:paste-range` consumes it.
 - **One grammar:** `Action::parse` is the `:cmd` syntax and mirrors the CLI
   flags (`:delete --at 3 --ripple` ≡ `nile delete --at 3 --ripple`), with
   `--at`/`--track`/`--clip` defaulting to the playhead / active track /
@@ -231,8 +235,8 @@ below.)
   on TUI-made edits; the yank register (`.nile/<stem>/clipboard.json`) is shared —
   `nile yank` ↔ `yy`, `nile paste` ↔ `p`.
 - **New CLI surface:** `nile trim-in|trim-out|split|gap|delete|yank|paste|
-  extend|undo|redo`, `remove --ripple`, `--at`/`--clip`/`--seg` addressing,
-  and `nile show` segment indices.
+  delete-range|yank-range|paste-range|extend|undo|redo`, `remove --ripple`,
+  `--at`/`--clip`/`--seg` addressing, and `nile show` segment indices.
 - **IO commands in both:** `:export`/`:detect`/`:edl-import`/`:otio-import`/
   `:add` run in a worker thread (mpsc polled by the event loop) so the
   monitor keeps playing; the printing `cmd_*` functions became `*_work`
@@ -352,11 +356,13 @@ trimming of a transition's own span (retime it with `x`/`X`,
 ## Visual selection (shipped)
 
 - `v` selects whole segments on the active track; motions extend the range.
-- `d` deletes the selected range as one undo step; `y` copies it into a
-  session visual register; `p` pastes it at the playhead, splitting the clip
-  or gap under it when needed; `V` narrows to one segment.
+- `d` deletes the selected range as one undo step; `y` copies it into the
+  shared yank register; `p` pastes it at the playhead, splitting the clip or
+  gap under it when needed; `V` narrows to one segment.
 - Range delete refuses transitions (their neighbour spans need the normal
   delete path); paste inside a transition is refused.
+- `DeleteRange`/`YankRange`/`PasteRange` are catalog actions, so the CLI and
+  `:cmd` grammar spell them `delete-range`, `yank-range`, and `paste-range`.
 - Pasted clips/transitions get fresh ids; edge gaps fold into existing gaps.
 
 ## Per-track waveforms (shipped)
