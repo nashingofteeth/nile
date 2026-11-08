@@ -10,7 +10,8 @@ export.
 
 - `demo-sandbox/nile.json` — the demo project. It exercises a transition,
   crop/scale/eq/offset effects, a speed change, multiple video tracks, and an
-  audio track.
+  audio track. The hero sequence stays first for pixel checks; a longer tail
+  gives zoom/pan a realistic range.
 - `demo-sandbox/demo.mp4` — the demo's export.
 - `demo-sandbox/.demo-media` — validity stamp for generated media. Bump
   `MEDIA_VERSION` in `demo.sh` when generation flags change; the next run

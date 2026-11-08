@@ -115,6 +115,14 @@ $N --project nile.json effect crop --clip 5 --left 30 >/dev/null
 $N --project nile.json effect offset --clip 5 --x 0 --y -20 >/dev/null
 $N --project nile.json track add audio >/dev/null
 $N --project nile.json add sea.mp4 --track 3 --in 0 --out 2 >/dev/null
+# A longer tail makes the demo a realistic editing length and gives zoom/pan
+# something to work with (the hero section above stays first for pixel checks).
+$N --project nile.json gap --at 3.5 --frames 15 >/dev/null
+$N --project nile.json add sky.mp4 --at 4 --in 0 --out 3 >/dev/null
+$N --project nile.json add sea.mp4 --at 7 --in 0 --out 3 >/dev/null
+$N --project nile.json add sun.mp4 --at 10 --in 0 --out 2 >/dev/null
+$N --project nile.json add sky.mp4 --at 12 --in 0 --out 3 >/dev/null
+$N --project nile.json add sea.mp4 --at 15 --in 0 --out 3 >/dev/null
 $N --project nile.json show
 $N --project nile.json export -o demo.mp4 >/dev/null
 
@@ -202,8 +210,8 @@ if greyish "$grey_px"; then
 else
   echo "  ✗ eq not applied (${grey_px})"; exit 1
 fi
-if $N --project nile.json show | head -1 | grep -q '3.5 s'; then
-  echo "  ✓ transition shortening + 2× speed: 3.5 s timeline"
+if $N --project nile.json show | head -1 | grep -q '18 s'; then
+  echo "  ✓ transition shortening + 2× speed: 18 s timeline"
 else
   echo "  ✗ unexpected demo length:"; $N --project nile.json show | head -1; exit 1
 fi
@@ -214,11 +222,11 @@ else
 fi
 
 # Retime the existing blend in place: 15 frames gives the neighbours 0.5 s
-# back, so the timeline grows from 3.5 s to 4 s.
+# back, so the timeline grows from 18 s to 18.5 s.
 $N --project nile.json transition --at 2 --frames 15 >/dev/null
-if $N --project nile.json show | head -1 | grep -q '· 4 s ·' \
+if $N --project nile.json show | head -1 | grep -q '· 18.5 s ·' \
   && $N --project nile.json show | grep -q '(15f)'; then
-  echo "  ✓ transition retimed to 15f (timeline 4 s)"
+  echo "  ✓ transition retimed to 15f (timeline 18.5 s)"
 else
   echo "  ✗ transition retime wrong:"; $N --project nile.json show | head -4; exit 1
 fi
