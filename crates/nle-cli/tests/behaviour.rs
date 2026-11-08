@@ -38,15 +38,15 @@ fn split_and_ripple_delete() {
 fn range_actions_round_trip_through_the_cli() {
     let s = Sandbox::new();
     s.base(); // red 0–2, green 2–4, blue 4–6
-    s.ok(&["yank-range", "--from-seg", "0", "--to-seg", "1"]);
-    s.ok(&["paste-range", "--at", "6"]);
+    s.ok(&["yank", "--from-seg", "0", "--to-seg", "1"]);
+    s.ok(&["paste", "--range", "--at", "6"]);
     s.export("b.mp4");
     s.assert_dur("b.mp4", 10.0, "base + copied range");
     s.assert_px("b.mp4", 6.5, RED, "pasted red head");
     s.assert_px("b.mp4", 8.5, GREEN, "pasted green tail");
 
     s.base();
-    s.ok(&["delete-range", "--from-seg", "0", "--to-seg", "1"]);
+    s.ok(&["delete", "--from-seg", "0", "--to-seg", "1"]);
     s.export("b.mp4");
     s.assert_dur("b.mp4", 2.0, "only blue remains");
     s.assert_px("b.mp4", 1.0, BLUE, "blue at the new start");

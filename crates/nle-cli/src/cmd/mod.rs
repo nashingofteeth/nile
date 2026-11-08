@@ -67,6 +67,24 @@ pub(crate) fn cli_edge(s: &str) -> Result<Edge, String> {
     }
 }
 
+/// `--from-seg`/`--to-seg`: both or neither, and the range is inclusive.
+pub(crate) fn cli_seg_range(
+    from: Option<usize>,
+    to: Option<usize>,
+    what: &str,
+) -> Result<Option<(usize, usize)>, String> {
+    match (from, to) {
+        (None, None) => Ok(None),
+        (Some(a), Some(b)) if a <= b => Ok(Some((a, b))),
+        (Some(_), Some(_)) => Err(format!(
+            "{what}: --from-seg must not be greater than --to-seg"
+        )),
+        _ => Err(format!(
+            "{what}: pass both --from-seg and --to-seg for a range"
+        )),
+    }
+}
+
 /// The edit-shaped CLI commands as catalog [`Action`]s — the single
 /// mapping behind both `main`'s dispatch and the CLI-parity test, so a
 /// command can't exist without its action. `None` means "not an action"
@@ -124,55 +142,74 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             at,
             clip,
             seg,
+            from_seg,
+            to_seg,
             track,
             ripple,
         } => Some(cli_index(*track, "--track").and_then(|track| {
-            cli_target(at, *clip, *seg).map(|target| Action::Delete {
-                track,
-                target,
-                ripple: *ripple,
-            })
+            match cli_seg_range(*from_seg, *to_seg, "delete")? {
+                Some((start, end)) => {
+                    if at.is_some() || clip.is_some() || seg.is_some() {
+                        return Err(
+                            "delete: use --from-seg/--to-seg or --at/--clip/--seg, not both"
+                                .to_string(),
+                        );
+                    }
+                    if *ripple {
+                        return Err("delete --from-seg/--to-seg is already a ripple".to_string());
+                    }
+                    Ok(Action::DeleteRange { track, start, end })
+                }
+                None => cli_target(at, *clip, *seg).map(|target| Action::Delete {
+                    track,
+                    target,
+                    ripple: *ripple,
+                }),
+            }
         })),
         Cmd::Yank {
             at,
             clip,
             seg,
+            from_seg,
+            to_seg,
             track,
         } => Some(cli_index(*track, "--track").and_then(|track| {
-            cli_target(at, *clip, *seg).map(|target| Action::Yank { track, target })
+            match cli_seg_range(*from_seg, *to_seg, "yank")? {
+                Some((start, end)) => {
+                    if at.is_some() || clip.is_some() || seg.is_some() {
+                        return Err(
+                            "yank: use --from-seg/--to-seg or --at/--clip/--seg, not both"
+                                .to_string(),
+                        );
+                    }
+                    Ok(Action::YankRange { track, start, end })
+                }
+                None => cli_target(at, *clip, *seg).map(|target| Action::Yank { track, target }),
+            }
         })),
-        Cmd::Paste { at, track, ripple } => Some(cli_index(*track, "--track").and_then(|track| {
-            cli_time(at).map(|at| Action::Paste {
-                track,
-                at,
-                ripple: *ripple,
-                segment: None,
+        Cmd::Paste {
+            at,
+            track,
+            ripple,
+            range,
+        } => Some(cli_index(*track, "--track").and_then(|track| {
+            cli_time(at).and_then(|at| {
+                if *range {
+                    if *ripple {
+                        return Err("paste --range is already ripple".to_string());
+                    }
+                    Ok(Action::PasteRange { track, at })
+                } else {
+                    Ok(Action::Paste {
+                        track,
+                        at,
+                        ripple: *ripple,
+                        segment: None,
+                    })
+                }
             })
         })),
-        Cmd::DeleteRange {
-            from_seg,
-            to_seg,
-            track,
-        } => Some(
-            cli_index(*track, "--track").map(|track| Action::DeleteRange {
-                track,
-                start: *from_seg,
-                end: *to_seg,
-            }),
-        ),
-        Cmd::YankRange {
-            from_seg,
-            to_seg,
-            track,
-        } => Some(cli_index(*track, "--track").map(|track| Action::YankRange {
-            track,
-            start: *from_seg,
-            end: *to_seg,
-        })),
-        Cmd::PasteRange { at, track } => Some(
-            cli_index(*track, "--track")
-                .and_then(|track| cli_time(at).map(|at| Action::PasteRange { track, at })),
-        ),
         Cmd::Extend {
             clip,
             seg,

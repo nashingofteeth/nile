@@ -221,9 +221,9 @@ below.)
   (high-frequency actions only), the TUI `:cmd` line (**every** action), and
   CLI subcommands (every action).
 - **Range operations are in the catalog:** `DeleteRange`/`YankRange`/
-  `PasteRange` back visual `d`/`y`/`p` and
-  `nile delete-range`/`yank-range`/`paste-range`. The shared register may hold
-  a range; normal `p` refuses it and `:paste-range` consumes it.
+  `PasteRange` back visual `d`/`y`/`p` and the range flags on `nile delete`,
+  `yank`, and `paste`. The shared register may hold a range; normal `p`
+  refuses it and `:paste --range` consumes it.
 - **One grammar:** `Action::parse` is the `:cmd` syntax and mirrors the CLI
   flags (`:delete --at 3 --ripple` ≡ `nile delete --at 3 --ripple`), with
   `--at`/`--track`/`--clip` defaulting to the playhead / active track /
@@ -235,7 +235,7 @@ below.)
   on TUI-made edits; the yank register (`.nile/<stem>/clipboard.json`) is shared —
   `nile yank` ↔ `yy`, `nile paste` ↔ `p`.
 - **New CLI surface:** `nile trim-in|trim-out|split|gap|delete|yank|paste|
-  delete-range|yank-range|paste-range|extend|undo|redo`, `remove --ripple`,
+  extend|undo|redo`, range flags on delete/yank/paste, `remove --ripple`,
   `--at`/`--clip`/`--seg` addressing, and `nile show` segment indices.
 - **IO commands in both:** `:export`/`:detect`/`:edl-import`/`:otio-import`/
   `:add` run in a worker thread (mpsc polled by the event loop) so the
@@ -362,7 +362,8 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - Range delete refuses transitions (their neighbour spans need the normal
   delete path); paste inside a transition is refused.
 - `DeleteRange`/`YankRange`/`PasteRange` are catalog actions, so the CLI and
-  `:cmd` grammar spell them `delete-range`, `yank-range`, and `paste-range`.
+  `:cmd` grammar reach them as `delete|yank --from-seg A --to-seg B` and
+  `paste --range`.
 - Pasted clips/transitions get fresh ids; edge gaps fold into existing gaps.
 
 ## Per-track waveforms (shipped)

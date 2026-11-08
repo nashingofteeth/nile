@@ -146,8 +146,9 @@ screen.
 selected range as one undo step, `y` copies it into the shared yank register,
 and `p` pastes the whole range at the playhead (splitting the clip or gap under
 it when needed). `V` narrows the selection to one segment; `v` or `Esc`
-cancels. The same operations are actions, so the CLI has `delete-range`,
-`yank-range`, and `paste-range`.
+cancels. The same operations are actions, so the CLI expresses them as
+`delete --from-seg A --to-seg B`, `yank --from-seg A --to-seg B`, and
+`paste --range`.
 
 **Effects panel.** `j`/`k` select, `1`–`9` edit that row, `Enter` edits, `d`
 drops, `D` clears. Add crop/scale/eq/offset with `c`/`s`/`e`/`o`; LUTs are
@@ -183,8 +184,8 @@ The `:` line is the CLI grammar, flag for flag:
 ```text
 :trim-in|out [--ripple]       :split
 :gap [--frames N|--dur T]     :delete|:yank [--at T|--clip N|--seg N]
-:delete-range|:yank-range --from-seg A --to-seg B
-:paste-range [--at T]         :paste [--ripple]
+:delete|:yank --from-seg A --to-seg B
+:paste [--ripple]             :paste --range [--at T]
 :extend --edge in|out --to T [--ripple]
 :speed PERCENT                :transition [dissolve|fade] [--frames N|--dur T|--percent P]
 :effect [--clip N] [--index N] crop|scale|offset|eq|lut …
@@ -277,9 +278,9 @@ nile delete --clip 3 --ripple
 nile delete --seg 2
 nile yank --clip 3
 nile paste --at 5 --ripple
-nile delete-range --from-seg 0 --to-seg 1
-nile yank-range --from-seg 0 --to-seg 1
-nile paste-range --at 5
+nile delete --from-seg 0 --to-seg 1
+nile yank --from-seg 0 --to-seg 1
+nile paste --range --at 5
 nile extend --clip 3 --edge out --to 8
 nile speed 3 50                           # clip #3 at 50%
 nile transition --at 3 --frames 20

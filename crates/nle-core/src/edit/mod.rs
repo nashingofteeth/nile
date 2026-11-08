@@ -126,7 +126,7 @@ pub enum EditError {
     RegisterEmpty,
     #[error("the register was yanked from a different project — {0} is not in this pool")]
     RegisterForeign(String),
-    #[error("the register holds a range — paste it with visual p or :paste-range")]
+    #[error("the register holds a range — paste it with visual p or :paste --range")]
     RangeRegister,
     #[error("can't remove the only video track")]
     LastVideoTrack,

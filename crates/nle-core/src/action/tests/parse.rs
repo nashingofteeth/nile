@@ -26,9 +26,9 @@ fn every_action_has_a_colon_spelling() {
         "effect crop --clip 1 --left 10",
         "effect rm --clip 1 --index 0",
         "effect clear --clip 1",
-        "delete-range --from-seg 1 --to-seg 2",
-        "yank-range --from-seg 1 --to-seg 2",
-        "paste-range --at 3",
+        "delete --from-seg 1 --to-seg 2",
+        "yank --from-seg 1 --to-seg 2",
+        "paste --range --at 3",
     ];
     let mut seen = vec![false; SLOTS];
     for spec in SPECS {
@@ -38,6 +38,16 @@ fn every_action_has_a_colon_spelling() {
         seen[s] = true;
     }
     assert!(seen.iter().all(|&s| s), "uncovered slots: {seen:?}");
+}
+
+#[test]
+fn range_flags_are_paired_and_exclusive() {
+    assert!(parse("delete --from-seg 1", &defaults()).is_err());
+    assert!(parse("delete --to-seg 2", &defaults()).is_err());
+    assert!(parse("delete --from-seg 2 --to-seg 1", &defaults()).is_err());
+    assert!(parse("delete --from-seg 1 --to-seg 2 --at 3", &defaults()).is_err());
+    assert!(parse("yank --from-seg 1 --to-seg 2 --clip 3", &defaults()).is_err());
+    assert!(parse("paste --range --ripple", &defaults()).is_err());
 }
 
 #[test]

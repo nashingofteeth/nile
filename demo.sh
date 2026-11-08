@@ -395,11 +395,11 @@ $N --project checks/range.json init --force >/dev/null
 $N --project checks/range.json import red.mp4 blue.mp4 >/dev/null
 $N --project checks/range.json add red.mp4 --in 0 --out 2 >/dev/null
 $N --project checks/range.json add blue.mp4 --at 2 --in 0 --out 2 >/dev/null
-$N --project checks/range.json yank-range --from-seg 0 --to-seg 0
-$N --project checks/range.json paste-range --at 4
-$N --project checks/range.json delete-range --from-seg 0 --to-seg 0
+$N --project checks/range.json yank --from-seg 0 --to-seg 0
+$N --project checks/range.json paste --range --at 4
+$N --project checks/range.json delete --from-seg 0 --to-seg 0
 if $N --project checks/range.json show | head -1 | grep -q '4 s'; then
-  echo "  ✓ yank-range + paste-range + delete-range leave a 4 s timeline"
+  echo "  ✓ yank/paste/delete range flags leave a 4 s timeline"
 else
   echo "  ✗ range actions wrong:"; $N --project checks/range.json show | head -4; exit 1
 fi
