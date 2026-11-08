@@ -28,7 +28,7 @@ pub enum ParseError {
 }
 
 /// Boolean options (everything else takes a value).
-const BOOL_FLAGS: &[&str] = &["ripple"];
+const BOOL_FLAGS: &[&str] = &["ripple", "range"];
 
 /// Short flags the CLI uses, spelled `-o` in the `:cmd` line too
 /// (`:export -o out.mp4`). Only the ones that exist on the CLI.
@@ -196,18 +196,34 @@ fn opt_u32(f: &mut Flags, name: &str) -> Result<Option<u32>, ParseError> {
 }
 
 /// Inclusive whole-segment range: `--from-seg A --to-seg B` (0-based, as
-/// printed by `nile show`).
-fn parse_seg_range(f: &mut Flags, usage: &str) -> Result<(usize, usize), ParseError> {
-    let from = opt_usize(f, "from-seg")?
-        .ok_or_else(|| ParseError::Invalid(format!("{usage}: --from-seg is required")))?;
-    let to = opt_usize(f, "to-seg")?
-        .ok_or_else(|| ParseError::Invalid(format!("{usage}: --to-seg is required")))?;
-    if from > to {
-        return Err(ParseError::Invalid(format!(
+/// printed by `nile show`). Both or neither; the two forms are validated by
+/// the caller.
+fn opt_seg_range(f: &mut Flags, usage: &str) -> Result<Option<(usize, usize)>, ParseError> {
+    let from = opt_usize(f, "from-seg")?;
+    let to = opt_usize(f, "to-seg")?;
+    match (from, to) {
+        (None, None) => Ok(None),
+        (Some(a), Some(b)) if a <= b => Ok(Some((a, b))),
+        (Some(_), Some(_)) => Err(ParseError::Invalid(format!(
             "{usage}: --from-seg must not be greater than --to-seg"
+        ))),
+        _ => Err(ParseError::Invalid(format!(
+            "{usage}: pass both --from-seg and --to-seg for a range"
+        ))),
+    }
+}
+
+/// A range cannot be mixed with a single-target selector.
+fn reject_target_flags(f: &mut Flags, usage: &str) -> Result<(), ParseError> {
+    let at = opt_time(f, "at")?;
+    let clip = opt_u32(f, "clip")?;
+    let seg = opt_usize(f, "seg")?;
+    if at.is_some() || clip.is_some() || seg.is_some() {
+        return Err(ParseError::Invalid(format!(
+            "{usage}: use --from-seg/--to-seg or --at/--clip/--seg, not both"
         )));
     }
-    Ok((from, to))
+    Ok(())
 }
 
 /// Seconds or timecode, optionally negative (a gap head reaches back
@@ -561,59 +577,67 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             }
         }
         "delete" | "del" => {
+            let t = parse_track(&mut f, d)?;
+            let r = f.take_bool("ripple");
+            if let Some((start, end)) = opt_seg_range(&mut f, ":delete")? {
+                reject_target_flags(&mut f, ":delete")?;
+                if r {
+                    return Err(ParseError::Invalid(
+                        ":delete range is already a ripple — drop --ripple".to_string(),
+                    ));
+                }
+                f.finish(":delete [--from-seg A --to-seg B | --at T | --clip N | --seg N] [--track N] [--ripple]")?;
+                return Ok(Action::DeleteRange {
+                    track: t,
+                    start,
+                    end,
+                });
+            }
             let target = parse_target(&mut f, d, "what to delete")?;
-            let (t, r) = (parse_track(&mut f, d)?, f.take_bool("ripple"));
-            f.finish(":delete [--at T | --clip N | --seg N] [--track N] [--ripple]")?;
+            f.finish(":delete [--from-seg A --to-seg B | --at T | --clip N | --seg N] [--track N] [--ripple]")?;
             Ok(Action::Delete {
                 track: t,
                 target,
                 ripple: r,
             })
         }
-        "delete-range" => {
-            let (start, end) = parse_seg_range(&mut f, ":delete-range")?;
-            let t = parse_track(&mut f, d)?;
-            f.finish(":delete-range --from-seg A --to-seg B [--track N]")?;
-            Ok(Action::DeleteRange {
-                track: t,
-                start,
-                end,
-            })
-        }
-        "yank-range" => {
-            let (start, end) = parse_seg_range(&mut f, ":yank-range")?;
-            let t = parse_track(&mut f, d)?;
-            f.finish(":yank-range --from-seg A --to-seg B [--track N]")?;
-            Ok(Action::YankRange {
-                track: t,
-                start,
-                end,
-            })
-        }
-        "paste-range" => {
-            let (a, t) = (at(&mut f, d)?, parse_track(&mut f, d)?);
-            f.finish(":paste-range [--at T] [--track N]")?;
-            Ok(Action::PasteRange { track: t, at: a })
-        }
         "yank" => {
-            let target = parse_target(&mut f, d, "what to yank")?;
             let t = parse_track(&mut f, d)?;
-            f.finish(":yank [--at T | --clip N | --seg N] [--track N]")?;
+            if let Some((start, end)) = opt_seg_range(&mut f, ":yank")? {
+                reject_target_flags(&mut f, ":yank")?;
+                f.finish(
+                    ":yank [--from-seg A --to-seg B | --at T | --clip N | --seg N] [--track N]",
+                )?;
+                return Ok(Action::YankRange {
+                    track: t,
+                    start,
+                    end,
+                });
+            }
+            let target = parse_target(&mut f, d, "what to yank")?;
+            f.finish(":yank [--from-seg A --to-seg B | --at T | --clip N | --seg N] [--track N]")?;
             Ok(Action::Yank { track: t, target })
         }
         "paste" => {
-            let (a, t, r) = (
-                at(&mut f, d)?,
-                parse_track(&mut f, d)?,
-                f.take_bool("ripple"),
-            );
-            f.finish(":paste [--at T] [--track N] [--ripple]")?;
-            Ok(Action::Paste {
-                track: t,
-                at: a,
-                ripple: r,
-                segment: None,
-            })
+            let range = f.take_bool("range");
+            let ripple = f.take_bool("ripple");
+            let (a, t) = (at(&mut f, d)?, parse_track(&mut f, d)?);
+            if range && ripple {
+                return Err(ParseError::Invalid(
+                    ":paste --range is already ripple — drop --ripple".to_string(),
+                ));
+            }
+            f.finish(":paste [--at T] [--track N] [--range | --ripple]")?;
+            if range {
+                Ok(Action::PasteRange { track: t, at: a })
+            } else {
+                Ok(Action::Paste {
+                    track: t,
+                    at: a,
+                    ripple,
+                    segment: None,
+                })
+            }
         }
         "speed" => {
             // `:speed 50` (the `R` prompt's spelling) or `:speed --rate 50 --clip 3`.

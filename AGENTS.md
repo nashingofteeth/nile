@@ -196,7 +196,7 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   `PasteRange` back visual `d`/`y`/`p`; front-ends call `run_action`, never
   `edit::delete_range_on`/`insert_segments_on` directly. The shared register
   may hold a range; normal `p` refuses it (`RangeRegister`) and
-  `:paste-range`/visual `p` consume it.
+  `:paste --range`/visual `p` consume it.
 - **`--clip N` finds the clip's own track** (`resolve_track`); `--track`
   addresses position-based targets only. Tracks are 1-based — 0 is refused
   (`cli_index`), never silently "track 1".
