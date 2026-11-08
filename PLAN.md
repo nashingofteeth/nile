@@ -359,8 +359,9 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - `d` deletes the selected range as one undo step; `y` copies it into the
   shared yank register; `p` pastes it at the playhead, splitting the clip or
   gap under it when needed; `V` narrows to one segment.
-- Range delete refuses transitions (their neighbour spans need the normal
-  delete path); paste inside a transition is refused.
+- Range delete restores a boundary transition's surviving handle; blends
+  wholly inside the range disappear with it. Paste inside a transition is
+  refused.
 - `DeleteRange`/`YankRange`/`PasteRange` are catalog actions, so the CLI and
   `:cmd` grammar reach them as `delete|yank --from-seg A --to-seg B` and
   `paste --range`.

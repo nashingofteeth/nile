@@ -404,6 +404,19 @@ else
   echo "  ✗ range actions wrong:"; $N --project checks/range.json show | head -4; exit 1
 fi
 
+# A range delete through a transition restores the surviving neighbour.
+$N --project checks/range.json init --force >/dev/null
+$N --project checks/range.json import red.mp4 blue.mp4 >/dev/null
+$N --project checks/range.json add red.mp4 --in 0 --out 2 >/dev/null
+$N --project checks/range.json add blue.mp4 --at 2 --in 0 --out 2 >/dev/null
+$N --project checks/range.json transition --at 2 --frames 15 >/dev/null
+$N --project checks/range.json delete --from-seg 0 --to-seg 1 >/dev/null
+if $N --project checks/range.json show | head -1 | grep -q '2 s'; then
+  echo "  ✓ range delete through a transition restores the blue head"
+else
+  echo "  ✗ transition range delete wrong:"; $N --project checks/range.json show | head -4; exit 1
+fi
+
 echo "== check: live shell hand-off =="
 # A small project for the shell↔TUI experiment: open the TUI on the demo in one
 # terminal, run nile commands in another. Each write is adopted within a tick

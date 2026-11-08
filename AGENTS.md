@@ -194,9 +194,10 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   contents) is not an action.
 - **Visual range ops are catalog actions.** `DeleteRange`, `YankRange`, and
   `PasteRange` back visual `d`/`y`/`p`; front-ends call `run_action`, never
-  `edit::delete_range_on`/`insert_segments_on` directly. The shared register
-  may hold a range; normal `p` refuses it (`RangeRegister`) and
-  `:paste --range`/visual `p` consume it.
+  `edit::delete_range_on`/`insert_segments_on` directly. `DeleteRange`
+  restores a boundary transition's surviving handle and drops interior blends
+  with the range. The shared register may hold a range; normal `p` refuses it
+  (`RangeRegister`) and `:paste --range`/visual `p` consume it.
 - **`--clip N` finds the clip's own track** (`resolve_track`); `--track`
   addresses position-based targets only. Tracks are 1-based — 0 is refused
   (`cli_index`), never silently "track 1".

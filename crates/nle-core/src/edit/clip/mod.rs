@@ -14,7 +14,9 @@ pub use delete::{
 
 use crate::project::Project;
 use crate::time::Seconds;
-use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Track, Transition};
+use crate::timeline::{
+    Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Track, Transition, TransitionSource,
+};
 
 use super::extend::extend_gap_ending_at;
 use super::util::{
@@ -520,7 +522,11 @@ pub fn paste_ripple_on(
 }
 
 /// Remove a contiguous inclusive range of whole segments in one undo step.
-/// Transitions carry neighbour spans and are deliberately excluded.
+/// A transition inside the range is removed with its neighbours: the first
+/// blend gives its left handle back to the surviving left segment, the last
+/// blend gives its right handle back, and interior blends disappear with the
+/// range. A range that is exactly one transition keeps the `dd` semantics
+/// (gap spans are preserved when there is no clip handle to restore).
 pub fn delete_range_on(
     project: &Project,
     track: usize,
@@ -531,11 +537,16 @@ pub fn delete_range_on(
     if start > end || end >= tr.segments.len() {
         return Err(EditError::SegmentNotFound(start.min(end)));
     }
+    if start == end
+        && let Segment::Transition(t) = tr.segments[start].clone()
+    {
+        return delete::delete_transition_on(project, track, start, t);
+    }
     if tr.segments[start..=end]
         .iter()
         .any(|s| matches!(s, Segment::Transition(_)))
     {
-        return Err(EditError::RangeTransition);
+        return delete_range_through_transitions(project, track, start, end);
     }
     let mut ops = Vec::with_capacity(end - start + 1);
     for index in (start..=end).rev() {
@@ -571,6 +582,112 @@ pub fn delete_range_on(
         desc += " (merged the new seam)";
     }
     Ok(Batch { ops, desc })
+}
+
+/// A range that contains a transition can change both boundary neighbours;
+/// build the resulting track once and swap it in as one history batch.
+fn delete_range_through_transitions(
+    project: &Project,
+    track: usize,
+    start: usize,
+    end: usize,
+) -> Result<Batch, EditError> {
+    let before = track_at(project, track)?.segments.clone();
+    let mut after = before[..start].to_vec();
+    let mut suffix = before[end + 1..].to_vec();
+
+    // A transition at the range's left edge still owns the surviving left
+    // neighbour's tail. If that neighbour is a gap, its span stays a gap
+    // (the `dd` rule when no clip handle can be restored).
+    if let Segment::Transition(t) = &before[start]
+        && let Some(left) = after.last_mut()
+        && !restore_left(left, t)
+        && let Segment::Gap(gap) = left
+    {
+        gap.duration += t.dur;
+    }
+
+    // The symmetric right edge.
+    if let Segment::Transition(t) = &before[end]
+        && let Some(right) = suffix.first_mut()
+        && !restore_right(right, t)
+        && let Segment::Gap(gap) = right
+    {
+        gap.duration += t.dur;
+    }
+
+    // The removal joins two gaps: fold them so the track never holds two
+    // adjacent Gap segments.
+    if let (Some(Segment::Gap(left)), Some(Segment::Gap(right))) =
+        (after.last_mut(), suffix.first())
+    {
+        left.duration += right.duration;
+        suffix.remove(0);
+    }
+    after.extend(suffix);
+
+    let mut ops = Vec::with_capacity(before.len() + after.len());
+    for index in (0..before.len()).rev() {
+        ops.push(EditOp::Remove {
+            track,
+            index,
+            segment: before[index].clone(),
+        });
+    }
+    for (index, segment) in after.into_iter().enumerate() {
+        ops.push(EditOp::Insert {
+            track,
+            index,
+            segment,
+        });
+    }
+    Ok(Batch {
+        ops,
+        desc: format!(
+            "deleted {} segment(s) (through transitions)",
+            end - start + 1
+        ),
+    })
+}
+
+fn restore_left(segment: &mut Segment, transition: &Transition) -> bool {
+    let (
+        Segment::Clip(left),
+        TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+            ..
+        },
+    ) = (segment, &transition.a)
+    else {
+        return false;
+    };
+    if left.asset != *asset || left.asset_out != *src_in {
+        return false;
+    }
+    left.asset_out = *src_out;
+    true
+}
+
+fn restore_right(segment: &mut Segment, transition: &Transition) -> bool {
+    let (
+        Segment::Clip(right),
+        TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+            ..
+        },
+    ) = (segment, &transition.b)
+    else {
+        return false;
+    };
+    if right.asset != *asset || right.asset_in != *src_out {
+        return false;
+    }
+    right.asset_in = *src_in;
+    true
 }
 
 /// Insert whole segments at any playhead, giving copied clips/transitions
