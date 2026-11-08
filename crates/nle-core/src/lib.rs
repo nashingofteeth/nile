@@ -20,8 +20,8 @@ pub mod timeline;
 
 pub use action::{
     Action, DEFAULT_TRANSITION_FRAMES, Edge, GapLen, Outcome, ParseDefaults, ParseError, Register,
-    Target, TransitionLen, load_register, load_register_without_migration, register_path,
-    run_action, save_register, track_label,
+    RegisterEntry, Target, TransitionLen, load_register, load_register_without_migration,
+    register_path, run_action, save_register, track_label,
 };
 pub use detect::{Span, reconstruct};
 pub use document::Document;

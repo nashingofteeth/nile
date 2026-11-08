@@ -195,6 +195,21 @@ fn opt_u32(f: &mut Flags, name: &str) -> Result<Option<u32>, ParseError> {
     }
 }
 
+/// Inclusive whole-segment range: `--from-seg A --to-seg B` (0-based, as
+/// printed by `nile show`).
+fn parse_seg_range(f: &mut Flags, usage: &str) -> Result<(usize, usize), ParseError> {
+    let from = opt_usize(f, "from-seg")?
+        .ok_or_else(|| ParseError::Invalid(format!("{usage}: --from-seg is required")))?;
+    let to = opt_usize(f, "to-seg")?
+        .ok_or_else(|| ParseError::Invalid(format!("{usage}: --to-seg is required")))?;
+    if from > to {
+        return Err(ParseError::Invalid(format!(
+            "{usage}: --from-seg must not be greater than --to-seg"
+        )));
+    }
+    Ok((from, to))
+}
+
 /// Seconds or timecode, optionally negative (a gap head reaches back
 /// past time 0).
 fn parse_pos(s: &str) -> Result<f64, ParseError> {
@@ -554,6 +569,31 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                 target,
                 ripple: r,
             })
+        }
+        "delete-range" => {
+            let (start, end) = parse_seg_range(&mut f, ":delete-range")?;
+            let t = parse_track(&mut f, d)?;
+            f.finish(":delete-range --from-seg A --to-seg B [--track N]")?;
+            Ok(Action::DeleteRange {
+                track: t,
+                start,
+                end,
+            })
+        }
+        "yank-range" => {
+            let (start, end) = parse_seg_range(&mut f, ":yank-range")?;
+            let t = parse_track(&mut f, d)?;
+            f.finish(":yank-range --from-seg A --to-seg B [--track N]")?;
+            Ok(Action::YankRange {
+                track: t,
+                start,
+                end,
+            })
+        }
+        "paste-range" => {
+            let (a, t) = (at(&mut f, d)?, parse_track(&mut f, d)?);
+            f.finish(":paste-range [--at T] [--track N]")?;
+            Ok(Action::PasteRange { track: t, at: a })
         }
         "yank" => {
             let target = parse_target(&mut f, d, "what to yank")?;

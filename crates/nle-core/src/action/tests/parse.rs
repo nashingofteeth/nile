@@ -26,6 +26,9 @@ fn every_action_has_a_colon_spelling() {
         "effect crop --clip 1 --left 10",
         "effect rm --clip 1 --index 0",
         "effect clear --clip 1",
+        "delete-range --from-seg 1 --to-seg 2",
+        "yank-range --from-seg 1 --to-seg 2",
+        "paste-range --at 3",
     ];
     let mut seen = vec![false; SLOTS];
     for spec in SPECS {

@@ -209,10 +209,14 @@ fn yank_fills_the_register_and_paste_consumes_it() {
     assert!(!out.changed, "a yank writes the register, not the project");
     assert!(matches!(
         reg,
-        Some(Register {
-            segment: Segment::Clip(Clip { id: 1, .. }),
-            ..
-        })
+        Some(Register { ref entries })
+            if matches!(
+                entries.as_slice(),
+                [RegisterEntry {
+                    segment: Segment::Clip(Clip { id: 1, .. }),
+                    ..
+                }]
+            )
     ));
     // Pasting without a register is an error; with one it inserts.
     assert!(matches!(
@@ -461,4 +465,60 @@ fn extend_moves_an_edge_under_the_same_rules_as_the_tui() {
         Some((1.0, 5.0)),
         "{segs:?}"
     );
+}
+
+#[test]
+fn range_delete_and_paste_are_catalog_actions() {
+    let mut p = fixture(); // [clip #1][gap][clip #2]
+    let mut reg = None;
+
+    let out = run(
+        &mut p,
+        &mut reg,
+        &Action::DeleteRange {
+            track: 0,
+            start: 0,
+            end: 1,
+        },
+    )
+    .unwrap();
+    assert!(out.changed);
+    assert_eq!(out.playhead, Some(0), "the range start is the landing");
+    assert_eq!(p.timeline.video_track().unwrap().segments.len(), 2);
+
+    // Yank [clip #2, gap] into the shared register (the TUI's visual range).
+    let out = run(
+        &mut p,
+        &mut reg,
+        &Action::YankRange {
+            track: 0,
+            start: 0,
+            end: 1,
+        },
+    )
+    .unwrap();
+    assert!(!out.changed);
+    assert_eq!(reg.as_ref().map(|r| r.entries.len()), Some(2));
+
+    // The range paste is ripple-insert; a normal paste must not silently
+    // drop the second entry.
+    assert!(
+        run(&mut p, &mut reg, &Action::PasteRange { track: 0, at: 10.0 },)
+            .unwrap()
+            .changed
+    );
+    assert!(matches!(
+        run(
+            &mut p,
+            &mut reg,
+            &Action::Paste {
+                track: 0,
+                at: 0.0,
+                ripple: true,
+                segment: None,
+            },
+        )
+        .unwrap_err(),
+        EditError::RangeRegister
+    ));
 }

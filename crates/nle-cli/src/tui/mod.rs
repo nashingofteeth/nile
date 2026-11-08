@@ -273,8 +273,6 @@ pub struct App {
     timeline_width: u16,
     /// The background render/import, if one is running.
     job: Option<Job>,
-    /// Segments copied by visual-mode `y`; session-only, like a vim register.
-    pub(crate) visual_register: Vec<nle_core::timeline::Segment>,
     /// Cached peak arrays for the waveform strip, by asset id.
     pub(crate) waveforms: HashMap<u32, Waveform>,
     /// The waveform decode worker, if one is running.
@@ -333,7 +331,6 @@ impl App {
             timeline_view: TimelineView::default(),
             timeline_width: 80,
             job: None,
-            visual_register: Vec::new(),
             waveforms: HashMap::new(),
             wave_job: None,
             keyframes: HashMap::new(),
@@ -1010,7 +1007,6 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     app.wave_job = None;
     app.keyframes.clear();
     app.keyframe_job = None;
-    app.visual_register.clear();
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())

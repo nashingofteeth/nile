@@ -107,10 +107,12 @@ fn the_dump_does_not_migrate_a_legacy_register() {
     let path = temp_project_path("dump-legacy-register");
     asset_project().save(&path).unwrap();
     let reg = nle_core::Register {
-        segment: TimelineSegment::Gap(TimelineGap {
-            duration: Seconds::from_integer(2),
-        }),
-        path: None,
+        entries: vec![nle_core::RegisterEntry {
+            segment: TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
+            path: None,
+        }],
     };
     nle_core::save_register(&path, Some(&reg)).unwrap();
     let new = nle_core::register_path(&path);

@@ -6,12 +6,11 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use nle_core::{edit, frame_of, grid_time, secs_f64};
+use nle_core::{Action, grid_time};
 
 use crate::mpv::Mpv;
 
-use super::super::actions::persist_and_refresh;
-use super::super::croc::CrocAct;
+use super::super::actions::run_action;
 use super::super::{App, Mode, VisualState};
 use super::normal_key;
 
@@ -73,7 +72,7 @@ pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             app.set_message("timeline");
         }
         KeyCode::Char('d') => delete_selected(app, player, state),
-        KeyCode::Char('y') => yank_selected(app, state),
+        KeyCode::Char('y') => yank_selected(app, player, state),
         KeyCode::Char('p') => paste_selected(app, player, state),
         KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_timeline(1.5),
         KeyCode::Char('-') => app.zoom_timeline(1.0 / 1.5),
@@ -130,70 +129,30 @@ fn delete_selected(app: &mut App, player: &dyn Mpv, state: VisualState) {
     let Some((track, start, end)) = selection(app) else {
         return;
     };
-    let Some(tr) = app.project.timeline.track(track) else {
-        app.fail("track vanished");
-        return;
-    };
-    let start_time = secs_f64(&tr.start_of(start));
-    let batch = match edit::delete_range_on(&app.project, track, start, end) {
-        Ok(batch) => batch,
-        Err(e) => {
-            app.fail(&e.to_string());
-            return;
-        }
-    };
-    let frame = frame_of(app.project.fps.as_ref(), start_time);
-    let notice = batch.desc.clone();
-    if let Err(e) = app.project.apply(batch, frame) {
-        app.fail(&e.to_string());
-        return;
+    if run_action(app, player, &Action::DeleteRange { track, start, end }) {
+        app.mode = Mode::Normal;
     }
     let _ = state;
-    app.mode = Mode::Normal;
-    app.playhead = start_time.clamp(0.0, app.last_frame());
-    app.croc.play(CrocAct::Chomp);
-    app.set_message(&notice);
-    persist_and_refresh(app, player);
 }
 
-fn yank_selected(app: &mut App, state: VisualState) {
+fn yank_selected(app: &mut App, player: &dyn Mpv, state: VisualState) {
     let Some((track, start, end)) = selection(app) else {
         return;
     };
-    let Some(tr) = app.project.timeline.track(track) else {
-        app.fail("track vanished");
-        return;
-    };
-    app.visual_register = tr.segments[start..=end].to_vec();
-    app.set_message(&format!(
-        "yanked {} segment(s) — p at the playhead",
-        end - start + 1
-    ));
+    // A yank is not an edit, so a success leaves visual mode open.
+    run_action(app, player, &Action::YankRange { track, start, end });
     let _ = state;
 }
 
 fn paste_selected(app: &mut App, player: &dyn Mpv, state: VisualState) {
-    if app.visual_register.is_empty() {
-        app.fail("visual register is empty");
-        return;
+    if run_action(
+        app,
+        player,
+        &Action::PasteRange {
+            track: state.track,
+            at: app.playhead,
+        },
+    ) {
+        app.mode = Mode::Normal;
     }
-    let at = app.playhead;
-    let batch = match edit::insert_segments_on(&app.project, state.track, at, &app.visual_register)
-    {
-        Ok(batch) => batch,
-        Err(e) => {
-            app.fail(&e.to_string());
-            return;
-        }
-    };
-    let frame = frame_of(app.project.fps.as_ref(), at);
-    let notice = batch.desc.clone();
-    if let Err(e) = app.project.apply(batch, frame) {
-        app.fail(&e.to_string());
-        return;
-    }
-    app.mode = Mode::Normal;
-    app.croc.play(CrocAct::Gulp);
-    app.set_message(&notice);
-    persist_and_refresh(app, player);
 }

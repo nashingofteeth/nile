@@ -390,6 +390,20 @@ else
   echo "  ✗ unexpected pool listing"; exit 1
 fi
 
+echo "== check: range actions (CLI parity) =="
+$N --project checks/range.json init --force >/dev/null
+$N --project checks/range.json import red.mp4 blue.mp4 >/dev/null
+$N --project checks/range.json add red.mp4 --in 0 --out 2 >/dev/null
+$N --project checks/range.json add blue.mp4 --at 2 --in 0 --out 2 >/dev/null
+$N --project checks/range.json yank-range --from-seg 0 --to-seg 0
+$N --project checks/range.json paste-range --at 4
+$N --project checks/range.json delete-range --from-seg 0 --to-seg 0
+if $N --project checks/range.json show | head -1 | grep -q '4 s'; then
+  echo "  ✓ yank-range + paste-range + delete-range leave a 4 s timeline"
+else
+  echo "  ✗ range actions wrong:"; $N --project checks/range.json show | head -4; exit 1
+fi
+
 echo "== check: live shell hand-off =="
 # A small project for the shell↔TUI experiment: open the TUI on the demo in one
 # terminal, run nile commands in another. Each write is adopted within a tick

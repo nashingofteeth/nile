@@ -80,7 +80,10 @@ fn a_yank_writes_the_shared_register_file() {
     app.playhead = 1.0;
     cmd(&mut app, "yank");
     assert!(matches!(
-        app.register.as_ref().map(|r| &r.segment),
+        app.register
+            .as_ref()
+            .and_then(|r| r.entries.first())
+            .map(|e| &e.segment),
         Some(TimelineSegment::Clip(_))
     ));
     assert!(

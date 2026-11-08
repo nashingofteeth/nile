@@ -103,6 +103,25 @@ pub enum Action {
         ripple: bool,
         segment: Option<Segment>,
     },
+    /// Delete an inclusive range of whole segments (visual `d`).
+    DeleteRange {
+        track: usize,
+        start: usize,
+        end: usize,
+    },
+    /// Copy an inclusive range of whole segments into the shared register
+    /// (visual `y`).
+    YankRange {
+        track: usize,
+        start: usize,
+        end: usize,
+    },
+    /// Ripple-insert the whole shared range at `at` (visual `p`; the range
+    /// analogue of `P`).
+    PasteRange {
+        track: usize,
+        at: f64,
+    },
     /// Retime a clip; the track ripples to fit (`R`, `:speed`). `rate` is the
     /// model rate (1 = normal); the front-ends take a percentage.
     SetSpeed {
@@ -201,13 +220,16 @@ impl Action {
             Action::AddEffect { .. } => 17,
             Action::RemoveEffect { .. } => 18,
             Action::ClearEffects { .. } => 19,
+            Action::DeleteRange { .. } => 20,
+            Action::YankRange { .. } => 21,
+            Action::PasteRange { .. } => 22,
         }
     }
 }
 
 /// How many slots the catalog has — the coverage tests assert exactly
 /// this many are reachable from each spelling.
-pub const SLOTS: usize = 20;
+pub const SLOTS: usize = 23;
 
 /// What running an action produced. `changed` tells the caller whether
 /// the project needs persisting (a yank only writes the register).
@@ -388,6 +410,42 @@ pub fn run_action(
                 edit::paste_on(project, *track, &seg, *at)?
             };
             apply(project, history, batch, from)
+        }
+        Action::DeleteRange { track, start, end } => {
+            let range_start = project.timeline.track(*track).map(|tr| tr.start_of(*start));
+            let batch = edit::delete_range_on(project, *track, *start, *end)?;
+            let mut out = apply(project, history, batch, from)?;
+            if let Some(at) = range_start {
+                out.playhead = Some(frame_of(project.fps.as_ref(), secs_f64(&at)));
+            }
+            Ok(out)
+        }
+        Action::YankRange { track, start, end } => {
+            let tr = project
+                .timeline
+                .track(*track)
+                .ok_or(EditError::TrackNotFound(*track))?;
+            if start > end || *end >= tr.segments.len() {
+                return Err(EditError::SegmentNotFound((*start).min(*end)));
+            }
+            let segments = tr.segments[*start..=*end].to_vec();
+            *register = Some(Register::of_range(project, &segments));
+            Ok(Outcome {
+                desc: format!("yanked {} segment(s)", segments.len()),
+                changed: false,
+                playhead: None,
+            })
+        }
+        Action::PasteRange { track, at } => {
+            let register = register.as_ref().ok_or(EditError::RegisterEmpty)?;
+            if register.entries.is_empty() {
+                return Err(EditError::RegisterEmpty);
+            }
+            let segments = register.resolve_range(project)?;
+            let batch = edit::insert_segments_on(project, *track, *at, &segments)?;
+            let mut out = apply(project, history, batch, from)?;
+            out.playhead = Some(frame_of(project.fps.as_ref(), *at));
+            Ok(out)
         }
         Action::SetSpeed { track, clip, rate } => {
             // Clip ids are unique across tracks, so a clip-addressed action
@@ -752,8 +810,8 @@ pub use parse::{
     parse, split_args,
 };
 pub use register::{
-    REGISTER_VERSION, Register, load_register, load_register_without_migration, register_path,
-    save_register,
+    REGISTER_VERSION, Register, RegisterEntry, load_register, load_register_without_migration,
+    register_path, save_register,
 };
 
 // ------------------------------------------------------------ parsing

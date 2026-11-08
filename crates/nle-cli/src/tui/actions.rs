@@ -312,6 +312,7 @@ pub(crate) fn reaction_for(
         Action::Split { .. } => Some(CrocAct::Snap),
         Action::InsertGap { .. }
         | Action::Paste { .. }
+        | Action::PasteRange { .. }
         | Action::Extend { .. }
         | Action::TrackAdd { .. } => Some(CrocAct::Gulp),
         Action::SetSpeed { rate, .. } => {
@@ -332,7 +333,11 @@ pub(crate) fn reaction_for(
         Action::TrackMute { .. } => Some(CrocAct::Sleep),
         Action::AssetRm { .. } => Some(CrocAct::Chomp),
         Action::PurgeStumps { .. } => Some(CrocAct::Nibble),
-        Action::Delete { .. } | Action::TrackRm { .. } | Action::Yank { .. } => None,
+        Action::Delete { .. }
+        | Action::DeleteRange { .. }
+        | Action::Yank { .. }
+        | Action::YankRange { .. }
+        | Action::TrackRm { .. } => None,
         Action::Undo | Action::Redo => unreachable!("handled above"),
     }
 }
