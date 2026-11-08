@@ -77,7 +77,7 @@ pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('p') => paste_selected(app, player, state),
         KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_timeline(1.5),
         KeyCode::Char('-') => app.zoom_timeline(1.0 / 1.5),
-        KeyCode::Char('z') => app.fit_timeline(),
+        KeyCode::Char('z') => app.toggle_timeline_zoom(),
         // `V` selects the whole current segment (which is already the seed);
         // useful after extending the range.
         KeyCode::Char('V') => {

@@ -173,7 +173,7 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         // same relative screen position while zooming.
         KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_timeline(1.5),
         KeyCode::Char('-') => app.zoom_timeline(1.0 / 1.5),
-        KeyCode::Char('z') => app.fit_timeline(),
+        KeyCode::Char('z') => app.toggle_timeline_zoom(),
         KeyCode::Char('j') => {
             match next_cut(&cut_points(&app.project, app.active()), app.playhead, eps) {
                 Some(t) => app.seek_to(player, t),

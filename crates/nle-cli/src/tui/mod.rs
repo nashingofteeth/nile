@@ -525,9 +525,18 @@ impl App {
         self.save_view();
     }
 
-    pub(crate) fn fit_timeline(&mut self) {
-        self.timeline_view.fit();
-        self.set_message("timeline fit");
+    pub(crate) fn toggle_timeline_zoom(&mut self) {
+        self.timeline_view.toggle(
+            self.playhead,
+            self.total().max(1e-9),
+            self.timeline_width,
+            self.project.fps.as_ref(),
+        );
+        if self.timeline_view.zoom <= 1.0 + 1e-9 {
+            self.set_message("timeline fit");
+        } else {
+            self.set_message(&format!("zoom {:.2}×", self.timeline_view.zoom));
+        }
         self.save_view();
     }
 

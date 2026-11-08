@@ -98,6 +98,21 @@ fn max_zoom_shows_one_frame_per_column() {
 }
 
 #[test]
+fn z_toggles_between_fit_and_one_frame_per_column() {
+    let fps = Seconds::new(30, 1);
+    let total = 10.0;
+    let width = 40;
+    let mut view = TimelineView::default();
+
+    view.toggle(5.0, total, width, Some(&fps));
+    let span = view.viewport(total, width, Some(&fps)).span;
+    assert!((span - width as f64 / 30.0).abs() < 1e-9, "{span}");
+
+    view.toggle(5.0, total, width, Some(&fps));
+    assert_eq!(view, TimelineView::default(), "second z fits");
+}
+
+#[test]
 fn zoom_out_stops_at_the_whole_timeline() {
     let fps = Seconds::new(30, 1);
     let mut view = TimelineView::default();
@@ -177,6 +192,17 @@ fn zoom_keys_pan_and_fit() {
         ),
     );
     assert!(app.timeline_view.start < 1.0, "Ctrl-b pans back");
+
+    handle_key(&mut app, &fake, key('z'));
+    assert!(
+        app.timeline_view.zoom > first,
+        "z jumps to the closest zoom, not fit"
+    );
+    assert_eq!(
+        view_state::load(&app.path),
+        app.timeline_view,
+        "max zoom saved"
+    );
 
     handle_key(&mut app, &fake, key('z'));
     assert_eq!(app.timeline_view, TimelineView::default());

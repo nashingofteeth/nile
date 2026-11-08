@@ -179,7 +179,7 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
         ];
     }
     vec![
-        "transport  space · h/l ±1s · H/L ±5s · f/F frame · +/=/- zoom · z fit",
+        "transport  space · h/l ±1s · H/L ±5s · f/F frame · +=/- zoom · z min/max",
         "motion     j/k cuts · w/b clips · n/N gaps · gg/G/0/$ ends · Ctrl-b/f pan",
         "edit       i/o trim · I/O ripple · s/S split · _ gap · dd/D del · yy/p/P",
         "           r speed · X transition · e/E extend · [ ] side · m pool",
