@@ -844,3 +844,91 @@ fn insert_gap_merges_into_an_adjacent_gap() {
         matches!(&segs[3], Segment::Gap(g) if g.duration == Seconds::from_integer(3) + Seconds::new(1, 30))
     );
 }
+
+#[test]
+fn range_delete_restores_boundary_transition_handles() {
+    let mut p = clip_pair(); // [C1 0..3][C2 0..3]
+    let mut h = History::default();
+    let batch = add_transition(
+        &p,
+        0,
+        3.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let before = p.timeline.video_track().unwrap().segments.clone();
+    assert_eq!(before.len(), 3, "{before:?}");
+
+    // Deleting [C1, transition] restores C2's trimmed head.
+    let batch = delete_range_on(&p, 0, 0, 1).unwrap();
+    assert!(batch.desc.contains("through transitions"), "{}", batch.desc);
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 1, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)
+            && c.asset_out == Seconds::from_integer(3)
+    ));
+    h.undo(&mut p).unwrap();
+    assert_eq!(
+        p.timeline.video_track().unwrap().segments,
+        before,
+        "one undo restores the whole track"
+    );
+}
+
+#[test]
+fn range_delete_of_only_a_transition_keeps_dd_semantics() {
+    let mut p = clip_pair();
+    let mut h = History::default();
+    let batch = add_transition(
+        &p,
+        0,
+        3.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let batch = delete_range_on(&p, 0, 1, 1).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 2, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.asset_out == Seconds::from_integer(3)
+    ));
+    assert!(matches!(
+        &segs[1],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)
+    ));
+}
+
+#[test]
+fn range_delete_through_transition_and_neighbour_keeps_the_other_handle() {
+    let mut p = clip_pair();
+    let mut h = History::default();
+    let batch = add_transition(
+        &p,
+        0,
+        3.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    // [transition, C2] leaves C1 with its tail restored.
+    let batch = delete_range_on(&p, 0, 1, 2).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 1, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.asset_out == Seconds::from_integer(3)
+    ));
+}

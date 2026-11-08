@@ -72,8 +72,6 @@ pub enum EditError {
     SegmentNotFound(usize),
     #[error("a transition can't be split or trimmed — remove it (dd) instead")]
     Transition,
-    #[error("a range can't contain a transition — delete it separately")]
-    RangeTransition,
     #[error("can't paste inside a transition — move the playhead to a clip or gap")]
     PasteTransition,
     #[error("no transition at {0} — --percent only retimes an existing blend")]

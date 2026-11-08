@@ -146,7 +146,9 @@ screen.
 selected range as one undo step, `y` copies it into the shared yank register,
 and `p` pastes the whole range at the playhead (splitting the clip or gap under
 it when needed). `V` narrows the selection to one segment; `v` or `Esc`
-cancels. The same operations are actions, so the CLI expresses them as
+cancels. A range may include a transition: its surviving outer handle is
+restored, while a blend wholly inside the range disappears with it. The same
+operations are actions, so the CLI expresses them as
 `delete --from-seg A --to-seg B`, `yank --from-seg A --to-seg B`, and
 `paste --range`.
 

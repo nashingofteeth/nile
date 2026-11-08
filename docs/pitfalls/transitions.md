@@ -49,6 +49,11 @@ the export's `xfade` chain.
   contiguous source); one edited since is left alone and that material is
   really gone. Never merge them (before `x` they were two segments). The
   playhead anchor is the transition's **end**.
+- **Range delete looks only at the range boundary.** The first blend restores
+  the surviving left clip's tail; the last restores the surviving right clip's
+  head; blends wholly inside the range disappear with it. If no clip handle is
+  restored beside a gap, the removed span joins that gap, and the two seam gaps
+  fold, so the `two adjacent gaps` invariant still holds.
 - **A blend is opaque and video-only.** An insert/paste at/over one is refused
   (`EditError::Transition`, as `_` does); an overwrite `p` consumes it whole;
   `add_transition` refuses a non-video track because the export graph emits
