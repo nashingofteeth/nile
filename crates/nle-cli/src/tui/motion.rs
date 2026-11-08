@@ -311,6 +311,19 @@ impl TimelineView {
         self.start = (self.start + view.span * fraction).clamp(0.0, max_start);
     }
 
+    /// Toggle between the two extremes: fit the whole timeline and the
+    /// closest zoom (one frame per column). Calls from an intermediate zoom
+    /// go to the close-up.
+    pub(crate) fn toggle(&mut self, playhead: f64, total: f64, width: u16, fps: Option<&Seconds>) {
+        let total = total.max(1e-9);
+        let max_zoom = Self::max_zoom(total, width, fps);
+        if self.zoom >= max_zoom - 1e-9 {
+            self.fit();
+        } else {
+            self.zoom_by(max_zoom / self.zoom.max(1.0), playhead, total, width, fps);
+        }
+    }
+
     /// Scroll the minimum amount that keeps `playhead` inside the view.
     pub(crate) fn follow(&mut self, playhead: f64, total: f64, width: u16, fps: Option<&Seconds>) {
         let total = total.max(1e-9);

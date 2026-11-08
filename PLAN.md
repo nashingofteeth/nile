@@ -368,7 +368,8 @@ trimming of a transition's own span (retime it with `x`/`X`,
 
 ## Timeline viewport (shipped)
 
-- `+`/`=` zoom in, `-` out, `z` fit; `Ctrl-b`/`Ctrl-f` pan.
+- `+`/`=` zoom in, `-` out, `z` toggles fit / one-frame zoom;
+  `Ctrl-b`/`Ctrl-f` pan.
 - Zoom is anchored on the playhead and follows seeks, playback and edits.
 - Max zoom is one frame per column; fit shows the whole timeline.
 - Zoom and scroll are saved in `.nile/<stem>/view.json` and restored on the
