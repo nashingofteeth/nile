@@ -19,6 +19,7 @@ use nle_core::{
 };
 
 use crate::mpv::{Mpv, PlaybackState};
+use crate::thumbnails::Thumbnail;
 use crate::waveform::Waveform;
 
 mod motion;
@@ -36,8 +37,8 @@ mod jobs;
 
 use croc::{CrocAct, CrocState};
 use jobs::{
-    Job, KeyframeJob, PreviewJob, PreviewProgress, WaveJob, poll_job, poll_keyframes, poll_preview,
-    poll_waveforms, start_preview,
+    Job, KeyframeJob, PreviewJob, PreviewProgress, ThumbnailJob, WaveJob, poll_job, poll_keyframes,
+    poll_preview, poll_thumbnails, poll_waveforms, start_preview,
 };
 
 // ------------------------------------------------------------ app state
@@ -281,6 +282,10 @@ pub struct App {
     pub(crate) keyframes: HashMap<u32, Vec<f64>>,
     /// The keyframe probe, if one is running.
     keyframe_job: Option<KeyframeJob>,
+    /// Cached asset thumbnails for the pool preview, by asset id.
+    pub(crate) thumbnails: HashMap<u32, Thumbnail>,
+    /// The thumbnail extractor, if one is running.
+    thumb_job: Option<ThumbnailJob>,
     /// The monitor's EDL being built off-thread (proxy renders); `None` when
     /// idle.
     preview: Option<PreviewJob>,
@@ -335,6 +340,8 @@ impl App {
             wave_job: None,
             keyframes: HashMap::new(),
             keyframe_job: None,
+            thumbnails: HashMap::new(),
+            thumb_job: None,
             preview: None,
             preview_dirty: false,
             preview_enabled: false,
@@ -864,6 +871,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         poll_preview(&mut app, &player);
         poll_waveforms(&mut app);
         poll_keyframes(&mut app);
+        poll_thumbnails(&mut app);
 
         // The stored playhead follows the transport: after a moment of
         // stillness, write where the cursor landed (`nile seek` reads it).
@@ -1007,6 +1015,8 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     app.wave_job = None;
     app.keyframes.clear();
     app.keyframe_job = None;
+    app.thumbnails.clear();
+    app.thumb_job = None;
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())

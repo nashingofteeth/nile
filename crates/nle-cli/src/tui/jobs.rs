@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::keyframes::{self, Keyframes};
 use crate::mpv::Mpv;
 use crate::preview;
+use crate::thumbnails::{self, Thumbnail};
 use crate::waveform::{self, Waveform};
 
 use super::keys::extend::extend_state;
@@ -31,6 +32,12 @@ pub(crate) struct WaveJob {
 pub(crate) struct KeyframeJob {
     pub(crate) asset: u32,
     pub(crate) rx: std::sync::mpsc::Receiver<(u32, Result<Keyframes, String>)>,
+}
+
+/// A thumbnail extraction for the pooled asset.
+pub(crate) struct ThumbnailJob {
+    pub(crate) asset: u32,
+    pub(crate) rx: std::sync::mpsc::Receiver<(u32, Result<Thumbnail, String>)>,
 }
 
 pub(crate) struct PreviewJob {
@@ -176,6 +183,51 @@ pub(crate) fn start_keyframes(app: &mut App) {
         let result = keyframes::load(&project_path, &asset).map_err(|e| e.to_string());
         let _ = tx.send((id, result));
     });
+}
+
+/// Start extracting the pooled asset's thumbnail, off-thread.
+pub(crate) fn start_thumbnail(app: &mut App) {
+    if !app.preview_enabled || !is_pool(app) || app.thumb_job.is_some() {
+        return;
+    }
+    let Some(sel) = pool_sel(app) else { return };
+    let Some(asset) = app.project.media.get(sel).cloned() else {
+        return;
+    };
+    if !asset.probe.has_video() || app.thumbnails.contains_key(&asset.id) {
+        return;
+    }
+    let id = asset.id;
+    let project_path = app.path.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.thumb_job = Some(ThumbnailJob { asset: id, rx });
+    std::thread::spawn(move || {
+        let result = thumbnails::load(&project_path, &asset).map_err(|e| e.to_string());
+        let _ = tx.send((id, result));
+    });
+}
+
+pub(crate) fn poll_thumbnails(app: &mut App) {
+    let Some(job) = app.thumb_job.as_ref() else {
+        return;
+    };
+    match job.rx.try_recv() {
+        Ok((id, Ok(thumbnail))) => {
+            app.thumbnails.insert(id, thumbnail);
+        }
+        Ok((_, Err(e))) => {
+            crate::log::line(&format!("thumbnail load failed: {e}"));
+            app.thumb_job = None;
+            return;
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            app.thumb_job = None;
+            return;
+        }
+    }
+    app.thumb_job = None;
+    start_thumbnail(app);
 }
 
 pub(crate) fn poll_keyframes(app: &mut App) {
