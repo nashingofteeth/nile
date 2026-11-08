@@ -222,6 +222,22 @@ fn zoom_keys_pan_and_fit() {
 }
 
 #[test]
+fn zooming_a_short_project_explains_the_cap() {
+    let mut app = App::new(asset_project(), temp_project_path("zoom-short"));
+    app.loaded = true;
+    app.note_terminal_width(400); // wider than the whole 7 s project in frames
+    let fake = FakeMpv::new();
+
+    handle_key(&mut app, &fake, key('+'));
+    assert_eq!(app.timeline_view, TimelineView::default());
+    assert!(app.message.contains("shorter"), "{}", app.message);
+
+    handle_key(&mut app, &fake, key('z'));
+    assert_eq!(app.timeline_view, TimelineView::default());
+    assert!(app.message.contains("shorter"), "{}", app.message);
+}
+
+#[test]
 fn track_selection_is_saved_in_session_state() {
     let mut p = asset_project();
     p.timeline.add_track(TrackKind::Audio);

@@ -257,7 +257,7 @@ impl TimelineView {
     }
 
     /// Zoom factor at which one video frame occupies one column.
-    fn max_zoom(total: f64, width: u16, fps: Option<&Seconds>) -> f64 {
+    pub(crate) fn max_zoom(total: f64, width: u16, fps: Option<&Seconds>) -> f64 {
         let total = total.max(1e-9);
         let frame = fps.map(|f| 1.0 / secs(f)).unwrap_or(1.0);
         let min_span = (frame * width.max(1) as f64).min(total);
