@@ -522,7 +522,7 @@ impl App {
             self.project.fps.as_ref(),
         );
         self.set_message(&format!("zoom {:.2}×", self.timeline_view.zoom));
-        self.save_view();
+        self.save_session_state();
     }
 
     pub(crate) fn toggle_timeline_zoom(&mut self) {
@@ -537,7 +537,7 @@ impl App {
         } else {
             self.set_message(&format!("zoom {:.2}×", self.timeline_view.zoom));
         }
-        self.save_view();
+        self.save_session_state();
     }
 
     pub(crate) fn pan_timeline(&mut self, fraction: f64) {
@@ -547,14 +547,18 @@ impl App {
             self.timeline_width,
             self.project.fps.as_ref(),
         );
-        self.save_view();
+        self.save_session_state();
     }
 
-    /// Persist the viewport beside the project. Failure is logged only: the
-    /// view is convenience state and must not replace the message line.
-    fn save_view(&self) {
-        if let Err(e) = view_state::save(&self.path, self.timeline_view) {
-            crate::log::line(&format!("view state save failed: {e}"));
+    /// Persist the viewport and active track beside the project. Failure is
+    /// logged only: UI state is convenience and must not replace the message.
+    pub(crate) fn save_session_state(&self) {
+        let state = view_state::SessionState {
+            view: self.timeline_view,
+            active_track: self.active_track,
+        };
+        if let Err(e) = view_state::save(&self.path, state) {
+            crate::log::line(&format!("session state save failed: {e}"));
         }
     }
 
@@ -674,6 +678,14 @@ impl Mpv for NullMpv {
     fn set_media_title(&self, _title: &str) {}
 }
 
+/// Apply a restored session, clamping the track to the project's track list.
+fn apply_session_state(app: &mut App, state: view_state::SessionState) {
+    app.timeline_view = state.view;
+    app.active_track = state
+        .active_track
+        .min(app.project.timeline.tracks.len().saturating_sub(1));
+}
+
 /// Render the TUI once at `size` and return a text dump: the project path and
 /// model state (as `nile show` prints it), then the grid with a column ruler.
 /// Feed `keys` first (`\n` = Enter, `\e` = Esc) to reach a state.
@@ -707,7 +719,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     app.project
         .set_history(History::load(&History::sidecar_path(&path)).unwrap_or_default());
     app.register = load_register_without_migration(&path);
-    app.timeline_view = view_state::load(&path);
+    apply_session_state(&mut app, view_state::load(&path));
     // The handlers guard on this (mpv "loaded"); the dump has no monitor.
     app.loaded = true;
     app.note_terminal_width(size.0);
@@ -779,9 +791,10 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     app.register = load_register(&app.path);
     // Open where `nile seek` (or the last session) left the playhead.
     app.playhead = secs(&app.project.playhead);
-    // Restore the session viewport after the playhead: don't let a load-time
-    // follow discard a saved pan.
-    app.timeline_view = view_state::load(&app.path);
+    // Restore the session viewport and active track after the playhead: don't
+    // let a load-time follow discard a saved pan.
+    let session = view_state::load(&app.path);
+    apply_session_state(&mut app, session);
     // Build the monitor off-thread before the first frame: a cold proxy can
     // take seconds and the status row will show it.
     app.preview_enabled = true;
@@ -884,7 +897,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     {
         crate::log::line(&format!("playhead save failed on exit: {e}"));
     }
-    app.save_view();
+    app.save_session_state();
 
     ratatui::restore();
     if let Some(msg) = app.exit_message {
