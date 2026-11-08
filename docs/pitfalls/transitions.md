@@ -44,6 +44,12 @@ the export's `xfade` chain.
   (`set_speed_on`): the blend's `dur` and the cut (`a.src_out` / `b.src_in`)
   stay put and the inner edge follows (it is also the neighbour's in/out), so
   one rate covers the clip and its sides.
+- **Deleting a segment beside a blend removes the blend too.** `dd` on a
+  clip leaves its visible span as a gap, removes the adjacent transition, and
+  restores the other side's borrowed handle; `D`/`delete --ripple` removes the
+  target and the blend, restoring the surviving side. A gap beside a blend does
+  the same on a ripple delete. If no clip handle survives, the blend span joins
+  the neighbouring gap.
 - **Removing a transition gives its trimmed frames back.** `dd`/`D` re-extend
   the neighbours, but only where they still line up exactly (same asset,
   contiguous source); one edited since is left alone and that material is

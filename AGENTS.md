@@ -198,6 +198,10 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   restores a boundary transition's surviving handle and drops interior blends
   with the range. The shared register may hold a range; normal `p` refuses it
   (`RangeRegister`) and `:paste --range`/visual `p` consume it.
+- **Deleting a transition side removes the blend.** `dd` leaves the target's
+  visible span as a gap, `D` ripples it away, and both restore the surviving
+  side's borrowed handle; a gap beside a blend follows the same ripple rule.
+  Range deletes apply this at the range boundary.
 - **`--clip N` finds the clip's own track** (`resolve_track`); `--track`
   addresses position-based targets only. Tracks are 1-based — 0 is refused
   (`cli_index`), never silently "track 1".

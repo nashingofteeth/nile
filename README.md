@@ -239,6 +239,9 @@ on a copy and never changes the project.
   transition shortens the timeline by its duration; a fade to black does not.
   Retiming (`--frames`, `--dur`, `--percent`) scales each side’s span, never
   its rate. Details: `docs/pitfalls/transitions.md`.
+- Deleting a clip or gap beside a blend removes the blend too: `dd` leaves the
+  target’s visible span as a gap, `D` ripples it away, and the other side’s
+  borrowed length is restored.
 - Crop insets percentages toward the opposite edge (0 = edge, 100 = opposite;
   the two sides of an axis must total under 100). Scale is a percentage of the
   picture at that point (100 = unchanged); scaling down pads transparently.

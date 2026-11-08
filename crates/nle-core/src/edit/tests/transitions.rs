@@ -432,12 +432,16 @@ fn deleting_a_transition_fuses_the_span_into_the_gaps() {
     )
     .unwrap();
     h.apply(&mut p, batch, 0).unwrap();
-    // [C1' 0..2][T 2..3][C2' 3..5]: delete both handles
-    // -> [gap 0..2][T 2..3][gap 3..5]
-    let batch = delete_under(&p, 1.0).unwrap();
-    h.apply(&mut p, batch, 0).unwrap();
-    let batch = delete_under(&p, 4.0).unwrap();
-    h.apply(&mut p, batch, 0).unwrap();
+    // [C1' 0..2][T 2..3][C2' 3..5]: make both handles gaps directly, then
+    // delete the transition. Deleting a *clip* beside a blend now removes the
+    // blend itself, so this isolates the gap-fusion rule.
+    let d0 = p.timeline.video_track().unwrap().segments[0].duration();
+    let d2 = p.timeline.video_track().unwrap().segments[2].duration();
+    {
+        let segs = &mut p.timeline.video_track_mut().unwrap().segments;
+        segs[0] = Segment::Gap(Gap { duration: d0 });
+        segs[2] = Segment::Gap(Gap { duration: d2 });
+    }
     let end = p.timeline.end(); // 5
 
     let batch = delete_under(&p, 2.5).unwrap();
@@ -452,10 +456,11 @@ fn deleting_a_transition_fuses_the_span_into_the_gaps() {
     }
     assert_eq!(p.timeline.end(), end, "no ripple: the length holds");
 
-    // A gap on one side only: with the right handle stale (the clip
-    // changed since), the left gap alone absorbs the span, the track
-    // keeps its length, and the stale clip never moves.
+    // A gap on one side only: with the right handle stale (the clip changed
+    // since), the left gap alone absorbs the span, the track keeps its
+    // length, and the stale clip never moves.
     let mut p = clip_pair();
+    let mut h = History::default();
     let batch = add_transition(
         &p,
         0,
@@ -465,12 +470,15 @@ fn deleting_a_transition_fuses_the_span_into_the_gaps() {
     )
     .unwrap();
     h.apply(&mut p, batch, 0).unwrap();
-    let batch = delete_under(&p, 1.0).unwrap(); // C1' -> gap [0..2)
-    h.apply(&mut p, batch, 0).unwrap();
-    let Segment::Clip(c2) = &mut p.timeline.video_track_mut().unwrap().segments[2] else {
-        unreachable!()
-    };
-    c2.asset_in += Seconds::from_integer(1); // stale right handle
+    let d0 = p.timeline.video_track().unwrap().segments[0].duration();
+    {
+        let segs = &mut p.timeline.video_track_mut().unwrap().segments;
+        segs[0] = Segment::Gap(Gap { duration: d0 });
+        let Segment::Clip(c2) = &mut segs[2] else {
+            unreachable!()
+        };
+        c2.asset_in += Seconds::from_integer(1); // stale right handle
+    }
     let end = p.timeline.end(); // 5
 
     let batch = delete_under(&p, 2.5).unwrap();
