@@ -153,9 +153,10 @@ pub fn prune(
 /// Scope is strict: only `<hash>.<ext>` (and a crashed write's
 /// `<hash>.tmp-<token>.<ext>`) are candidates, for the extensions the
 /// per-project caches use — `.mp4` proxies, `.mkv` export chunks, `.m4a`
-/// audio masters, `.wave` waveforms and `.json` keyframe lists. The black
-/// filler files live in a sibling directory (`nle/black/`) and are never
-/// touched; neither is any other file that happens to share the directory.
+/// audio masters, `.wave` waveforms, `.json` keyframe lists and `.rgb`
+/// thumbnails. The black filler files live in a sibling directory
+/// (`nle/black/`) and are never touched; neither is any other file that
+/// happens to share the directory.
 pub fn prune_at(
     dir: &Path,
     max_age: Duration,
@@ -211,7 +212,7 @@ fn is_entry_name(name: &str) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
-    if !matches!(ext, "mp4" | "mkv" | "m4a" | "wave" | "json") {
+    if !matches!(ext, "mp4" | "mkv" | "m4a" | "wave" | "json" | "rgb") {
         return false;
     }
     let (hash, pid) = match stem.split_once(".tmp-") {
@@ -900,9 +901,11 @@ mod tests {
             "dead.m4a",
             "dead.wave",
             "dead.json",
+            "dead.rgb",
             "dead.tmp-1.mkv",
             "dead.tmp-A1b2.mkv",
             "dead.tmp-1.json",
+            "dead.tmp-1.rgb",
         ] {
             assert!(is_entry_name(ok), "{ok}");
         }
@@ -915,6 +918,7 @@ mod tests {
             "dead.mp4.bak",
             "dead.mkv.bak",
             "notes.json", // not a cache hash
+            "notes.rgb",
         ] {
             assert!(!is_entry_name(no), "{no}");
         }

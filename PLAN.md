@@ -391,10 +391,19 @@ trimming of a transition's own span (retime it with `x`/`X`,
   a fallback) and is cached under `.nile/<stem>/cache/keyframes/`, keyed by
   source path + mtime. Audio-only assets and files with no keyframes report
   that instead of seeking.
+- The strip marks cached keyframes with `·`; the metadata pane shows the
+  count (or a probing state).
+
+## Pool thumbnails (shipped)
+
+- The selected video's metadata pane shows a cached half-block truecolor
+  thumbnail, extracted on a worker and letterboxed into the available cells.
+- Frames live in `.nile/<stem>/cache/thumbs/<hash>.rgb`, keyed by source path
+  + mtime, and are pruned with the other caches.
 
 ## Open / deferred
 
-- Thumbnails and M7 GUI.
+- Timeline filmstrips and M7 GUI.
 
 ## Open decisions (non-blocking)
 

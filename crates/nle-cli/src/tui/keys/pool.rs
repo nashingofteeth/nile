@@ -11,7 +11,7 @@ use nle_core::timeline::{Clip, Segment as TimelineSegment};
 use crate::mpv::Mpv;
 
 use super::super::actions::run_action;
-use super::super::jobs::{start_keyframes, start_preview};
+use super::super::jobs::{start_keyframes, start_preview, start_thumbnail};
 use super::super::keys::completes_gg;
 use super::super::keys::count_digit;
 use super::super::keys::do_redo;
@@ -183,6 +183,7 @@ pub(crate) fn load_pool_preview_at(app: &mut App, player: &dyn Mpv, start: f64) 
     app.eof = false; // a freshly loaded file is not at EOF
     player.load(&path.display().to_string(), Some(start));
     start_keyframes(app);
+    start_thumbnail(app);
 }
 
 /// Open the pool: remember the timeline playhead, preview the last row.

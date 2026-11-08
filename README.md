@@ -165,11 +165,12 @@ of both neighbours, so trimming/extending nearby moves the blend’s edge.
 
 **Media pool.** `j`/`k` (and `{`/`}`) move; `space` plays/restarts the asset;
 `h`/`l`, `f`/`F`, `gg`/`0`, `G`/`$` seek; `J`/`K` jump to the next/previous
-video keyframe (probed on a worker and cached under `.nile/<stem>/cache/`);
-`enter` inserts at the timeline cursor and returns; `d` removes the asset;
-`i` imports; `u` undoes. While the pool is open, the timeline row and monitor
-show the selected asset; reopening returns to the same asset and preview
-clock.
+video keyframe (probed on a worker and cached under `.nile/<stem>/cache/`;
+the strip marks them with `·`). The metadata pane shows a cached half-block
+thumbnail of the selected video. `enter` inserts at the timeline cursor and
+returns; `d` removes the asset; `i` imports; `u` undoes. While the pool is
+open, the timeline row and monitor show the selected asset; reopening returns
+to the same asset and preview clock.
 
 ### Extend mode
 
@@ -381,6 +382,7 @@ video/
             ├── audio/         # continuous preview audio masters
             ├── wave/          # cached audio peaks for the waveform
             ├── keyframes/     # cached video keyframe timestamps
+            ├── thumbs/        # cached pool thumbnails (RGB)
             ├── export/
             └── black/
 ```
@@ -391,8 +393,8 @@ the state directory on first load; old `nle.json` projects still open with
 `--project nle.json`. The timeline viewport and active track are saved in
 `view.json` and restored on the next session. The old global
 `~/.cache/nile` is no longer used, and `nile cache prune` only touches the current project’s cache — proxy
-renders, preview audio masters, waveform peaks, keyframe lists, and completed
-export chunks.
+renders, preview audio masters, waveform peaks, keyframe lists, asset
+thumbnails, and completed export chunks.
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a

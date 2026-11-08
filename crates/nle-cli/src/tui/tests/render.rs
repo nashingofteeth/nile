@@ -3,10 +3,11 @@ use super::super::keys::fx::form_for_effect;
 use super::super::keys::handle_key;
 use super::super::motion::marker_col;
 use super::super::panels::fx::render_transition_form;
-use super::super::panels::pool::{asset_metadata, render_pool};
+use super::super::panels::pool::{asset_metadata, render_pool, render_pool_strip};
 use super::super::panels::timeline::{render_timeline, track_parts, track_window_rows};
 use super::super::panels::{hints_for, panel_heights, render};
 use super::*;
+use crate::thumbnails::Thumbnail;
 use crate::waveform::Waveform;
 use nle_core::edit;
 use nle_core::time::Seconds;
@@ -770,6 +771,50 @@ fn pool_strip_replaces_the_timeline_while_the_pool_is_open() {
         !ended.contains("red.mp4"),
         "the project waits for close:\n{ended}"
     );
+}
+
+#[test]
+fn pool_draws_keyframe_ticks_and_a_thumbnail() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut app = App::new(asset_project(), temp_project_path("pool-preview"));
+    app.loaded = true;
+    open_pool_mode(&mut app, 0);
+    app.keyframes.insert(1, vec![2.0, 4.0]);
+    app.thumbnails.insert(
+        1,
+        Thumbnail::new(vec![
+            255;
+            (crate::thumbnails::THUMB_WIDTH * crate::thumbnails::THUMB_HEIGHT * 3)
+                as usize
+        ])
+        .unwrap(),
+    );
+
+    // The strip marker row shows both keyframe ticks.
+    let st = PoolState {
+        sel: 0,
+        pos: 1.0,
+        resume: 0.0,
+    };
+    let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
+    term.draw(|f| render_pool_strip(f, f.area(), &app, &st))
+        .unwrap();
+    let buf = term.backend().buffer();
+    let strip: String = (0..4)
+        .flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol()))
+        .collect();
+    assert_eq!(strip.matches('·').count(), 2, "{strip}");
+
+    // The metadata pane renders the cached frame as half-blocks.
+    let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    term.draw(|f| render_pool(f, f.area(), &app)).unwrap();
+    let buf = term.backend().buffer();
+    let text: String = (0..20)
+        .flat_map(|y| (0..100).map(move |x| buf[(x, y)].symbol()))
+        .collect();
+    assert!(text.contains('▀'), "thumbnail half-blocks missing:\n{text}");
+    assert!(text.contains("keys   2"), "keyframe count missing:\n{text}");
 }
 
 // Metadata pane formats the stored probe (no re-probe).

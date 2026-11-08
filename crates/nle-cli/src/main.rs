@@ -20,6 +20,9 @@ mod proxy;
 mod keyframes;
 #[cfg(feature = "tui")]
 mod tui;
+// Asset thumbnails back the pool preview; `prune` is used headless.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+mod thumbnails;
 // Waveform peaks back the timeline's audio row; `prune` is used headless.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod waveform;

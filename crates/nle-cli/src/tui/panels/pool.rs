@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use super::super::motion::marker_col;
+use crate::thumbnails::{THUMB_HEIGHT, THUMB_WIDTH, Thumbnail};
 use nle_core::time::Seconds;
 use nle_core::timeline::{Clip, Segment as TimelineSegment, Track, TrackKind};
 use nle_core::track_label;
@@ -53,12 +54,63 @@ pub(crate) fn render_pool(f: &mut Frame, area: Rect, app: &App) {
     list_state.select(pool_sel(app));
     f.render_stateful_widget(List::new(items), list_inner, &mut list_state);
 
-    // Right: probe metadata for the selected asset.
+    // Right: a preview of the selected video, plus probe metadata. The
+    // thumbnail only appears when the pane is wide enough to leave the
+    // metadata readable.
+    let selected = app.project.media.get(pool_sel(app).unwrap_or(0));
+    let show_thumb = selected.is_some_and(|a| a.probe.has_video())
+        && meta_area.width >= 44
+        && meta_area.height >= 5;
+    let meta_area = if show_thumb {
+        let [thumb_area, meta_area] =
+            Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).areas(meta_area);
+        let thumb_block = Block::bordered().title(" preview ");
+        let inner = thumb_block.inner(thumb_area);
+        f.render_widget(thumb_block, thumb_area);
+        if inner.width > 0 && inner.height > 0 {
+            match selected.and_then(|a| app.thumbnails.get(&a.id)) {
+                Some(thumb) => render_thumbnail(f, inner, thumb),
+                None => {
+                    let busy = selected.is_some_and(|a| {
+                        app.thumb_job.as_ref().is_some_and(|job| job.asset == a.id)
+                    });
+                    let msg = if busy { "loading…" } else { "no preview" };
+                    f.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            msg,
+                            Style::default().fg(Color::DarkGray),
+                        ))),
+                        inner,
+                    );
+                }
+            }
+        }
+        meta_area
+    } else {
+        meta_area
+    };
+
     let meta_block = Block::bordered().title(" metadata ");
     let meta_inner = meta_block.inner(meta_area);
     f.render_widget(meta_block, meta_area);
-    let lines = match app.project.media.get(pool_sel(app).unwrap_or(0)) {
-        Some(a) => asset_metadata(a),
+    let lines = match selected {
+        Some(a) => {
+            let mut lines = asset_metadata(a);
+            if a.probe.has_video() {
+                match app.keyframes.get(&a.id) {
+                    Some(keys) => lines.push(format!("keys   {}", keys.len())),
+                    None if app
+                        .keyframe_job
+                        .as_ref()
+                        .is_some_and(|job| job.asset == a.id) =>
+                    {
+                        lines.push("keys   probing…".to_string())
+                    }
+                    None => {}
+                }
+            }
+            lines
+        }
         None => vec!["(no asset selected)".to_string()],
     };
     let para = Paragraph::new(
@@ -69,6 +121,57 @@ pub(crate) fn render_pool(f: &mut Frame, area: Rect, app: &App) {
     )
     .wrap(Wrap { trim: false });
     f.render_widget(para, meta_inner);
+}
+
+/// Render a cached RGB frame as truecolor half-blocks. The image is
+/// letterboxed into the cell rectangle; each cell is one pixel wide and two
+/// pixels tall.
+fn render_thumbnail(f: &mut Frame, area: Rect, thumb: &Thumbnail) {
+    let w = area.width as u32;
+    let h = area.height as u32;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let pixels_h = h * 2;
+    let src_aspect = THUMB_WIDTH as f64 / THUMB_HEIGHT as f64;
+    let dst_aspect = w as f64 / pixels_h as f64;
+    let (img_w, img_h) = if dst_aspect > src_aspect {
+        let img_h = pixels_h;
+        let img_w = ((src_aspect * img_h as f64).round() as u32).max(1).min(w);
+        (img_w, img_h)
+    } else {
+        let img_w = w;
+        let img_h = ((img_w as f64 / src_aspect).round() as u32)
+            .max(1)
+            .min(pixels_h);
+        (img_w, img_h)
+    };
+    let x_off = (w - img_w) / 2;
+    let y_off = (pixels_h - img_h) / 2;
+    let sample = |x: u32, y: u32| -> Color {
+        if x < x_off || x >= x_off + img_w || y < y_off || y >= y_off + img_h {
+            return Color::Rgb(0, 0, 0);
+        }
+        let sx = ((x - x_off) as f64 / img_w as f64 * THUMB_WIDTH as f64) as u32;
+        let sy = ((y - y_off) as f64 / img_h as f64 * THUMB_HEIGHT as f64) as u32;
+        let (r, g, b) = thumb.pixel(sx, sy);
+        Color::Rgb(r, g, b)
+    };
+    let lines: Vec<Line> = (0..h)
+        .map(|y| {
+            let spans: Vec<Span> = (0..w)
+                .map(|x| {
+                    let py = y * 2;
+                    Span::styled(
+                        "▀",
+                        Style::default().fg(sample(x, py)).bg(sample(x, py + 1)),
+                    )
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Plain-text summary for the pool row (path basename + duration).
@@ -198,23 +301,48 @@ pub(crate) fn render_pool_strip(f: &mut Frame, area: Rect, app: &App, st: &PoolS
         width: inner.width,
         height: 1,
     };
-    draw_pool_marker_row(f, marker, total, st.pos, app.eof);
+    let keys = app
+        .keyframes
+        .get(&asset.id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    draw_pool_marker_row(f, marker, total, st.pos, app.eof, keys);
 }
 
-/// A bare marker row for the pool strip: red `▏`, `▕` at the file's end.
-pub(crate) fn draw_pool_marker_row(f: &mut Frame, bar: Rect, total: f64, pos: f64, eof: bool) {
+/// A marker row for the pool strip: keyframe ticks, then red `▏` / `▕` at
+/// the preview clock or file end.
+pub(crate) fn draw_pool_marker_row(
+    f: &mut Frame,
+    bar: Rect,
+    total: f64,
+    pos: f64,
+    eof: bool,
+    keyframes: &[f64],
+) {
     if bar.width == 0 {
         return;
     }
-    let ph = marker_col(pos, total, bar.width) as usize;
-    let mut line = Line::default();
-    if ph > 0 {
-        line.push_span(Span::raw(" ".repeat(ph)));
+    let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); bar.width as usize];
+    for &key in keyframes {
+        if key >= 0.0 && key <= total {
+            let x = marker_col(key, total, bar.width) as usize;
+            cells[x] = ('·', Style::default().fg(Color::DarkGray));
+        }
     }
+    let ph = marker_col(pos, total, bar.width) as usize;
     let ch = if eof { '▕' } else { '▏' };
-    line.push_span(Span::styled(
-        ch.to_string(),
-        Style::default().fg(Color::Red),
-    ));
+    cells[ph] = (ch, Style::default().fg(Color::Red));
+
+    let mut line = Line::default();
+    let mut run = String::new();
+    let mut style = cells[0].1;
+    for (ch, cell_style) in cells {
+        if cell_style != style {
+            line.push_span(Span::styled(std::mem::take(&mut run), style));
+            style = cell_style;
+        }
+        run.push(ch);
+    }
+    line.push_span(Span::styled(run, style));
     f.render_widget(Paragraph::new(line), bar);
 }
