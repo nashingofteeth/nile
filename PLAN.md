@@ -353,9 +353,18 @@ trimming of a transition's own span (retime it with `x`/`X`,
 
 - `v` selects whole segments on the active track; motions extend the range.
 - `d` deletes the selected range as one undo step; `y` copies it into a
-  session visual register; `p` pastes it at a cut; `V` narrows to one segment.
+  session visual register; `p` pastes it at the playhead, splitting the clip
+  or gap under it when needed; `V` narrows to one segment.
 - Range delete refuses transitions (their neighbour spans need the normal
-  delete path); paste requires a cut and reassigns clip/transition ids.
+  delete path); paste inside a transition is refused.
+- Pasted clips/transitions get fresh ids; edge gaps fold into existing gaps.
+
+## Per-track waveforms (shipped)
+
+- Every unmuted audio-bearing track (including video-embedded audio) gets a
+  waveform row under its track; the active track stays brighter.
+- Timeline windowing counts each waveform row, so a short panel shows fewer
+  whole tracks rather than clipping one.
 
 ## Pool keyframes (shipped)
 
@@ -367,7 +376,6 @@ trimming of a transition's own span (retime it with `x`/`X`,
 
 ## Open / deferred
 
-- Per-track waveform overviews (currently only the active audio-bearing track).
 - Thumbnails and M7 GUI.
 
 ## Open decisions (non-blocking)
