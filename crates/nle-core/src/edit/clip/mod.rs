@@ -14,7 +14,7 @@ pub use delete::{
 
 use crate::project::Project;
 use crate::time::Seconds;
-use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Transition};
+use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Track, Transition};
 
 use super::extend::extend_gap_ending_at;
 use super::util::{
@@ -573,7 +573,9 @@ pub fn delete_range_on(
     Ok(Batch { ops, desc })
 }
 
-/// Insert whole segments at a cut, giving copied clips/transitions fresh ids.
+/// Insert whole segments at any playhead, giving copied clips/transitions
+/// fresh ids. A playhead inside a clip or gap splits that segment first; a
+/// playhead inside a transition is refused because a blend owns both sides.
 /// No overwrite: this is the `P`/ripple-insert shape. Visual paste uses it.
 pub fn insert_segments_on(
     project: &Project,
@@ -586,50 +588,206 @@ pub fn insert_segments_on(
     }
     let t = snap(project, at)?;
     let tr = track_at(project, track)?;
-    let on_cut = t == Seconds::from_integer(0)
-        || t == tr.end()
-        || tr
-            .segments
-            .iter()
-            .enumerate()
-            .any(|(i, _)| tr.start_of(i) == t);
-    if !on_cut {
-        return Err(EditError::NotACut(stamp(project, &t)));
-    }
-    let index = if t >= tr.end() {
-        tr.segments.len()
-    } else {
-        tr.index_at(t).unwrap_or(tr.segments.len())
-    };
     let mut next = project.next_clip_id();
-    let mut payloads = Vec::with_capacity(segments.len());
-    for segment in segments {
-        let mut segment = segment.clone();
-        match &mut segment {
-            Segment::Clip(c) => {
-                c.id = next;
-                next += 1;
-            }
-            Segment::Transition(t) => {
-                t.id = next;
-                next += 1;
-            }
-            Segment::Gap(_) => {}
-        }
-        payloads.push(segment);
+    let payload = fresh_payload(segments, &mut next);
+    let desc = format!(
+        "pasted {} segment(s) at {}",
+        payload.len(),
+        stamp(project, &t)
+    );
+
+    if t <= Seconds::from_integer(0) {
+        return Ok(plain_insert(track, tr, 0, payload, &desc));
     }
-    let count = payloads.len();
-    let ops = payloads
-        .into_iter()
-        .enumerate()
-        .map(|(i, segment)| EditOp::Insert {
+    if t >= tr.end() {
+        return Ok(plain_insert(track, tr, tr.segments.len(), payload, &desc));
+    }
+    let si = tr.index_at(t).ok_or(EditError::NoSegment)?;
+    let seg = tr.segments[si].clone();
+    let offset = t - tr.start_of(si);
+    if offset <= Seconds::from_integer(0) {
+        return Ok(plain_insert(track, tr, si, payload, &desc));
+    }
+    match &seg {
+        Segment::Transition(_) => Err(EditError::PasteTransition),
+        Segment::Gap(g) => {
+            let (head_ok, tail_ok) = split_sides(project, g.duration, offset);
+            if !head_ok {
+                return Ok(plain_insert(track, tr, si, payload, &desc));
+            }
+            if !tail_ok {
+                return Ok(plain_insert(track, tr, si + 1, payload, &desc));
+            }
+            let mut pieces = vec![Segment::Gap(Gap { duration: offset })];
+            pieces.extend(payload);
+            pieces.push(Segment::Gap(Gap {
+                duration: g.duration - offset,
+            }));
+            Ok(Batch {
+                ops: replace_with_many(track, si, &seg, coalesce_gaps(pieces)),
+                desc: format!("{desc} (split the gap)"),
+            })
+        }
+        Segment::Clip(c) => {
+            let (head_ok, tail_ok) = split_sides(project, c.duration(), offset);
+            if !head_ok {
+                return Ok(plain_insert(track, tr, si, payload, &desc));
+            }
+            if !tail_ok {
+                return Ok(plain_insert(track, tr, si + 1, payload, &desc));
+            }
+            let split_at = c.asset_in + source_span(c, offset);
+            let left = Segment::Clip(Clip {
+                id: c.id,
+                asset: c.asset,
+                asset_in: c.asset_in,
+                asset_out: split_at,
+                speed: c.speed,
+                effects: c.effects.clone(),
+            });
+            let right = Segment::Clip(Clip {
+                id: next,
+                asset: c.asset,
+                asset_in: split_at,
+                asset_out: c.asset_out,
+                speed: c.speed,
+                effects: c.effects.clone(),
+            });
+            let mut pieces = vec![left];
+            pieces.extend(payload);
+            pieces.push(right);
+            Ok(Batch {
+                ops: replace_with_many(track, si, &seg, pieces),
+                desc: format!("{desc} (split clip #{})", c.id),
+            })
+        }
+    }
+}
+
+/// Insert a payload between existing segments, folding a leading/trailing
+/// gap into a neighbouring gap so a cut paste never leaves two adjacent gaps.
+fn plain_insert(
+    track: usize,
+    tr: &Track,
+    index: usize,
+    mut payload: Vec<Segment>,
+    desc: &str,
+) -> Batch {
+    let mut ops = Vec::new();
+    let prev_gap = index > 0 && matches!(tr.segments.get(index - 1), Some(Segment::Gap(_)));
+    let next_gap =
+        index < tr.segments.len() && matches!(tr.segments.get(index), Some(Segment::Gap(_)));
+
+    // One gap pasted between two gaps: fuse all three in one step.
+    if prev_gap
+        && next_gap
+        && payload.len() == 1
+        && matches!(payload.first(), Some(Segment::Gap(_)))
+    {
+        let previous = tr.segments[index - 1].clone();
+        let next = tr.segments[index].clone();
+        ops.push(EditOp::Replace {
+            track,
+            index: index - 1,
+            before: previous.clone(),
+            after: Segment::Gap(Gap {
+                duration: previous.duration() + payload[0].duration() + next.duration(),
+            }),
+        });
+        ops.push(EditOp::Remove {
+            track,
+            index,
+            segment: next,
+        });
+        return Batch {
+            ops,
+            desc: desc.to_string(),
+        };
+    }
+
+    if prev_gap && matches!(payload.first(), Some(Segment::Gap(_))) {
+        let previous = tr.segments[index - 1].clone();
+        let mut merged = previous.clone();
+        let add = payload.remove(0).duration();
+        if let Segment::Gap(gap) = &mut merged {
+            gap.duration += add;
+        }
+        ops.push(EditOp::Replace {
+            track,
+            index: index - 1,
+            before: previous,
+            after: merged,
+        });
+    }
+
+    let mut next_merged = None;
+    if next_gap
+        && matches!(payload.last(), Some(Segment::Gap(_)))
+        && let Some(last) = payload.pop()
+    {
+        let next = tr.segments[index].clone();
+        let mut merged = next.clone();
+        if let Segment::Gap(gap) = &mut merged {
+            gap.duration += last.duration();
+        }
+        next_merged = Some((next, merged));
+    }
+
+    let inserted = payload.len();
+    for (i, segment) in payload.into_iter().enumerate() {
+        ops.push(EditOp::Insert {
             track,
             index: index + i,
             segment,
-        })
-        .collect();
-    Ok(Batch {
+        });
+    }
+    if let Some((before, after)) = next_merged {
+        ops.push(EditOp::Replace {
+            track,
+            index: index + inserted,
+            before,
+            after,
+        });
+    }
+    Batch {
         ops,
-        desc: format!("inserted {} segment(s) at {}", count, stamp(project, &t)),
-    })
+        desc: desc.to_string(),
+    }
+}
+
+fn fresh_payload(segments: &[Segment], next: &mut u32) -> Vec<Segment> {
+    segments
+        .iter()
+        .map(|segment| {
+            let mut segment = segment.clone();
+            match &mut segment {
+                Segment::Clip(c) => {
+                    c.id = *next;
+                    *next += 1;
+                }
+                Segment::Transition(t) => {
+                    t.id = *next;
+                    *next += 1;
+                }
+                Segment::Gap(_) => {}
+            }
+            segment
+        })
+        .collect()
+}
+
+/// Keep the "never two adjacent gaps" invariant after splitting a gap and
+/// pasting a range whose edge is also a gap.
+fn coalesce_gaps(pieces: Vec<Segment>) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        if let Some(Segment::Gap(previous)) = out.last_mut()
+            && let Segment::Gap(next) = &piece
+        {
+            previous.duration += next.duration;
+            continue;
+        }
+        out.push(piece);
+    }
+    out
 }

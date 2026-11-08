@@ -63,7 +63,7 @@ fn visual_delete_reports_a_merged_seam() {
 }
 
 #[test]
-fn visual_yank_pastes_at_a_cut_and_keeps_the_range_copy() {
+fn visual_yank_pastes_at_a_cut_and_folds_the_gap() {
     let mut app = visual_app();
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('v'));
@@ -75,18 +75,72 @@ fn visual_yank_pastes_at_a_cut_and_keeps_the_range_copy() {
     assert!(matches!(app.mode, Mode::Normal), "{:?}", app.mode);
     assert_eq!(
         app.project.timeline.video_track().unwrap().segments.len(),
-        before + 2,
-        "the visual range is inserted at the cut"
+        before + 1,
+        "the copied clip is inserted and the copied gap folds into the cut gap"
+    );
+    let segs = &app.project.timeline.video_track().unwrap().segments;
+    assert!(
+        matches!(&segs[2], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)),
+        "the copied gap folds into the gap at the cut: {segs:?}"
     );
 }
 
 #[test]
-fn visual_paste_refuses_a_time_inside_a_clip() {
+fn visual_paste_splits_a_clip_at_the_playhead() {
     let mut app = visual_app();
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('v'));
+    handle_key(&mut app, &fake, key('y')); // copy clip #1
+    handle_key(&mut app, &fake, key('l')); // playhead 2.0 is inside clip #1
+    let before = app.project.timeline.video_track().unwrap().segments.len();
+    handle_key(&mut app, &fake, key('p'));
+    assert!(matches!(app.mode, Mode::Normal), "{:?}", app.mode);
+    assert_eq!(
+        app.project.timeline.video_track().unwrap().segments.len(),
+        before + 2,
+        "the target clip splits and the range lands in the middle"
+    );
+    assert!(app.message.contains("pasted"), "{}", app.message);
+    assert!(app.message.contains("split clip #1"), "{}", app.message);
+
+    handle_key(&mut app, &fake, key('u'));
+    assert_eq!(
+        app.project.timeline.video_track().unwrap().segments.len(),
+        before,
+        "split + insert undo as one step"
+    );
+}
+
+#[test]
+fn visual_paste_splits_a_gap_and_coalesces_the_edges() {
+    let mut app = visual_app();
+    app.playhead = 3.0; // the fixture's gap
+    let fake = FakeMpv::new();
+    handle_key(&mut app, &fake, key('v'));
+    handle_key(&mut app, &fake, key('y')); // copy the 2 s gap
+    handle_key(&mut app, &fake, key('l')); // playhead 4.0, still in the gap
+    let end_before = app.project.timeline.end();
+    handle_key(&mut app, &fake, key('p'));
+    assert!(matches!(app.mode, Mode::Normal), "{:?}", app.mode);
+    assert!(app.message.contains("split the gap"), "{}", app.message);
+    let segs = &app.project.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 3, "no adjacent gaps: {segs:?}");
+    assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
+    assert_eq!(
+        app.project.timeline.end(),
+        end_before + Seconds::from_integer(2),
+        "the pasted gap lengthens the timeline"
+    );
+}
+
+#[test]
+fn visual_paste_inside_a_transition_is_refused() {
+    let mut app = App::new(blend_pair(), temp_project_path("visual-transition"));
+    app.loaded = true;
+    app.playhead = 2.5; // inside the 1 s dissolve around the 3 s cut
+    let fake = FakeMpv::new();
+    handle_key(&mut app, &fake, key('v'));
     handle_key(&mut app, &fake, key('y'));
-    handle_key(&mut app, &fake, key('l')); // playhead 2 is not a cut
     let before = app.project.timeline.video_track().unwrap().segments.len();
     handle_key(&mut app, &fake, key('p'));
     assert!(matches!(app.mode, Mode::Visual(_)), "stay in visual");
@@ -94,5 +148,5 @@ fn visual_paste_refuses_a_time_inside_a_clip() {
         app.project.timeline.video_track().unwrap().segments.len(),
         before
     );
-    assert!(app.message.contains("cut"), "{}", app.message);
+    assert!(app.message.contains("transition"), "{}", app.message);
 }

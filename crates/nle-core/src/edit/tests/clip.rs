@@ -17,6 +17,162 @@ fn s_splits_a_clip() {
 }
 
 #[test]
+fn insert_splits_a_clip_at_the_playhead() {
+    let mut p = fixture();
+    let a = p.media[0].id;
+    let payload = Segment::Clip(Clip {
+        id: 0,
+        asset: a,
+        asset_in: Seconds::from_integer(4),
+        asset_out: Seconds::from_integer(5),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    let mut h = History::default();
+    let batch = insert_segments_on(&p, 0, 0.5, &[payload]).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 5, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.id == 1
+            && c.asset_in == Seconds::from_integer(1)
+            && c.asset_out == Seconds::new(3, 2)
+    ));
+    assert!(matches!(
+        &segs[1],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(4)
+    ));
+    assert!(matches!(
+        &segs[2],
+        Segment::Clip(c) if c.asset_in == Seconds::new(3, 2)
+            && c.asset_out == Seconds::from_integer(3)
+    ));
+    assert_eq!(
+        p.timeline.video_track().unwrap().end(),
+        Seconds::from_integer(6)
+    );
+    assert_eq!(clip_ids(&p), vec![1, 3, 4, 2], "fresh right/payload ids");
+
+    h.undo(&mut p).unwrap();
+    assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3);
+}
+
+#[test]
+fn insert_splits_a_gap_at_the_playhead() {
+    let mut p = fixture();
+    let a = p.media[0].id;
+    let payload = Segment::Clip(Clip {
+        id: 0,
+        asset: a,
+        asset_in: Seconds::from_integer(4),
+        asset_out: Seconds::from_integer(5),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    let mut h = History::default();
+    let batch = insert_segments_on(&p, 0, 2.5, &[payload]).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 5, "{segs:?}");
+    assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
+    assert!(matches!(&segs[3], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
+    assert_eq!(
+        p.timeline.video_track().unwrap().end(),
+        Seconds::from_integer(6)
+    );
+}
+
+#[test]
+fn insert_into_a_gap_coalesces_gap_edges() {
+    let mut p = fixture();
+    let payload = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    let mut h = History::default();
+    let batch = insert_segments_on(&p, 0, 2.5, &[payload]).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(
+        segs.len(),
+        3,
+        "the split gap and pasted gap become one: {segs:?}"
+    );
+    assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+    assert_eq!(
+        p.timeline.video_track().unwrap().end(),
+        Seconds::from_integer(6)
+    );
+}
+
+#[test]
+fn insert_at_a_cut_coalesces_boundary_gaps() {
+    let mut p = fixture(); // [clip 1][gap 1][clip 2]
+
+    // A gap payload before the existing gap folds into it.
+    let batch = insert_segments_on(
+        &p,
+        0,
+        2.0,
+        &[Segment::Gap(Gap {
+            duration: Seconds::from_integer(1),
+        })],
+    )
+    .unwrap();
+    let mut h = History::default();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 3, "{segs:?}");
+    assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+
+    // A payload ending in a gap folds into the gap after the cut too.
+    let mut p = fixture();
+    let payload = Segment::Clip(Clip {
+        id: 0,
+        asset: p.media[0].id,
+        asset_in: Seconds::from_integer(4),
+        asset_out: Seconds::from_integer(5),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    let gap = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    let batch = insert_segments_on(&p, 0, 2.0, &[payload, gap]).unwrap();
+    let mut h = History::default();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 4, "{segs:?}");
+    assert!(matches!(&segs[2], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+}
+
+#[test]
+fn insert_refuses_inside_a_transition() {
+    let mut p = clip_pair();
+    let batch = add_transition(
+        &p,
+        0,
+        3.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    let mut h = History::default();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let payload = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    assert!(matches!(
+        insert_segments_on(&p, 0, 2.5, &[payload]),
+        Err(EditError::PasteTransition)
+    ));
+}
+
+#[test]
 fn range_delete_folds_the_new_neighbours() {
     let mut p = fixture();
     let a = p.media[0].id;

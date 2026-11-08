@@ -140,7 +140,7 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
         return vec![
             "visual — whole segments; motions extend the selection",
             "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G ends",
-            "d delete · y yank · p paste at a cut · V one segment · v/esc cancel",
+            "d delete · y yank · p paste at the playhead · V one segment · v/esc cancel",
         ];
     }
     if matches!(app.mode, Mode::Extend(_)) {
