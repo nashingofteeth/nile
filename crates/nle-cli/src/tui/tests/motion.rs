@@ -1,6 +1,7 @@
 use super::super::motion::{
-    cut_points, fmt_timecode, marker_col, next_clip_start, next_cut, next_gap_start, on_boundary,
-    prev_clip_start, prev_cut, prev_gap_start, snap_to_cut, truncate_label,
+    TimelineView, Viewport, cut_points, fmt_timecode, marker_col, next_clip_start, next_cut,
+    next_gap_start, on_boundary, prev_clip_start, prev_cut, prev_gap_start, snap_to_cut,
+    truncate_label,
 };
 use super::super::panels::timeline::render_timeline;
 use nle_core::time::Seconds;
@@ -67,6 +68,129 @@ fn clip_edges_align_with_cut_positions() {
             "divider at cut {cut} → col {want}, got {divider_cols:?}"
         );
     }
+}
+
+#[test]
+fn fit_viewport_is_the_same_scale_as_marker_col() {
+    for t in [0.0, 1.5, 7.0, 10.0] {
+        assert_eq!(
+            Viewport::fit(10.0).col(t, 40),
+            marker_col(t, 10.0, 40),
+            "fit must not drift from the shared quantizer"
+        );
+    }
+}
+
+#[test]
+fn max_zoom_shows_one_frame_per_column() {
+    let fps = Seconds::new(30, 1);
+    let total = 10.0;
+    let width = 40;
+    let mut view = TimelineView::default();
+    view.zoom_by(1e9, 5.0, total, width, Some(&fps));
+
+    let span = view.viewport(total, width, Some(&fps)).span;
+    assert!(
+        (span - width as f64 / 30.0).abs() < 1e-9,
+        "one frame per column, got {span}"
+    );
+}
+
+#[test]
+fn zoom_out_stops_at_the_whole_timeline() {
+    let fps = Seconds::new(30, 1);
+    let mut view = TimelineView::default();
+    for _ in 0..10 {
+        view.zoom_by(0.5, 5.0, 10.0, 40, Some(&fps));
+    }
+    let viewport = view.viewport(10.0, 40, Some(&fps));
+    assert_eq!(viewport.start, 0.0);
+    assert_eq!(viewport.span, 10.0);
+}
+
+#[test]
+fn zoom_keeps_the_playhead_on_its_column() {
+    let fps = Seconds::new(30, 1);
+    let mut view = TimelineView::default();
+    view.zoom_by(2.0, 5.0, 10.0, 40, Some(&fps));
+    let viewport = view.viewport(10.0, 40, Some(&fps));
+    assert_eq!(
+        viewport.col(5.0, 40),
+        Viewport::fit(10.0).col(5.0, 40),
+        "the zoom anchor stays put"
+    );
+}
+
+#[test]
+fn pan_and_follow_stay_inside_the_timeline() {
+    let fps = Seconds::new(30, 1);
+    let mut view = TimelineView::default();
+    view.zoom_by(4.0, 0.0, 10.0, 40, Some(&fps));
+    view.pan_by(-1.0, 10.0, 40, Some(&fps));
+    assert_eq!(view.start, 0.0, "pan clamps at the start");
+
+    view.pan_by(10.0, 10.0, 40, Some(&fps));
+    let viewport = view.viewport(10.0, 40, Some(&fps));
+    assert!(
+        (view.start - (10.0 - viewport.span)).abs() < 1e-9,
+        "pan clamps at the end"
+    );
+
+    view.follow(9.0, 10.0, 40, Some(&fps));
+    let viewport = view.viewport(10.0, 40, Some(&fps));
+    assert!(view.start <= 9.0 && 9.0 <= view.start + viewport.span);
+}
+
+#[test]
+fn zoom_keys_pan_and_fit() {
+    let mut app = App::new(asset_project(), temp_project_path("zoom-keys"));
+    app.loaded = true;
+    app.note_terminal_width(40);
+    let fake = FakeMpv::new();
+
+    handle_key(&mut app, &fake, key('+'));
+    let first = app.timeline_view.zoom;
+    assert!(first > 1.0);
+    handle_key(&mut app, &fake, key('='));
+    assert!(app.timeline_view.zoom > first);
+
+    let start = app.timeline_view.start;
+    handle_key(
+        &mut app,
+        &fake,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('f'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    assert!(app.timeline_view.start > start, "Ctrl-f pans right");
+
+    handle_key(
+        &mut app,
+        &fake,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('b'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    assert!(app.timeline_view.start < 1.0, "Ctrl-b pans back");
+
+    handle_key(&mut app, &fake, key('z'));
+    assert_eq!(app.timeline_view, TimelineView::default());
+}
+
+#[test]
+fn a_seek_keeps_the_playhead_in_view() {
+    let mut app = App::new(asset_project(), temp_project_path("zoom-follow"));
+    app.loaded = true;
+    app.note_terminal_width(40);
+    app.timeline_view.zoom = 4.0;
+    app.seek_to(&FakeMpv::new(), 6.0);
+    let view = app.timeline_viewport(app.timeline_width);
+    assert!(
+        view.start <= 6.0 && 6.0 <= view.start + view.span,
+        "the playhead scrolled into view: {view:?}"
+    );
 }
 
 #[test]

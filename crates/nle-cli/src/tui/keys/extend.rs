@@ -809,6 +809,23 @@ pub(crate) fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     let mult = app.count.take().unwrap_or(1);
     let eps = half_frame(&app.project);
 
+    if key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+    {
+        match code {
+            KeyCode::Char('b') => {
+                app.pan_timeline(-0.5);
+                return;
+            }
+            KeyCode::Char('f') => {
+                app.pan_timeline(0.5);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // `gg` still works (lands on the range start via clamp).
     if let (Pending::G, KeyCode::Char('g')) = (&app.pending, code) {
         app.pending = Pending::None;
@@ -832,6 +849,9 @@ pub(crate) fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('L') => seek_rel_mode(app, player, &st, 5.0 * mult as f64),
         KeyCode::Char('f') => step_mode(app, player, &st, 1, mult),
         KeyCode::Char('F') => step_mode(app, player, &st, -1, mult),
+        KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_timeline(1.5),
+        KeyCode::Char('-') => app.zoom_timeline(1.0 / 1.5),
+        KeyCode::Char('z') => app.fit_timeline(),
         KeyCode::Char('j') => {
             match next_cut(&cut_points(&app.project, app.active()), app.playhead, eps) {
                 Some(t) => seek_to_mode(app, player, &st, t),
