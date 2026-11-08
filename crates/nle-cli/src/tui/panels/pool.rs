@@ -12,8 +12,9 @@ use nle_core::time::Seconds;
 use nle_core::timeline::{Clip, Segment as TimelineSegment, Track, TrackKind};
 use nle_core::track_label;
 
+use super::super::motion::Viewport;
 use super::super::{App, PoolState, pool_sel, secs};
-use super::timeline::draw_track_row;
+use super::timeline::{draw_track_row, track_parts};
 /// The pool takes over the info pane: asset list on the left, probe
 /// metadata for the selection on the right.
 pub(crate) fn render_pool(f: &mut Frame, area: Rect, app: &App) {
@@ -181,7 +182,16 @@ pub(crate) fn render_pool_strip(f: &mut Frame, area: Rect, app: &App, st: &PoolS
         width: inner.width,
         height: 1,
     };
-    draw_track_row(f, row, app, &track, total, false, app.active());
+    let parts = track_parts(&app.project, &track, total);
+    draw_track_row(
+        f,
+        row,
+        app,
+        &parts,
+        false,
+        Viewport::fit(total),
+        app.active(),
+    );
     let marker = Rect {
         x: inner.x,
         y: inner.y + 1,

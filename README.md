@@ -89,7 +89,14 @@ edits keep NLE mnemonics (`i`/`o` are trim in/out; `s`/`S` split).
 | `n` / `N` | Next/previous gap |
 | `gg` / `G` / `0` | Start / end / start |
 | `<` `>` (`,` `.`) | Clip start / clip end |
+| `+` / `=` / `-` | Zoom timeline in / in / out |
+| `z` | Fit the whole timeline |
+| `Ctrl-b` / `Ctrl-f` | Pan timeline left / right |
 | `3l`, `5j`, … | Vim counts: seek 3 s, jump 5 cuts |
+
+Zoom is centred on the playhead. Maximum zoom-in is one frame per column;
+`z` fits the whole timeline again. Seeking and edits keep the playhead in
+view while zoomed; `Ctrl-b`/`Ctrl-f` pan by half a screen.
 
 ### Editing
 

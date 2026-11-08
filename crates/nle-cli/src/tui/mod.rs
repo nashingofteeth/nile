@@ -26,7 +26,7 @@ mod panels;
 
 use panels::render;
 
-use motion::{fmt_timecode, gap_under, secs, snap_to_cut, snap_to_frame};
+use motion::{TimelineView, Viewport, fmt_timecode, gap_under, secs, snap_to_cut, snap_to_frame};
 
 // ------------------------------------------------------------ cut motions
 
@@ -265,6 +265,11 @@ pub struct App {
     fx_scale_lock: bool,
     /// Which track edits and navigation act on. Clamped via `active()`.
     pub active_track: usize,
+    /// Horizontal timeline view (session-only). `zoom == 1` fits.
+    pub(crate) timeline_view: TimelineView,
+    /// Last known timeline bar width: usable columns for zoom limits and
+    /// keeping the playhead in view.
+    timeline_width: u16,
     /// The background render/import, if one is running.
     job: Option<Job>,
     /// Segments copied by visual-mode `y`; session-only, like a vim register.
@@ -324,6 +329,8 @@ impl App {
             last_pool_asset: None,
             fx_scale_lock: true,
             active_track: 0,
+            timeline_view: TimelineView::default(),
+            timeline_width: 80,
             job: None,
             visual_register: Vec::new(),
             waveforms: HashMap::new(),
@@ -397,6 +404,7 @@ impl App {
     }
 
     pub fn sync(&mut self, st: &PlaybackState) {
+        let before = self.playhead;
         // Authority split: while PLAYING, mpv's streamed position drives
         // the playhead (only it knows the live position). While PAUSED,
         // the MODEL owns it — the playhead only moves through our own
@@ -477,12 +485,67 @@ impl App {
             }
             self.mpv_error = Some(e.clone());
         }
+        if (self.playhead - before).abs() > 1e-9 {
+            self.follow_timeline();
+        }
     }
 
     pub fn total(&self) -> f64 {
         // Timeline::end includes the sequence tail — deletes/trims of the
         // last clip leave a trailing gap that the UI must keep showing.
         secs(&self.project.timeline.end())
+    }
+
+    /// The current horizontal viewport for a given bar width.
+    pub(crate) fn timeline_viewport(&self, width: u16) -> Viewport {
+        self.timeline_view
+            .viewport(self.total().max(1e-9), width, self.project.fps.as_ref())
+    }
+
+    /// Record the terminal width and derive the timeline bar's usable width.
+    pub(crate) fn note_terminal_width(&mut self, terminal_width: u16) {
+        let label = if self.project.timeline.tracks.len() > 1 {
+            4
+        } else {
+            0
+        };
+        self.timeline_width = terminal_width.saturating_sub(2 + label);
+    }
+
+    pub(crate) fn zoom_timeline(&mut self, factor: f64) {
+        self.timeline_view.zoom_by(
+            factor,
+            self.playhead,
+            self.total().max(1e-9),
+            self.timeline_width,
+            self.project.fps.as_ref(),
+        );
+        self.set_message(&format!("zoom {:.2}×", self.timeline_view.zoom));
+    }
+
+    pub(crate) fn fit_timeline(&mut self) {
+        self.timeline_view.fit();
+        self.set_message("timeline fit");
+    }
+
+    pub(crate) fn pan_timeline(&mut self, fraction: f64) {
+        self.timeline_view.pan_by(
+            fraction,
+            self.total().max(1e-9),
+            self.timeline_width,
+            self.project.fps.as_ref(),
+        );
+    }
+
+    /// Keep the playhead in the zoomed viewport after a seek, edit or playback
+    /// tick. Fitting the whole timeline is a no-op.
+    pub(crate) fn follow_timeline(&mut self) {
+        self.timeline_view.follow(
+            self.playhead,
+            self.total().max(1e-9),
+            self.timeline_width,
+            self.project.fps.as_ref(),
+        );
     }
 
     /// The last representable playhead position — a timeline of `dur` spans
@@ -507,6 +570,7 @@ impl App {
             // the same arithmetic the display uses.
             self.playhead = (self.playhead + delta).clamp(0.0, self.last_frame());
             self.note_handoff_seek(self.playhead);
+            self.follow_timeline();
         }
     }
 
@@ -518,6 +582,7 @@ impl App {
             // Model position is authoritative when paused: set it now.
             self.playhead = target;
             self.note_handoff_seek(target);
+            self.follow_timeline();
             // Nudge a few ms INTO the target instant: EDL segment
             // boundaries sit a hair after the cut (source frame rounding),
             // so an exact seek would display the PREVIOUS segment's last
@@ -552,6 +617,7 @@ impl App {
             .saturating_add(dir.saturating_mul(n as i64))
             .clamp(0, last);
         self.playhead = idx as f64 / f;
+        self.follow_timeline();
     }
 }
 
@@ -622,6 +688,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     app.register = load_register_without_migration(&path);
     // The handlers guard on this (mpv "loaded"); the dump has no monitor.
     app.loaded = true;
+    app.note_terminal_width(size.0);
     let player = NullMpv;
     for k in keys.chars() {
         let code = match k {
@@ -700,6 +767,9 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     let mut playhead_moving: Option<Instant> = None;
 
     loop {
+        if let Ok((width, _)) = crossterm::terminal::size() {
+            app.note_terminal_width(width);
+        }
         let st = player.state();
         app.sync(&st);
 
@@ -863,6 +933,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     // Everything on disk is ours again.
     app.note_seen();
     app.reload_pending = false;
+    app.follow_timeline();
     // Re-key both caches against the reloaded timeline; a dropped receiver
     // simply discards a stale worker's results.
     app.waveforms.clear();

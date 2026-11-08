@@ -229,6 +229,7 @@ pub(crate) fn close_pool_at(app: &mut App, player: &dyn Mpv, at: f64) {
     remember_pool(app);
     app.mode = Mode::Normal;
     app.playhead = at.clamp(0.0, app.last_frame());
+    app.follow_timeline();
     app.pending_pause = Some(true);
     // Set it now so the subsequent async `loadfile` starts paused (mpv keeps
     // the pause property; the pending value re-applies it after the load).

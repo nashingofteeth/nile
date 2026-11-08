@@ -450,6 +450,50 @@ fn every_audio_bearing_track_gets_a_waveform_row() {
     );
 }
 
+// A zoomed viewport draws only the visible time window.
+#[test]
+fn a_zoomed_timeline_draws_only_the_visible_window() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut p = asset_project();
+    let (blue, _) = p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+    if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[0].segments[2] {
+        c.asset = blue;
+    }
+    let mut app = App::new(p, temp_project_path("zoom-render"));
+    app.loaded = true;
+    app.playhead = 5.5;
+    app.timeline_view.zoom = 4.0;
+    app.timeline_view.start = 5.0; // visible 5.0..6.75 of the 7 s timeline
+
+    let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
+    term.draw(|f| {
+        render_timeline(
+            f,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 6,
+            },
+            &app,
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let text: String = (0..6)
+        .flat_map(|y| (0..40).map(move |x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')))
+        .collect();
+    assert!(
+        text.contains("blue.mp4"),
+        "the visible clip is drawn:\n{text}"
+    );
+    assert!(
+        !text.contains("red.mp4"),
+        "the off-screen first clip is not drawn:\n{text}"
+    );
+}
+
 // A two-clip track must map each clip's peaks from its own timeline start,
 // not from the whole-track x coordinate (the old bug truncated the row).
 #[test]

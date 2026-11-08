@@ -96,6 +96,21 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     let mult = app.count.take().unwrap_or(1);
     let eps = half_frame(&app.project);
 
+    // Horizontal pan, vim-style page navigation. Ctrl-r stays with redo.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('b') => {
+                app.pan_timeline(-0.5);
+                return;
+            }
+            KeyCode::Char('f') => {
+                app.pan_timeline(0.5);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Second key of a two-key sequence.
     match (&app.pending, code) {
         (Pending::G, KeyCode::Char('g')) => {
@@ -154,6 +169,11 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 app.seek_to(player, app.playhead);
             }
         }
+        // Timeline zoom: +/= in, - out, z fits. The playhead stays at the
+        // same relative screen position while zooming.
+        KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_timeline(1.5),
+        KeyCode::Char('-') => app.zoom_timeline(1.0 / 1.5),
+        KeyCode::Char('z') => app.fit_timeline(),
         KeyCode::Char('j') => {
             match next_cut(&cut_points(&app.project, app.active()), app.playhead, eps) {
                 Some(t) => app.seek_to(player, t),

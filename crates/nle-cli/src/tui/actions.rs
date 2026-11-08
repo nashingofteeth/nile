@@ -370,6 +370,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
         Mode::Extend(st) => st.edge_pos,
         _ => app.playhead,
     };
+    let playhead_before = app.playhead;
     match app.project.edit(action, from, &mut app.register) {
         Ok(outcome) => {
             match outcome.playhead {
@@ -391,6 +392,9 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
                     app.playhead = app.playhead.clamp(0.0, app.last_frame());
                 }
                 None => {}
+            }
+            if (app.playhead - playhead_before).abs() > 1e-9 {
+                app.follow_timeline();
             }
             if outcome.changed {
                 let removed = removed_material(&stamp, &timeline_stamp(&app.project));

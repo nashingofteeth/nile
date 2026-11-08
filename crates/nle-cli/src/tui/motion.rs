@@ -224,14 +224,141 @@ pub(super) fn on_boundary(project: &Project, t: f64, ti: usize) -> bool {
         .any(|&c| (c - t).abs() < 1e-9)
 }
 
+/// The timeline's horizontal viewport. `zoom` is relative to the whole
+/// timeline: 1.0 fits it, larger values show less. `start` is the left edge in
+/// timeline seconds. Session-only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TimelineView {
+    pub zoom: f64,
+    pub start: f64,
+}
+
+impl Default for TimelineView {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            start: 0.0,
+        }
+    }
+}
+
+impl TimelineView {
+    /// Fit the whole timeline.
+    pub(crate) fn fit(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Visible time span for this zoom, clamped so the closest zoom is one
+    /// frame per column (or the whole timeline when it is shorter).
+    fn span(&self, total: f64, width: u16, fps: Option<&Seconds>) -> f64 {
+        let total = total.max(1e-9);
+        let zoom = self.zoom.clamp(1.0, Self::max_zoom(total, width, fps));
+        total / zoom
+    }
+
+    /// Zoom factor at which one video frame occupies one column.
+    fn max_zoom(total: f64, width: u16, fps: Option<&Seconds>) -> f64 {
+        let total = total.max(1e-9);
+        let frame = fps.map(|f| 1.0 / secs(f)).unwrap_or(1.0);
+        let min_span = (frame * width.max(1) as f64).min(total);
+        (total / min_span.max(1e-9)).max(1.0)
+    }
+
+    /// The concrete mapping for one render pass.
+    pub(crate) fn viewport(&self, total: f64, width: u16, fps: Option<&Seconds>) -> Viewport {
+        let total = total.max(1e-9);
+        let span = self.span(total, width, fps);
+        let max_start = (total - span).max(0.0);
+        Viewport {
+            start: self.start.clamp(0.0, max_start),
+            span,
+        }
+    }
+
+    /// Zoom by `factor` while keeping `playhead` at the same relative screen
+    /// position.
+    pub(crate) fn zoom_by(
+        &mut self,
+        factor: f64,
+        playhead: f64,
+        total: f64,
+        width: u16,
+        fps: Option<&Seconds>,
+    ) {
+        let total = total.max(1e-9);
+        let before = self.viewport(total, width, fps);
+        let max_zoom = Self::max_zoom(total, width, fps);
+        let zoom = (self.zoom * factor).clamp(1.0, max_zoom);
+        if (zoom - self.zoom).abs() < 1e-9 {
+            return;
+        }
+        let relative = ((playhead - before.start) / before.span.max(1e-9)).clamp(0.0, 1.0);
+        self.zoom = zoom;
+        let span = total / zoom;
+        let max_start = (total - span).max(0.0);
+        self.start = (playhead - relative * span).clamp(0.0, max_start);
+    }
+
+    /// Pan by a fraction of the visible span.
+    pub(crate) fn pan_by(&mut self, fraction: f64, total: f64, width: u16, fps: Option<&Seconds>) {
+        let total = total.max(1e-9);
+        let view = self.viewport(total, width, fps);
+        if view.span >= total - 1e-9 {
+            self.start = 0.0;
+            return;
+        }
+        let max_start = (total - view.span).max(0.0);
+        self.start = (self.start + view.span * fraction).clamp(0.0, max_start);
+    }
+
+    /// Scroll the minimum amount that keeps `playhead` inside the view.
+    pub(crate) fn follow(&mut self, playhead: f64, total: f64, width: u16, fps: Option<&Seconds>) {
+        let total = total.max(1e-9);
+        let view = self.viewport(total, width, fps);
+        if view.span >= total - 1e-9 {
+            self.start = 0.0;
+            return;
+        }
+        let margin = (view.span / width.max(1) as f64).max(1e-9);
+        let max_start = (total - view.span).max(0.0);
+        if playhead < view.start + margin {
+            self.start = (playhead - margin).clamp(0.0, max_start);
+        } else if playhead > view.start + view.span - margin {
+            self.start = (playhead - view.span + margin).clamp(0.0, max_start);
+        }
+    }
+}
+
+/// A resolved viewport: the left edge and visible span in timeline seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Viewport {
+    pub start: f64,
+    pub span: f64,
+}
+
+impl Viewport {
+    pub(crate) fn fit(total: f64) -> Self {
+        Self {
+            start: 0.0,
+            span: total.max(1e-9),
+        }
+    }
+
+    /// Column of `t`, clamped into the row. Same rounding as `marker_col`.
+    pub(crate) fn col(self, t: f64, width: u16) -> u16 {
+        if width == 0 {
+            return 0;
+        }
+        let rel = (t - self.start) / self.span.max(1e-9);
+        ((rel * width as f64).round() as i64).clamp(0, width as i64 - 1) as u16
+    }
+}
+
 /// Column of a time position on the timeline row. Used for BOTH the
 /// playhead marker and the boundary ticks — one scale, or they drift
 /// apart (the playhead used (w-1) once and sat a column off the end).
 pub(super) fn marker_col(t: f64, total: f64, width: u16) -> u16 {
-    if width == 0 {
-        return 0;
-    }
-    (((t / total.max(1e-9)) * width as f64).round() as u16).min(width - 1)
+    Viewport::fit(total).col(t, width)
 }
 
 pub(super) fn truncate_label(label: &str, width: u16) -> String {

@@ -12,7 +12,7 @@ use nle_core::timeline::{Segment as TimelineSegment, Track};
 use nle_core::track_label;
 use nle_core::{Seconds, secs_f64};
 
-use super::super::motion::{marker_col, on_boundary, truncate_label};
+use super::super::motion::{Viewport, on_boundary, truncate_label};
 use super::super::{App, Mode, pool_strip_active, secs};
 use super::pool::render_pool_strip;
 pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
@@ -58,6 +58,7 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         .collect();
     let capacity = inner.height.saturating_sub(1) as usize;
     let (start, count) = track_window_rows(&heights, app.active(), capacity.max(1));
+    let view = app.timeline_viewport(bar_w);
     let marker_limit = inner.y + inner.height.saturating_sub(1);
     let mut y = inner.y;
     for (ti, track) in tracks.iter().enumerate().skip(start).take(count) {
@@ -91,7 +92,8 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
             width: bar_w,
             height: 1,
         };
-        draw_track_row(f, bar, app, track, total, in_extend && active, ti);
+        let parts = track_parts(&app.project, track, total);
+        draw_track_row(f, bar, app, &parts, in_extend && active, view, ti);
         y += 1;
 
         if track_has_audio(&app.project, track) && y < marker_limit {
@@ -116,7 +118,7 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
                 width: bar_w,
                 height: 1,
             };
-            draw_waveform_row(f, bar, app, track, total, active);
+            draw_waveform_row(f, bar, app, track, view, active);
             y += 1;
         }
     }
@@ -130,7 +132,7 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         width: bar_w,
         height: 1,
     };
-    draw_marker_row(f, bar, app, total, in_extend);
+    draw_marker_row(f, bar, app, view, in_extend);
 }
 
 pub(crate) fn track_has_audio(project: &Project, track: &Track) -> bool {
@@ -152,11 +154,18 @@ const WAVE_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '
 /// same visual grammar as the video row: green clips, dark-gray gaps, and
 /// black cut dividers. The active track keeps the brighter peaks; the others
 /// are dimmer so the focus still reads.
-fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64, active: bool) {
+fn draw_waveform_row(
+    f: &mut Frame,
+    bar: Rect,
+    app: &App,
+    track: &Track,
+    view: Viewport,
+    active: bool,
+) {
     if bar.width == 0 {
         return;
     }
-    let cell = total / f64::from(bar.width);
+    let cell = view.span / f64::from(bar.width);
     let gap_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
     // A dark green band under bright green peaks keeps the row green while
     // making the waveform readable; plain Green on LightGreen was too close.
@@ -170,16 +179,20 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
     let divider_style = Style::default().fg(Color::Black).bg(band);
     let trans_style = Style::default().fg(Color::Black).bg(Color::Magenta);
     let mut cells: Vec<(char, Style)> = vec![(' ', gap_style); bar.width as usize];
+    let view_end = view.start + view.span;
     let mut cum = 0.0f64;
     for seg in &track.segments {
         let len = secs(&seg.duration());
-        let x0 = marker_col(cum, total, bar.width);
         let start = cum;
         cum += len;
-        let x1 = if cum >= total - 1e-9 {
+        if start >= view_end - 1e-9 {
+            continue; // starts at or past the right edge
+        }
+        let x0 = view.col(start, bar.width);
+        let x1 = if cum >= view_end - 1e-9 {
             bar.width
         } else {
-            marker_col(cum, total, bar.width)
+            view.col(cum, bar.width)
         };
         match seg {
             TimelineSegment::Gap(_) => {
@@ -200,7 +213,7 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
                         && wave.duration > 0.0
                         && !wave.peaks.is_empty()
                     {
-                        let t = (f64::from(x) + 0.5) * cell;
+                        let t = view.start + (f64::from(x) + 0.5) * cell;
                         let offset = (t - start).max(0.0);
                         let source =
                             c.source_at(Seconds::new((offset * 1_000_000.0) as i64, 1_000_000));
@@ -227,14 +240,14 @@ fn draw_waveform_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: 
     for (i, seg) in track.segments.iter().enumerate() {
         let start = cum;
         cum += secs(&seg.duration());
-        if i > 0 {
+        if i > 0 && start >= view.start - 1e-9 && start < view_end - 1e-9 {
             let soft = matches!(seg, TimelineSegment::Transition(_))
                 || track
                     .segments
                     .get(i - 1)
                     .is_some_and(|s| matches!(s, TimelineSegment::Transition(_)));
             if !soft {
-                let x = marker_col(start, total, bar.width);
+                let x = view.col(start, bar.width);
                 let style = match seg {
                     TimelineSegment::Gap(_) => gap_style,
                     TimelineSegment::Transition(_) => trans_style,
@@ -359,18 +372,18 @@ pub(crate) fn track_parts(
 
 /// Draw one track's segment row. `notch` overlays the extend-mode playhead
 /// marker (only the armed track gets it). Boundaries come from the SAME
-/// quantizer as the marker row (`marker_col` of the cumulative time), so
-/// drawn clip edges and the playhead/cut indicator can never disagree.
+/// quantizer as the marker row (`view`), so drawn clip edges and the
+/// playhead/cut indicator can never disagree.
 pub(crate) fn draw_track_row(
     f: &mut Frame,
     bar: Rect,
     app: &App,
-    track: &Track,
-    total: f64,
+    parts: &[(f64, String, Style, bool)],
     notch: bool,
+    view: Viewport,
     ti: usize,
 ) {
-    let parts = track_parts(&app.project, track, total);
+    let view_end = view.start + view.span;
     let selected = match &app.mode {
         Mode::Visual(st) if st.track == ti => {
             Some((st.anchor.min(st.cursor), st.anchor.max(st.cursor)))
@@ -380,16 +393,20 @@ pub(crate) fn draw_track_row(
     let mut cum: f64 = 0.0;
     let mut cells: Vec<(u16, String, Style)> = Vec::new();
     for (i, (dur, label, style, soft)) in parts.iter().enumerate() {
+        let seg_start = cum;
+        cum += dur;
+        if seg_start >= view_end - 1e-9 {
+            continue; // starts at or past the right edge
+        }
         let start_x = if i == 0 {
             0
         } else {
-            marker_col(cum, total, bar.width)
+            view.col(seg_start, bar.width)
         };
-        cum += dur;
-        let end_x = if i == parts.len() - 1 {
+        let end_x = if cum >= view_end - 1e-9 {
             bar.width
         } else {
-            marker_col(cum, total, bar.width)
+            view.col(cum, bar.width)
         };
         let width = end_x.saturating_sub(start_x);
         if width == 0 {
@@ -416,7 +433,7 @@ pub(crate) fn draw_track_row(
     let mut spans: Vec<Span> = Vec::new();
     if notch {
         // Split the containing part's text around the playhead marker.
-        let ph = marker_col(app.playhead, total, bar.width);
+        let ph = view.col(app.playhead, bar.width);
         let edge = match &app.mode {
             Mode::Extend(st) => st.edge_pos,
             _ => app.playhead,
@@ -451,8 +468,16 @@ pub(crate) fn draw_track_row(
 /// Draw the playhead marker row: red ▏ normally, WHITE exactly on a cut
 /// frame, ▕ at EOF. In extend mode it also carries the workable span
 /// (yellow) and the material extent (dim), with a yellow playhead.
-pub(crate) fn draw_marker_row(f: &mut Frame, bar: Rect, app: &App, total: f64, in_extend: bool) {
-    let ph = marker_col(app.playhead, total, bar.width);
+pub(crate) fn draw_marker_row(
+    f: &mut Frame,
+    bar: Rect,
+    app: &App,
+    view: Viewport,
+    in_extend: bool,
+) {
+    let ph = view.col(app.playhead, bar.width);
+    let visible =
+        app.playhead >= view.start - 1e-9 && app.playhead <= view.start + view.span + 1e-9;
     let at_end = app.eof;
     let mut marker_cells: Vec<(char, Style)> = vec![(' ', Style::default()); bar.width as usize];
     if let Mode::Extend(st) = &app.mode {
@@ -465,7 +490,7 @@ pub(crate) fn draw_marker_row(f: &mut Frame, bar: Rect, app: &App, total: f64, i
         if let Some((m0, m1)) = st.mat {
             paint_run(
                 &mut marker_cells,
-                total,
+                view,
                 bar.width,
                 m0,
                 m1,
@@ -476,14 +501,17 @@ pub(crate) fn draw_marker_row(f: &mut Frame, bar: Rect, app: &App, total: f64, i
         let hi_edge = st.hi.unwrap_or(f64::INFINITY);
         paint_run(
             &mut marker_cells,
-            total,
+            view,
             bar.width,
             st.lo,
             hi_edge,
             '─',
             Style::default().fg(Color::Yellow),
         );
-        marker_cells[ph as usize] = (if at_end { '▕' } else { '▏' }, Style::default().fg(color));
+        if visible {
+            marker_cells[ph as usize] =
+                (if at_end { '▕' } else { '▏' }, Style::default().fg(color));
+        }
     } else {
         let _ = in_extend;
         let color = if on_boundary(&app.project, app.playhead, app.active()) {
@@ -491,7 +519,10 @@ pub(crate) fn draw_marker_row(f: &mut Frame, bar: Rect, app: &App, total: f64, i
         } else {
             Color::Red
         };
-        marker_cells[ph as usize] = (if at_end { '▕' } else { '▏' }, Style::default().fg(color));
+        if visible {
+            marker_cells[ph as usize] =
+                (if at_end { '▕' } else { '▏' }, Style::default().fg(color));
+        }
     }
     let mut marker: Vec<Span> = Vec::new();
     let mut run = String::new();
@@ -515,19 +546,20 @@ pub(crate) fn draw_marker_row(f: &mut Frame, bar: Rect, app: &App, total: f64, i
 /// timeline seconds (`b` may exceed the row — it clamps).
 pub(crate) fn paint_run(
     cells: &mut [(char, Style)],
-    total: f64,
+    view: Viewport,
     width: u16,
     a: f64,
     b: f64,
     glyph: char,
     style: Style,
 ) {
-    if width == 0 || b <= a {
+    let view_end = view.start + view.span;
+    if width == 0 || b <= a || b <= view.start || a >= view_end {
         return;
     }
-    let col_a = marker_col(a.max(0.0), total, width) as usize;
-    let mut col_b = marker_col(b, total, width) as usize;
-    if b >= total - 1e-9 {
+    let col_a = view.col(a.max(view.start), width) as usize;
+    let mut col_b = view.col(b.min(view_end), width) as usize;
+    if b >= view_end - 1e-9 {
         col_b = cells.len();
     }
     for cell in cells.iter_mut().take(col_b).skip(col_a) {

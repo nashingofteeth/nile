@@ -56,6 +56,17 @@ pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     }) else {
         return;
     };
+    if key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+    {
+        match key.code {
+            KeyCode::Char('b') => app.pan_timeline(-0.5),
+            KeyCode::Char('f') => app.pan_timeline(0.5),
+            _ => {}
+        }
+        return;
+    }
     match key.code {
         KeyCode::Esc | KeyCode::Char('v') => {
             app.mode = Mode::Normal;
@@ -64,6 +75,9 @@ pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('d') => delete_selected(app, player, state),
         KeyCode::Char('y') => yank_selected(app, state),
         KeyCode::Char('p') => paste_selected(app, player, state),
+        KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_timeline(1.5),
+        KeyCode::Char('-') => app.zoom_timeline(1.0 / 1.5),
+        KeyCode::Char('z') => app.fit_timeline(),
         // `V` selects the whole current segment (which is already the seed);
         // useful after extending the range.
         KeyCode::Char('V') => {
