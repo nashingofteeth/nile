@@ -514,6 +514,8 @@ impl App {
     }
 
     pub(crate) fn zoom_timeline(&mut self, factor: f64) {
+        let max_zoom = self.max_zoom_now();
+        let before = self.timeline_view;
         self.timeline_view.zoom_by(
             factor,
             self.playhead,
@@ -521,18 +523,39 @@ impl App {
             self.timeline_width,
             self.project.fps.as_ref(),
         );
-        self.set_message(&format!("zoom {:.2}×", self.timeline_view.zoom));
+        if max_zoom <= 1.0 + 1e-9 {
+            if factor < 1.0 {
+                self.set_message("timeline fit");
+            } else {
+                self.set_message(
+                    "fit is already one frame per column — the project is shorter than the view",
+                );
+            }
+        } else if self.timeline_view == before {
+            if factor > 1.0 {
+                self.set_message("already at the closest zoom (one frame per column)");
+            } else {
+                self.set_message("timeline fit");
+            }
+        } else {
+            self.set_message(&format!("zoom {:.2}×", self.timeline_view.zoom));
+        }
         self.save_session_state();
     }
 
     pub(crate) fn toggle_timeline_zoom(&mut self) {
+        let max_zoom = self.max_zoom_now();
         self.timeline_view.toggle(
             self.playhead,
             self.total().max(1e-9),
             self.timeline_width,
             self.project.fps.as_ref(),
         );
-        if self.timeline_view.zoom <= 1.0 + 1e-9 {
+        if max_zoom <= 1.0 + 1e-9 {
+            self.set_message(
+                "fit is already one frame per column — the project is shorter than the view",
+            );
+        } else if self.timeline_view.zoom <= 1.0 + 1e-9 {
             self.set_message("timeline fit");
         } else {
             self.set_message(&format!("zoom {:.2}×", self.timeline_view.zoom));
@@ -560,6 +583,14 @@ impl App {
         if let Err(e) = view_state::save(&self.path, state) {
             crate::log::line(&format!("session state save failed: {e}"));
         }
+    }
+
+    fn max_zoom_now(&self) -> f64 {
+        TimelineView::max_zoom(
+            self.total().max(1e-9),
+            self.timeline_width,
+            self.project.fps.as_ref(),
+        )
     }
 
     /// Keep the playhead in the zoomed viewport after a seek, edit or playback
