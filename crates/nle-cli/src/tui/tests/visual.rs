@@ -69,7 +69,11 @@ fn visual_yank_pastes_at_a_cut_and_folds_the_gap() {
     handle_key(&mut app, &fake, key('v'));
     handle_key(&mut app, &fake, key('j')); // select clip + gap
     handle_key(&mut app, &fake, key('y'));
-    assert_eq!(app.visual_register.len(), 2);
+    assert_eq!(
+        app.register.as_ref().map(|r| r.entries.len()),
+        Some(2),
+        "the shared register holds the range"
+    );
     let before = app.project.timeline.video_track().unwrap().segments.len();
     handle_key(&mut app, &fake, key('p'));
     assert!(matches!(app.mode, Mode::Normal), "{:?}", app.mode);

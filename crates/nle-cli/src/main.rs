@@ -238,6 +238,39 @@ enum Cmd {
         #[arg(long)]
         ripple: bool,
     },
+    /// Delete an inclusive range of whole segments (visual `d`)
+    DeleteRange {
+        /// First segment index (0-based, as printed by `nile show`)
+        #[arg(long)]
+        from_seg: usize,
+        /// Last segment index, inclusive
+        #[arg(long)]
+        to_seg: usize,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+    },
+    /// Yank an inclusive range into the shared register (visual `y`)
+    YankRange {
+        /// First segment index (0-based, as printed by `nile show`)
+        #[arg(long)]
+        from_seg: usize,
+        /// Last segment index, inclusive
+        #[arg(long)]
+        to_seg: usize,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+    },
+    /// Ripple-insert the shared range at a position (visual `p`)
+    PasteRange {
+        /// Where to insert (seconds or timecode)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        at: String,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+    },
     /// Move one edge of a clip or gap to a position (the extend commit)
     Extend {
         /// The clip whose edge to move (finds its track)
@@ -918,6 +951,20 @@ mod tests {
                 track: 1,
                 ripple: false,
             },
+            Cmd::DeleteRange {
+                from_seg: 1,
+                to_seg: 2,
+                track: 1,
+            },
+            Cmd::YankRange {
+                from_seg: 1,
+                to_seg: 2,
+                track: 1,
+            },
+            Cmd::PasteRange {
+                at: "1".into(),
+                track: 1,
+            },
             Cmd::Speed {
                 id: 1,
                 rate: "2".into(),
@@ -1095,6 +1142,28 @@ mod tests {
             track: 1,
         };
         assert!(to_action(&cmd).unwrap().is_err());
+
+        let cmd = Cmd::DeleteRange {
+            from_seg: 1,
+            to_seg: 2,
+            track: 2,
+        };
+        assert_eq!(
+            to_action(&cmd).unwrap().unwrap(),
+            Action::DeleteRange {
+                track: 1,
+                start: 1,
+                end: 2,
+            }
+        );
+        let cmd = Cmd::PasteRange {
+            at: "1.5".into(),
+            track: 2,
+        };
+        assert_eq!(
+            to_action(&cmd).unwrap().unwrap(),
+            Action::PasteRange { track: 1, at: 1.5 }
+        );
     }
 
     /// A CLI edit records history — `nile undo` undoes it, and the

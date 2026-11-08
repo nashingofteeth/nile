@@ -20,7 +20,7 @@ use super::super::{App, Mode, persist_playhead, secs};
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :cache · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :delete-range|yank-range · :paste · :paste-range · :yank · :extend · :speed · :undo · :redo · :seek · :track · :media · :cache · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale

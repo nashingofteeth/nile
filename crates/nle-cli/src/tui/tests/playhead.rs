@@ -191,12 +191,12 @@ fn yank_grabs_gaps_too() {
     app.playhead = 4.0; // inside the [3..5) gap
     edit_yank(&mut app, &FakeMpv::new());
     assert!(
-        matches!(app.register.as_ref().map(|r| &r.segment), Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(2))
+        matches!(app.register.as_ref().and_then(|r| r.entries.first()).map(|e| &e.segment), Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(2))
     );
     app.playhead = 1.0; // inside clip #1
     edit_yank(&mut app, &FakeMpv::new());
     assert!(
-        matches!(app.register.as_ref().map(|r| &r.segment), Some(TimelineSegment::Clip(c)) if c.id == 1)
+        matches!(app.register.as_ref().and_then(|r| r.entries.first()).map(|e| &e.segment), Some(TimelineSegment::Clip(c)) if c.id == 1)
     );
 }
 
@@ -219,7 +219,7 @@ fn yank_follows_the_active_track() {
     app.playhead = 1.0; // over clip #42 on track 1 and clip #1 on track 0
     edit_yank(&mut app, &FakeMpv::new());
     assert!(
-        matches!(app.register.as_ref().map(|r| &r.segment), Some(TimelineSegment::Clip(c)) if c.id == 42),
+        matches!(app.register.as_ref().and_then(|r| r.entries.first()).map(|e| &e.segment), Some(TimelineSegment::Clip(c)) if c.id == 42),
         "yanked the active track's clip, not v1's: {:?}",
         app.register
     );

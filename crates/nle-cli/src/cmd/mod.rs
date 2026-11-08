@@ -149,6 +149,30 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 segment: None,
             })
         })),
+        Cmd::DeleteRange {
+            from_seg,
+            to_seg,
+            track,
+        } => Some(
+            cli_index(*track, "--track").map(|track| Action::DeleteRange {
+                track,
+                start: *from_seg,
+                end: *to_seg,
+            }),
+        ),
+        Cmd::YankRange {
+            from_seg,
+            to_seg,
+            track,
+        } => Some(cli_index(*track, "--track").map(|track| Action::YankRange {
+            track,
+            start: *from_seg,
+            end: *to_seg,
+        })),
+        Cmd::PasteRange { at, track } => Some(
+            cli_index(*track, "--track")
+                .and_then(|track| cli_time(at).map(|at| Action::PasteRange { track, at })),
+        ),
         Cmd::Extend {
             clip,
             seg,
@@ -323,7 +347,8 @@ pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()>
         | Action::TrimOut { at, .. }
         | Action::Split { at, .. }
         | Action::InsertGap { at, .. }
-        | Action::Paste { at, .. } => *at,
+        | Action::Paste { at, .. }
+        | Action::PasteRange { at, .. } => *at,
         Action::Delete { target, .. } | Action::Yank { target, .. } => match target {
             Target::At(t) => *t,
             _ => 0.0,

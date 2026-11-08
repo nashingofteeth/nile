@@ -1,5 +1,11 @@
 use super::*;
 
+fn one(segment: Segment, path: Option<PathBuf>) -> Register {
+    Register {
+        entries: vec![RegisterEntry { segment, path }],
+    }
+}
+
 #[test]
 fn a_register_from_another_project_resolves_or_refuses() {
     let p = fixture();
@@ -18,7 +24,10 @@ fn a_register_from_another_project_resolves_or_refuses() {
             effects: Vec::new(),
         }),
     );
-    assert_eq!(reg.path.as_deref(), Some(Path::new("/media/spare.mp4")));
+    assert_eq!(
+        reg.entries[0].path.as_deref(),
+        Some(Path::new("/media/spare.mp4"))
+    );
     // Not in this pool → refuse, loudly.
     assert!(matches!(
         reg.resolve(&p),
@@ -28,7 +37,7 @@ fn a_register_from_another_project_resolves_or_refuses() {
     // A file this project *does* pool (under a different id) remaps.
     let mut here = p.clone();
     let (id, _) = here.add_asset("/media/other/red.mp4".into(), probe_report("10"));
-    let entry = Register {
+    let entry = RegisterEntry {
         segment: Segment::Clip(Clip {
             id: 7,
             asset: 999, // the id it had over there
@@ -51,12 +60,12 @@ fn the_register_round_trips_through_its_sidecar() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nle.json");
     assert_eq!(load_register(&path), None, "no file, no register");
-    let reg = Register {
-        segment: Segment::Gap(Gap {
+    let reg = one(
+        Segment::Gap(Gap {
             duration: Seconds::from_integer(2),
         }),
-        path: Some(PathBuf::from("/media/red.mp4")),
-    };
+        Some(PathBuf::from("/media/red.mp4")),
+    );
     save_register(&path, Some(&reg)).unwrap();
     assert_eq!(load_register(&path), Some(reg));
     save_register(&path, None).unwrap();
@@ -65,15 +74,45 @@ fn the_register_round_trips_through_its_sidecar() {
 }
 
 #[test]
+fn a_range_round_trips_and_pastes_every_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nile.json");
+    let reg = Register::of_range(
+        &fixture(),
+        &[
+            Segment::Clip(Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            }),
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+        ],
+    );
+    save_register(&path, Some(&reg)).unwrap();
+    let loaded = load_register(&path).unwrap();
+    assert_eq!(loaded.entries.len(), 2);
+    assert_eq!(loaded.resolve_range(&fixture()).unwrap().len(), 2);
+    assert!(matches!(
+        loaded.resolve(&fixture()),
+        Err(EditError::RangeRegister)
+    ));
+}
+
+#[test]
 fn an_old_adjacent_register_is_copied_into_the_state_directory() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("nile.json");
-    let reg = Register {
-        segment: Segment::Gap(Gap {
+    let reg = one(
+        Segment::Gap(Gap {
             duration: Seconds::from_integer(2),
         }),
-        path: None,
-    };
+        None,
+    );
     save_register(&project, Some(&reg)).unwrap();
     let new = register_path(&project);
     let legacy = dir.path().join("nile.clipboard.json");
@@ -95,12 +134,12 @@ fn an_old_adjacent_register_is_copied_into_the_state_directory() {
 fn the_read_only_loader_leaves_a_legacy_register_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("nile.json");
-    let reg = Register {
-        segment: Segment::Gap(Gap {
+    let reg = one(
+        Segment::Gap(Gap {
             duration: Seconds::from_integer(2),
         }),
-        path: None,
-    };
+        None,
+    );
     save_register(&project, Some(&reg)).unwrap();
     let new = register_path(&project);
     let legacy = dir.path().join("nile.clipboard.json");

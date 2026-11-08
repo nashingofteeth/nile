@@ -1,6 +1,6 @@
-//! The yank register: one segment plus, for a clip, the asset path it came
-//! from, in a sidecar beside the project. Convenience state — a missing or
-//! version-skewed file reads as empty.
+//! The yank register: one or more segments plus, for clips, the asset paths
+//! they came from, in a sidecar beside the project. Convenience state — a
+//! missing or version-skewed file reads as empty.
 
 use std::path::{Path, PathBuf};
 
@@ -13,23 +13,21 @@ use crate::timeline::Segment;
 /// Register sidecar format version. Bumped on a shape change; a skewed or
 /// unreadable file reads as an empty register (the register is
 /// convenience, not critical state — the project file is).
-/// v2 carries the yanked clip's asset path.
-pub const REGISTER_VERSION: u32 = 2;
+/// v3 carries a sequence of entries (single yanks are a one-entry range).
+pub const REGISTER_VERSION: u32 = 3;
 
-/// A yanked segment plus, for a clip, the asset path it came from. Asset
+/// One yanked segment plus, for a clip, the asset path it came from. Asset
 /// ids are **project-scoped**, so a register that outlives its project
 /// (a rebuilt project, a copied sidecar) must be resolved against the
 /// pool by path — pasting the wrong media silently would be worse than
 /// refusing.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Register {
+pub struct RegisterEntry {
     pub segment: Segment,
     pub path: Option<PathBuf>,
 }
 
-impl Register {
-    /// The register entry for `segment`, resolving a clip's asset path
-    /// from `project`.
+impl RegisterEntry {
     pub fn of(project: &Project, segment: Segment) -> Self {
         let path = match &segment {
             Segment::Clip(c) => project.asset(c.asset).map(|a| a.path.clone()),
@@ -64,9 +62,56 @@ impl Register {
     }
 }
 
+/// A yank register: a single segment or a contiguous visual range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Register {
+    pub entries: Vec<RegisterEntry>,
+}
+
+impl Register {
+    /// A one-segment register (the `yy` shape).
+    pub fn of(project: &Project, segment: Segment) -> Self {
+        Self::of_range(project, &[segment])
+    }
+
+    /// A visual range; each clip keeps the path it came from.
+    pub fn of_range(project: &Project, segments: &[Segment]) -> Self {
+        Self {
+            entries: segments
+                .iter()
+                .map(|segment| RegisterEntry::of(project, segment.clone()))
+                .collect(),
+        }
+    }
+
+    /// Resolve a single-entry register. A range must use
+    /// [`Self::resolve_range`]; pasting it as one segment would silently drop
+    /// the rest.
+    pub fn resolve(&self, project: &Project) -> Result<Segment, EditError> {
+        match self.entries.as_slice() {
+            [] => Err(EditError::RegisterEmpty),
+            [entry] => entry.resolve(project),
+            _ => Err(EditError::RangeRegister),
+        }
+    }
+
+    /// Resolve every entry, failing if any media is foreign.
+    pub fn resolve_range(&self, project: &Project) -> Result<Vec<Segment>, EditError> {
+        self.entries
+            .iter()
+            .map(|entry| entry.resolve(project))
+            .collect()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RegisterFile {
     version: u32,
+    entries: Vec<RegisterEntryFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegisterEntryFile {
     segment: Segment,
     #[serde(default)]
     path: Option<PathBuf>,
@@ -78,7 +123,7 @@ pub fn register_path(project_path: &Path) -> PathBuf {
     crate::state::clipboard_path(project_path)
 }
 
-/// The yanked segment a project's register holds, if any. A legacy adjacent
+/// The yanked segments a project's register holds, if any. A legacy adjacent
 /// sidecar is copied into the state directory on first read.
 pub fn load_register(project_path: &Path) -> Option<Register> {
     load_register_with(project_path, true)
@@ -105,7 +150,7 @@ fn load_register_with(project_path: &Path, migrate: bool) -> Option<Register> {
         Err(_) => return None,
     };
     let file: RegisterFile = serde_json::from_str(&text).ok()?;
-    if file.version != REGISTER_VERSION {
+    if file.version != REGISTER_VERSION || file.entries.is_empty() {
         return None;
     }
     if migrate && let Some(old) = legacy {
@@ -115,25 +160,38 @@ fn load_register_with(project_path: &Path, migrate: bool) -> Option<Register> {
         let _ = std::fs::copy(old, &path);
     }
     Some(Register {
-        segment: file.segment,
-        path: file.path,
+        entries: file
+            .entries
+            .into_iter()
+            .map(|entry| RegisterEntry {
+                segment: entry.segment,
+                path: entry.path,
+            })
+            .collect(),
     })
 }
 
-/// Persist the register; `None` clears it (the file goes away). Atomic,
-/// like the project save — a crash can't leave half a register.
+/// Persist the register; `None` (or an empty range) clears it, and the file
+/// goes away. Atomic, like the project save — a crash can't leave half a
+/// register.
 pub fn save_register(project_path: &Path, register: Option<&Register>) -> std::io::Result<()> {
     use std::io::Write as _;
     let path = register_path(project_path);
-    let Some(register) = register else {
+    let Some(register) = register.filter(|register| !register.entries.is_empty()) else {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(crate::state::legacy_clipboard_path(project_path));
         return Ok(());
     };
     let file = RegisterFile {
         version: REGISTER_VERSION,
-        segment: register.segment.clone(),
-        path: register.path.clone(),
+        entries: register
+            .entries
+            .iter()
+            .map(|entry| RegisterEntryFile {
+                segment: entry.segment.clone(),
+                path: entry.path.clone(),
+            })
+            .collect(),
     };
     let mut json = serde_json::to_string_pretty(&file)
         .map_err(|e| std::io::Error::other(format!("register serialize: {e}")))?;

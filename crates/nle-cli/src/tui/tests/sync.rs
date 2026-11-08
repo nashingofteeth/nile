@@ -56,12 +56,12 @@ fn a_foreign_write_is_seen_and_adopted() {
     let mut p = Project::load(&path).unwrap();
     p.set_playhead(3.0);
     p.save(&path).unwrap();
-    let reg = nle_core::Register {
-        segment: TimelineSegment::Gap(TimelineGap {
+    let reg = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
             duration: Seconds::from_integer(2),
         }),
-        path: None,
-    };
+    );
     nle_core::save_register(&path, Some(&reg)).unwrap();
 
     assert!(app.external_change());
