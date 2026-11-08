@@ -75,7 +75,7 @@ automatically. Shell commands and an open TUI adopt each other's changes.
 `demo-sandbox/nile.json`, and exports `demo-sandbox/demo.mp4`. It exercises the
 current feature set: multi-track video/audio, waveform rows, a transition,
 crop/scale/eq/offset effects, speed, the pool, shell↔TUI hand-off, and the TUI’s
-visual-mode and viewport diagnostics.
+visual-mode and viewport diagnostics. A longer tail keeps zoom/pan meaningful.
 
 Media generation is cached by `demo-sandbox/.demo-media`. Regression fixtures
 run under `demo-sandbox/checks/` and are removed on success, so the sandbox
