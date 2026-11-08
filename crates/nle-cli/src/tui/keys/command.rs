@@ -511,6 +511,7 @@ pub(crate) fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<
                 let is_add = matches!(action, Action::TrackAdd { .. });
                 if run_action(app, player, &action) && is_add {
                     app.active_track = app.project.timeline.tracks.len().saturating_sub(1);
+                    app.save_session_state();
                 }
                 None
             }

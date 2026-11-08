@@ -362,7 +362,7 @@ video/
     └── nile/
         ├── history.json
         ├── clipboard.json
-        ├── view.json      # timeline zoom and scroll
+        ├── view.json      # timeline zoom, scroll, and active track
         └── cache/
             ├── proxy/         # rendered video proxies
             ├── audio/         # continuous preview audio masters
@@ -375,9 +375,9 @@ video/
 Multiple projects in one directory get separate `.nile/<stem>/` folders.
 Legacy adjacent `*.history.json` / `*.clipboard.json` files are copied into
 the state directory on first load; old `nle.json` projects still open with
-`--project nle.json`. The timeline viewport is saved in `view.json` and
-restored on the next session. The old global `~/.cache/nile` is no longer
-used, and `nile cache prune` only touches the current project’s cache — proxy
+`--project nle.json`. The timeline viewport and active track are saved in
+`view.json` and restored on the next session. The old global
+`~/.cache/nile` is no longer used, and `nile cache prune` only touches the current project’s cache — proxy
 renders, preview audio masters, waveform peaks, keyframe lists, and completed
 export chunks.
 

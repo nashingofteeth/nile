@@ -127,6 +127,29 @@ fn the_dump_does_not_migrate_a_legacy_register() {
 }
 
 #[test]
+fn the_dump_restores_the_active_track() {
+    use super::super::view_state;
+    let path = temp_project_path("dump-track");
+    let mut p = asset_project();
+    p.timeline.add_track(TrackKind::Audio);
+    p.save(&path).unwrap();
+    view_state::save(
+        &path,
+        view_state::SessionState {
+            view: Default::default(),
+            active_track: 1,
+        },
+    )
+    .unwrap();
+
+    let out = dump(Project::load(&path).unwrap(), path, (40, 8), "");
+    assert!(
+        out.contains("active: a1"),
+        "the saved track is active:\n{out}"
+    );
+}
+
+#[test]
 fn the_dump_carries_the_saved_undo_history() {
     let path = temp_project_path("dump-undo");
     let mut doc = Document::new(asset_project());

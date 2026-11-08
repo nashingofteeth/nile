@@ -397,7 +397,11 @@ pub(crate) fn select_active_track(app: &mut App, idx: usize) -> Option<String> {
     if n == 0 {
         return None;
     }
-    app.active_track = idx.min(n - 1);
+    let track = idx.min(n - 1);
+    if app.active_track != track {
+        app.active_track = track;
+        app.save_session_state();
+    }
     Some(track_label(&app.project, app.active_track))
 }
 

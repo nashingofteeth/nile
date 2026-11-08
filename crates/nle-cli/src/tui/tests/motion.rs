@@ -167,7 +167,11 @@ fn zoom_keys_pan_and_fit() {
     handle_key(&mut app, &fake, key('+'));
     let first = app.timeline_view.zoom;
     assert!(first > 1.0);
-    assert_eq!(view_state::load(&app.path), app.timeline_view, "zoom saved");
+    assert_eq!(
+        view_state::load(&app.path).view,
+        app.timeline_view,
+        "zoom saved"
+    );
     handle_key(&mut app, &fake, key('='));
     assert!(app.timeline_view.zoom > first);
 
@@ -181,7 +185,11 @@ fn zoom_keys_pan_and_fit() {
         ),
     );
     assert!(app.timeline_view.start > start, "Ctrl-f pans right");
-    assert_eq!(view_state::load(&app.path), app.timeline_view, "pan saved");
+    assert_eq!(
+        view_state::load(&app.path).view,
+        app.timeline_view,
+        "pan saved"
+    );
 
     handle_key(
         &mut app,
@@ -199,7 +207,7 @@ fn zoom_keys_pan_and_fit() {
         "z jumps to the closest zoom, not fit"
     );
     assert_eq!(
-        view_state::load(&app.path),
+        view_state::load(&app.path).view,
         app.timeline_view,
         "max zoom saved"
     );
@@ -207,10 +215,24 @@ fn zoom_keys_pan_and_fit() {
     handle_key(&mut app, &fake, key('z'));
     assert_eq!(app.timeline_view, TimelineView::default());
     assert_eq!(
-        view_state::load(&app.path),
+        view_state::load(&app.path).view,
         TimelineView::default(),
         "fit saved"
     );
+}
+
+#[test]
+fn track_selection_is_saved_in_session_state() {
+    let mut p = asset_project();
+    p.timeline.add_track(TrackKind::Audio);
+    let mut app = App::new(p, temp_project_path("track-state"));
+    app.loaded = true;
+    app.note_terminal_width(40);
+    let fake = FakeMpv::new();
+
+    handle_key(&mut app, &fake, key('t'));
+    assert_eq!(app.active_track, 1);
+    assert_eq!(view_state::load(&app.path).active_track, 1);
 }
 
 #[test]
