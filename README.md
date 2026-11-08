@@ -69,6 +69,20 @@ The project lives in `nile.json` (or the directory default); edits are saved
 automatically. Shell commands and an open TUI adopt each other's changes.
 `--project` overrides `.nile/config.json`.
 
+## Demo
+
+`./demo.sh` builds the single canonical demo project,
+`demo-sandbox/nile.json`, and exports `demo-sandbox/demo.mp4`. It exercises the
+current feature set: multi-track video/audio, waveform rows, a transition,
+crop/scale/eq/offset effects, speed, the pool, shell↔TUI hand-off, and the TUI’s
+visual-mode and viewport diagnostics.
+
+Media generation is cached by `demo-sandbox/.demo-media`. Regression fixtures
+run under `demo-sandbox/checks/` and are removed on success, so the sandbox
+always ends with one demo project. Add new feature coverage there rather than
+creating another demo project or another top-level export. Maintenance notes:
+[docs/demo.md](docs/demo.md).
+
 ## TUI
 
 Run `nile edit`. The timeline panel shows one row per track; navigation, edits,
