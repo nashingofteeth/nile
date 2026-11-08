@@ -537,6 +537,16 @@ pub fn delete_range_on(
     if start > end || end >= tr.segments.len() {
         return Err(EditError::SegmentNotFound(start.min(end)));
     }
+    // A segment beside a transition is one of its sides: selecting it also
+    // selects the blend, so the other side gets its borrowed length back.
+    let mut start = start;
+    let mut end = end;
+    if start > 0 && matches!(tr.segments[start - 1], Segment::Transition(_)) {
+        start -= 1;
+    }
+    if end + 1 < tr.segments.len() && matches!(tr.segments[end + 1], Segment::Transition(_)) {
+        end += 1;
+    }
     if start == end
         && let Segment::Transition(t) = tr.segments[start].clone()
     {
@@ -626,6 +636,26 @@ fn delete_range_through_transitions(
     }
     after.extend(suffix);
 
+    Ok(replace_track_batch(
+        track,
+        &before,
+        after,
+        format!(
+            "deleted {} segment(s) (through transitions)",
+            end - start + 1
+        ),
+    ))
+}
+
+/// Swap a whole track in one batch. Transition-aware deletes can change both
+/// boundary neighbours, so a full before/after snapshot is simpler and less
+/// error-prone than trying to splice every handle in place.
+pub(super) fn replace_track_batch(
+    track: usize,
+    before: &[Segment],
+    after: Vec<Segment>,
+    desc: String,
+) -> Batch {
     let mut ops = Vec::with_capacity(before.len() + after.len());
     for index in (0..before.len()).rev() {
         ops.push(EditOp::Remove {
@@ -641,13 +671,7 @@ fn delete_range_through_transitions(
             segment,
         });
     }
-    Ok(Batch {
-        ops,
-        desc: format!(
-            "deleted {} segment(s) (through transitions)",
-            end - start + 1
-        ),
-    })
+    Batch { ops, desc }
 }
 
 fn restore_left(segment: &mut Segment, transition: &Transition) -> bool {

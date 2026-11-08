@@ -417,6 +417,20 @@ else
   echo "  ✗ transition range delete wrong:"; $N --project checks/range.json show | head -4; exit 1
 fi
 
+# Deleting one side of a transition also removes the blend; dd leaves the
+# deleted clip's span as a gap and restores the other side.
+$N --project checks/range.json init --force >/dev/null
+$N --project checks/range.json import red.mp4 blue.mp4 >/dev/null
+$N --project checks/range.json add red.mp4 --in 0 --out 2 >/dev/null
+$N --project checks/range.json add blue.mp4 --at 2 --in 0 --out 2 >/dev/null
+$N --project checks/range.json transition --at 2 --frames 15 >/dev/null
+$N --project checks/range.json delete --clip 1 >/dev/null
+if $N --project checks/range.json show | head -1 | grep -q '3.5 s'; then
+  echo "  ✓ dd beside a transition removes the blend and restores blue"
+else
+  echo "  ✗ transition side delete wrong:"; $N --project checks/range.json show | head -4; exit 1
+fi
+
 echo "== check: live shell hand-off =="
 # A small project for the shell↔TUI experiment: open the TUI on the demo in one
 # terminal, run nile commands in another. Each write is adopted within a tick

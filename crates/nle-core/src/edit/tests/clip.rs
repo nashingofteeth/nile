@@ -932,3 +932,109 @@ fn range_delete_through_transition_and_neighbour_keeps_the_other_handle() {
         Segment::Clip(c) if c.asset_out == Seconds::from_integer(3)
     ));
 }
+
+fn transitioned_pair() -> Project {
+    let mut p = clip_pair();
+    let batch = add_transition(
+        &p,
+        0,
+        3.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    History::default().apply(&mut p, batch, 0).unwrap();
+    p
+}
+
+#[test]
+fn deleting_a_clip_beside_a_transition_removes_the_blend_and_restores_the_other_side() {
+    let mut p = transitioned_pair(); // [C1 0..2][T][C2 3..5]
+    let mut h = History::default();
+    let batch = delete_clip_by_id_on(&p, 0, 1).unwrap();
+    assert!(batch.desc.contains("adjacent transition"), "{}", batch.desc);
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 2, "{segs:?}");
+    assert!(matches!(&segs[0], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+    assert!(matches!(
+        &segs[1],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)
+            && c.asset_out == Seconds::from_integer(3)
+    ));
+    h.undo(&mut p).unwrap();
+    assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3);
+}
+
+#[test]
+fn ripple_deleting_a_clip_beside_a_transition_restores_the_other_side() {
+    let mut p = transitioned_pair();
+    let mut h = History::default();
+    let batch = delete_ripple_on(&p, 0, 0.5).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 1, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)
+            && c.asset_out == Seconds::from_integer(3)
+    ));
+}
+
+#[test]
+fn deleting_a_gap_beside_a_transition_restores_the_clip_side() {
+    let mut p = Project::new();
+    p.fps = Some(Seconds::from_integer(30));
+    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    p.timeline.video_track_mut().unwrap().segments = vec![
+        Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(3),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        }),
+        Segment::Gap(Gap {
+            duration: Seconds::from_integer(1),
+        }),
+    ];
+    let mut h = History::default();
+    let batch = add_transition(
+        &p,
+        0,
+        3.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    // The transition is between the clip and the gap; deleting the gap
+    // removes it and gives the clip its tail back.
+    let batch = delete_ripple_on(&p, 0, 3.5).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 1, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)
+            && c.asset_out == Seconds::from_integer(3)
+    ));
+}
+
+#[test]
+fn deleting_the_right_clip_beside_a_transition_restores_the_left_tail() {
+    let mut p = transitioned_pair(); // [C1 0..2][T][C2 3..5]
+    let mut h = History::default();
+    let batch = delete_clip_by_id_on(&p, 0, 2).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 2, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)
+            && c.asset_out == Seconds::from_integer(3)
+    ));
+    assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+}

@@ -360,8 +360,9 @@ trimming of a transition's own span (retime it with `x`/`X`,
   shared yank register; `p` pastes it at the playhead, splitting the clip or
   gap under it when needed; `V` narrows to one segment.
 - Range delete restores a boundary transition's surviving handle; blends
-  wholly inside the range disappear with it. Paste inside a transition is
-  refused.
+  wholly inside the range disappear with it. Deleting a clip or gap beside a
+  blend removes the blend too and restores the other side. Paste inside a
+  transition is refused.
 - `DeleteRange`/`YankRange`/`PasteRange` are catalog actions, so the CLI and
   `:cmd` grammar reach them as `delete|yank --from-seg A --to-seg B` and
   `paste --range`.

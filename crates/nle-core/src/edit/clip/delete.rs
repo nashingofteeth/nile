@@ -55,76 +55,17 @@ pub fn delete_under_on(project: &Project, track: usize, playhead: f64) -> Result
         // Removing a transition gives its trimmed spans back to the
         // neighbours (see `delete_transition_on`).
         Segment::Transition(_) => delete_segment_ripple(project, ti, si),
-        Segment::Clip(c) => {
-            let dur = c.duration();
-            let mut ops = replace_with_many(
-                ti,
-                si,
-                &Segment::Clip(c),
-                vec![Segment::Gap(Gap { duration: dur })],
-            );
-            let mut desc = "delete clip (gap left behind)".to_string();
-            // Fuse the new gap with neighboring gaps so deletes never
-            // fragment the track into adjacent gaps.
-            let segs = &track_at(project, ti)?.segments;
-            let left_gap = si > 0 && matches!(segs[si - 1], Segment::Gap(_));
-            let right_gap = si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
-            let new_gap = Segment::Gap(Gap { duration: dur });
-            match (left_gap, right_gap) {
-                (true, true) => {
-                    let total =
-                        segs[si - 1].duration() + new_gap.duration() + segs[si + 1].duration();
-                    ops.push(EditOp::Replace {
-                        track: ti,
-                        index: si - 1,
-                        before: segs[si - 1].clone(),
-                        after: Segment::Gap(Gap { duration: total }),
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si,
-                        segment: new_gap,
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si,
-                        segment: segs[si + 1].clone(),
-                    });
-                    desc += " (merged gaps)";
-                }
-                (true, false) => {
-                    let total = segs[si - 1].duration() + new_gap.duration();
-                    ops.push(EditOp::Replace {
-                        track: ti,
-                        index: si - 1,
-                        before: segs[si - 1].clone(),
-                        after: Segment::Gap(Gap { duration: total }),
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si,
-                        segment: new_gap,
-                    });
-                    desc += " (merged gaps)";
-                }
-                (false, true) => {
-                    let total = new_gap.duration() + segs[si + 1].duration();
-                    ops.push(EditOp::Replace {
-                        track: ti,
-                        index: si,
-                        before: new_gap,
-                        after: Segment::Gap(Gap { duration: total }),
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si + 1,
-                        segment: segs[si + 1].clone(),
-                    });
-                    desc += " (merged gaps)";
-                }
-                (false, false) => {}
-            }
-            Ok(Batch { ops, desc })
+        Segment::Clip(c) => delete_clip_leaving_gap(
+            project,
+            ti,
+            si,
+            c,
+            "delete clip (gap left behind)".to_string(),
+        ),
+        Segment::Gap(_) if near_transition(project, ti, si)? => {
+            // A gap beside a blend is one of its sides: ripple it away and
+            // remove the blend, restoring the other side.
+            delete_segment_ripple(project, ti, si)
         }
         Segment::Gap(g) => {
             let mut ops = vec![EditOp::Remove {
@@ -155,6 +96,146 @@ pub fn delete_under_on(project: &Project, track: usize, playhead: f64) -> Result
             Ok(Batch { ops, desc })
         }
     }
+}
+
+/// Delete a clip with `dd` semantics: replace it with a gap, remove any
+/// adjacent transition, and restore the other side's borrowed length. With
+/// no adjacent transition this is the old gap-with-fusing path.
+fn delete_clip_leaving_gap(
+    project: &Project,
+    ti: usize,
+    si: usize,
+    clip: Clip,
+    mut desc: String,
+) -> Result<Batch, EditError> {
+    let segs = &track_at(project, ti)?.segments;
+    let mut start = si;
+    let mut end = si;
+    if si > 0 && matches!(segs[si - 1], Segment::Transition(_)) {
+        start -= 1;
+    }
+    if si + 1 < segs.len() && matches!(segs[si + 1], Segment::Transition(_)) {
+        end += 1;
+    }
+    if start == si && end == si {
+        let dur = clip.duration();
+        let mut ops = replace_with_many(
+            ti,
+            si,
+            &Segment::Clip(clip),
+            vec![Segment::Gap(Gap { duration: dur })],
+        );
+        let left_gap = si > 0 && matches!(segs[si - 1], Segment::Gap(_));
+        let right_gap = si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
+        let new_gap = Segment::Gap(Gap { duration: dur });
+        match (left_gap, right_gap) {
+            (true, true) => {
+                let total = segs[si - 1].duration() + new_gap.duration() + segs[si + 1].duration();
+                ops.push(EditOp::Replace {
+                    track: ti,
+                    index: si - 1,
+                    before: segs[si - 1].clone(),
+                    after: Segment::Gap(Gap { duration: total }),
+                });
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index: si,
+                    segment: new_gap,
+                });
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index: si,
+                    segment: segs[si + 1].clone(),
+                });
+                desc += " (merged gaps)";
+            }
+            (true, false) => {
+                let total = segs[si - 1].duration() + new_gap.duration();
+                ops.push(EditOp::Replace {
+                    track: ti,
+                    index: si - 1,
+                    before: segs[si - 1].clone(),
+                    after: Segment::Gap(Gap { duration: total }),
+                });
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index: si,
+                    segment: new_gap,
+                });
+                desc += " (merged gaps)";
+            }
+            (false, true) => {
+                let total = new_gap.duration() + segs[si + 1].duration();
+                ops.push(EditOp::Replace {
+                    track: ti,
+                    index: si,
+                    before: new_gap,
+                    after: Segment::Gap(Gap { duration: total }),
+                });
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index: si + 1,
+                    segment: segs[si + 1].clone(),
+                });
+                desc += " (merged gaps)";
+            }
+            (false, false) => {}
+        }
+        return Ok(Batch { ops, desc });
+    }
+
+    let before = segs.clone();
+    let mut after = before[..start].to_vec();
+    let mut suffix = before[end + 1..].to_vec();
+    let mut transitioned = false;
+    if start < si
+        && let Segment::Transition(t) = &before[start]
+    {
+        transitioned = true;
+        if let Some(left) = after.last_mut()
+            && !super::restore_left(left, t)
+            && let Segment::Gap(gap) = left
+        {
+            gap.duration += t.dur;
+        }
+    }
+    if end > si
+        && let Segment::Transition(t) = &before[end]
+    {
+        transitioned = true;
+        if let Some(right) = suffix.first_mut()
+            && !super::restore_right(right, t)
+            && let Segment::Gap(gap) = right
+        {
+            gap.duration += t.dur;
+        }
+    }
+
+    // The target's visible span becomes a gap. Fold it into neighbouring
+    // gaps, including any transition span that had no clip handle.
+    let dur = clip.duration();
+    if let Some(Segment::Gap(gap)) = after.last_mut() {
+        gap.duration += dur;
+    } else {
+        after.push(Segment::Gap(Gap { duration: dur }));
+    }
+    if let (Some(Segment::Gap(left)), Some(Segment::Gap(right))) =
+        (after.last_mut(), suffix.first())
+    {
+        left.duration += right.duration;
+        suffix.remove(0);
+    }
+    after.extend(suffix);
+    if transitioned {
+        desc += " (removed the adjacent transition)";
+    }
+    Ok(super::replace_track_batch(ti, &before, after, desc))
+}
+
+fn near_transition(project: &Project, ti: usize, si: usize) -> Result<bool, EditError> {
+    let segs = &track_at(project, ti)?.segments;
+    Ok((si > 0 && matches!(segs[si - 1], Segment::Transition(_)))
+        || (si + 1 < segs.len() && matches!(segs[si + 1], Segment::Transition(_))))
 }
 
 /// `D` — ripple delete: remove whatever segment is under the playhead.
@@ -356,6 +437,11 @@ pub(super) fn delete_segment_ripple(
     if let Segment::Transition(t) = seg {
         return delete_transition_on(project, ti, si, t);
     }
+    if near_transition(project, ti, si)? {
+        // The selected segment is a transition side; remove the blend with
+        // it and restore the other side's borrowed length.
+        return super::delete_range_on(project, ti, si, si);
+    }
     let mut ops = vec![EditOp::Remove {
         track: ti,
         index: si,
@@ -460,76 +546,13 @@ pub fn delete_clip_by_id_on(
     match seg {
         // Found by clip id, so a transition here is impossible.
         Segment::Transition(_) => Err(EditError::ClipNotFound(clip_id)),
-        Segment::Clip(c) => {
-            let dur = c.duration();
-            let mut ops = replace_with_many(
-                ti,
-                si,
-                &Segment::Clip(c),
-                vec![Segment::Gap(Gap { duration: dur })],
-            );
-            let mut desc = format!("delete clip #{clip_id} (gap left behind)");
-            // Fuse the new gap with neighboring gaps (dd semantics).
-            let segs = &track_at(project, ti)?.segments;
-            let left_gap = si > 0 && matches!(segs[si - 1], Segment::Gap(_));
-            let right_gap = si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
-            let new_gap = Segment::Gap(Gap { duration: dur });
-            match (left_gap, right_gap) {
-                (true, true) => {
-                    let total =
-                        segs[si - 1].duration() + new_gap.duration() + segs[si + 1].duration();
-                    ops.push(EditOp::Replace {
-                        track: ti,
-                        index: si - 1,
-                        before: segs[si - 1].clone(),
-                        after: Segment::Gap(Gap { duration: total }),
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si,
-                        segment: new_gap,
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si,
-                        segment: segs[si + 1].clone(),
-                    });
-                    desc += " (merged gaps)";
-                }
-                (true, false) => {
-                    let total = segs[si - 1].duration() + new_gap.duration();
-                    ops.push(EditOp::Replace {
-                        track: ti,
-                        index: si - 1,
-                        before: segs[si - 1].clone(),
-                        after: Segment::Gap(Gap { duration: total }),
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si,
-                        segment: new_gap,
-                    });
-                    desc += " (merged gaps)";
-                }
-                (false, true) => {
-                    let total = new_gap.duration() + segs[si + 1].duration();
-                    ops.push(EditOp::Replace {
-                        track: ti,
-                        index: si,
-                        before: new_gap,
-                        after: Segment::Gap(Gap { duration: total }),
-                    });
-                    ops.push(EditOp::Remove {
-                        track: ti,
-                        index: si + 1,
-                        segment: segs[si + 1].clone(),
-                    });
-                    desc += " (merged gaps)";
-                }
-                (false, false) => {}
-            }
-            Ok(Batch { ops, desc })
-        }
+        Segment::Clip(c) => delete_clip_leaving_gap(
+            project,
+            ti,
+            si,
+            c,
+            format!("delete clip #{clip_id} (gap left behind)"),
+        ),
         Segment::Gap(_) => Err(EditError::ClipNotFound(clip_id)),
     }
 }
