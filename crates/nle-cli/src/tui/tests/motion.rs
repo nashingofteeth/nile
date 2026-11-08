@@ -4,6 +4,7 @@ use super::super::motion::{
     truncate_label,
 };
 use super::super::panels::timeline::render_timeline;
+use super::super::view_state;
 use nle_core::time::Seconds;
 
 use super::super::keys::handle_key;
@@ -151,6 +152,7 @@ fn zoom_keys_pan_and_fit() {
     handle_key(&mut app, &fake, key('+'));
     let first = app.timeline_view.zoom;
     assert!(first > 1.0);
+    assert_eq!(view_state::load(&app.path), app.timeline_view, "zoom saved");
     handle_key(&mut app, &fake, key('='));
     assert!(app.timeline_view.zoom > first);
 
@@ -164,6 +166,7 @@ fn zoom_keys_pan_and_fit() {
         ),
     );
     assert!(app.timeline_view.start > start, "Ctrl-f pans right");
+    assert_eq!(view_state::load(&app.path), app.timeline_view, "pan saved");
 
     handle_key(
         &mut app,
@@ -177,6 +180,11 @@ fn zoom_keys_pan_and_fit() {
 
     handle_key(&mut app, &fake, key('z'));
     assert_eq!(app.timeline_view, TimelineView::default());
+    assert_eq!(
+        view_state::load(&app.path),
+        TimelineView::default(),
+        "fit saved"
+    );
 }
 
 #[test]
