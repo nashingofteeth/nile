@@ -1,7 +1,8 @@
 //! Visual segment selection: vim's `v` over timeline segments.
 //!
 //! Selection is a contiguous range of whole segments on one track. `d`
-//! deletes and `y` copies in one edit; `p` pastes the copied range at a cut.
+//! deletes and `y` copies in one edit; `p` pastes the copied range at the
+//! playhead, splitting the clip or gap under it when necessary.
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -45,7 +46,7 @@ pub(crate) fn enter_visual(app: &mut App) {
         anchor: idx,
         cursor: idx,
     });
-    app.set_message("visual — d delete · y yank · p paste at a cut · v/esc cancel");
+    app.set_message("visual — d delete · y yank · p paste at the playhead · v/esc cancel");
 }
 
 pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
@@ -151,7 +152,7 @@ fn yank_selected(app: &mut App, state: VisualState) {
     };
     app.visual_register = tr.segments[start..=end].to_vec();
     app.set_message(&format!(
-        "yanked {} segment(s) — p at a cut",
+        "yanked {} segment(s) — p at the playhead",
         end - start + 1
     ));
     let _ = state;
@@ -172,12 +173,13 @@ fn paste_selected(app: &mut App, player: &dyn Mpv, state: VisualState) {
         }
     };
     let frame = frame_of(app.project.fps.as_ref(), at);
+    let notice = batch.desc.clone();
     if let Err(e) = app.project.apply(batch, frame) {
         app.fail(&e.to_string());
         return;
     }
     app.mode = Mode::Normal;
     app.croc.play(CrocAct::Gulp);
-    app.set_message(&format!("pasted {} segment(s)", app.visual_register.len()));
+    app.set_message(&notice);
     persist_and_refresh(app, player);
 }

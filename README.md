@@ -122,7 +122,8 @@ edits keep NLE mnemonics (`i`/`o` are trim in/out; `s`/`S` split).
 **Visual mode.** `v` selects whole segments on the active track; motions
 (`h/l`, `j/k`, `w/b`, `n/N`, `gg/G`, counts) extend the range. `d` deletes the
 selected range, `y` copies it into the session visual register, and `p` pastes
-it at a cut. `V` narrows the selection to one segment; `v` or `Esc` cancels.
+it at the playhead (splitting the clip or gap under it when needed). `V`
+narrows the selection to one segment; `v` or `Esc` cancels.
 
 **Effects panel.** `j`/`k` select, `1`–`9` edit that row, `Enter` edits, `d`
 drops, `D` clears. Add crop/scale/eq/offset with `c`/`s`/`e`/`o`; LUTs are
