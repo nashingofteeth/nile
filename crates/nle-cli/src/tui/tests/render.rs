@@ -141,6 +141,7 @@ fn the_dump_restores_the_active_track() {
         view_state::SessionState {
             view: Default::default(),
             active_track: 1,
+            pool_marks: Default::default(),
         },
     )
     .unwrap();

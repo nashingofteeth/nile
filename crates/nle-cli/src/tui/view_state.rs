@@ -1,22 +1,25 @@
-//! The timeline session sidecar: viewport zoom/scroll and the active track,
-//! beside the project under `.nile/<stem>/view.json`.
+//! The timeline session sidecar: viewport zoom/scroll, the active track, and
+//! pool source marks, beside the project under `.nile/<stem>/view.json`.
 //!
 //! This is convenience state, like the yank register: a missing, corrupt or
 //! version-skewed file simply means "fit the timeline on the first track".
 
+use std::collections::BTreeMap;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::PoolMarks;
 use super::motion::TimelineView;
 
-pub(crate) const VIEW_VERSION: u32 = 2;
+pub(crate) const VIEW_VERSION: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct SessionState {
     pub view: TimelineView,
     pub active_track: usize,
+    pub pool_marks: BTreeMap<u32, PoolMarks>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,6 +28,8 @@ struct ViewFile {
     zoom: f64,
     start: f64,
     active_track: usize,
+    #[serde(default)]
+    pool_marks: BTreeMap<u32, PoolMarks>,
 }
 
 /// `nile.json` → `.nile/nile/view.json`.
@@ -47,12 +52,18 @@ pub(crate) fn load(project_path: &Path) -> SessionState {
     {
         return SessionState::default();
     }
+    let pool_marks = file
+        .pool_marks
+        .into_iter()
+        .filter(|(_, marks)| valid_marks(*marks))
+        .collect();
     SessionState {
         view: TimelineView {
             zoom: file.zoom,
             start: file.start,
         },
         active_track: file.active_track,
+        pool_marks,
     }
 }
 
@@ -71,6 +82,7 @@ pub(crate) fn save(project_path: &Path, state: SessionState) -> io::Result<()> {
             0.0
         },
         active_track: state.active_track,
+        pool_marks: state.pool_marks,
     };
     let path = path(project_path);
     let dir = path
@@ -85,6 +97,13 @@ pub(crate) fn save(project_path: &Path, state: SessionState) -> io::Result<()> {
     tmp.write_all(json.as_bytes())?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+fn valid_marks(marks: PoolMarks) -> bool {
+    let valid = |t: Option<f64>| t.is_none_or(|t| t.is_finite() && t >= 0.0);
+    valid(marks.in_at)
+        && valid(marks.out_at)
+        && !matches!((marks.in_at, marks.out_at), (Some(a), Some(b)) if a >= b)
 }
 
 #[cfg(test)]
@@ -102,8 +121,15 @@ mod tests {
                 start: 12.25,
             },
             active_track: 2,
+            pool_marks: BTreeMap::from([(
+                7,
+                PoolMarks {
+                    in_at: Some(1.5),
+                    out_at: Some(4.0),
+                },
+            )]),
         };
-        save(&project, state).unwrap();
+        save(&project, state.clone()).unwrap();
         assert_eq!(load(&project), state);
         assert!(path(&project).exists());
     }
@@ -127,9 +153,25 @@ mod tests {
 
         std::fs::write(
             &path,
-            r#"{"version":2,"zoom":0.5,"start":1.0,"active_track":1}"#,
+            r#"{"version":3,"zoom":0.5,"start":1.0,"active_track":1}"#,
         )
         .unwrap();
         assert_eq!(load(&project), SessionState::default());
+
+        // Malformed or inverted marks are dropped, not applied to an asset.
+        std::fs::write(
+            &path,
+            r#"{"version":3,"zoom":1.0,"start":0.0,"active_track":0,"pool_marks":{"7":{"in_at":4.0,"out_at":2.0},"8":{"in_at":1.0,"out_at":2.0}}}"#,
+        )
+        .unwrap();
+        let state = load(&project);
+        assert_eq!(state.pool_marks.len(), 1);
+        assert_eq!(
+            state.pool_marks.get(&8),
+            Some(&PoolMarks {
+                in_at: Some(1.0),
+                out_at: Some(2.0)
+            })
+        );
     }
 }

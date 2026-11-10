@@ -56,8 +56,8 @@ pub(crate) fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('{') => pool_select(app, player, 0),
         KeyCode::Char('}') => pool_select(app, player, n.saturating_sub(1)),
         // Source in/out marks for the insert range.
-        KeyCode::Char('[') => pool_mark_in(app),
-        KeyCode::Char(']') => pool_mark_out(app),
+        KeyCode::Char('i') => pool_mark_in(app),
+        KeyCode::Char('o') => pool_mark_out(app),
         KeyCode::Char('x') => pool_clear_marks(app),
         // Keyframe navigation (file, not list).
         KeyCode::Char('J') => pool_keyframe(app, player, 1),
@@ -68,7 +68,7 @@ pub(crate) fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
         KeyCode::Char('d') => remove_from_pool(app, player),
         // Import a file into the pool: opens the command line pre-filled.
-        KeyCode::Char('i') => {
+        KeyCode::Char('a') => {
             remember_pool(app);
             app.command_from_pool = true;
             app.mode = Mode::Command("import ".to_string());
@@ -394,6 +394,7 @@ pub(crate) fn pool_mark_in(app: &mut App) {
         return;
     }
     app.pool_marks.entry(id).or_default().in_at = Some(at);
+    app.save_session_state();
     app.set_message(&format!("source in {at:.3}s"));
 }
 
@@ -412,6 +413,7 @@ pub(crate) fn pool_mark_out(app: &mut App) {
         return;
     }
     app.pool_marks.entry(id).or_default().out_at = Some(at);
+    app.save_session_state();
     app.set_message(&format!("source out {at:.3}s"));
 }
 
@@ -422,6 +424,7 @@ pub(crate) fn pool_clear_marks(app: &mut App) {
         return;
     };
     app.pool_marks.remove(&asset.id);
+    app.save_session_state();
     app.set_message("source marks cleared");
 }
 
@@ -497,6 +500,7 @@ pub(crate) fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
     run_action(app, player, &Action::AssetRm { id });
     if app.project.asset(id).is_none() {
         app.pool_marks.remove(&id);
+        app.save_session_state();
     }
 }
 

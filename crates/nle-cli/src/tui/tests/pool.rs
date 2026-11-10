@@ -607,7 +607,7 @@ fn pool_command_preserves_the_pool_state() {
     handle_key(&mut app, &fake, key('m'));
     handle_key(&mut app, &fake, key('j'));
     set_pool_pos(&mut app, 4.0);
-    handle_key(&mut app, &fake, key('i'));
+    handle_key(&mut app, &fake, key('a'));
     assert!(matches!(app.mode, Mode::Command(_)));
     handle_key(
         &mut app,
@@ -621,14 +621,14 @@ fn pool_command_preserves_the_pool_state() {
     assert_eq!(pool_pos(&app), 4.0, "same preview clock");
 }
 
-// `i` in the pool opens the import path prompt (command line pre-filled).
+// `a` in the pool opens the import path prompt (command line pre-filled).
 #[test]
-fn pool_i_opens_the_import_prompt() {
+fn pool_a_opens_the_import_prompt() {
     let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true;
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('m')); // open the pool
-    handle_key(&mut app, &fake, key('i'));
+    handle_key(&mut app, &fake, key('a'));
     assert_eq!(app.mode, Mode::Command("import ".to_string()));
 }
 
@@ -641,15 +641,23 @@ fn pool_source_marks_trim_the_insert() {
     let fake = FakeMpv::new();
 
     set_pool_pos(&mut app, 2.0);
-    handle_key(&mut app, &fake, key('['));
+    handle_key(&mut app, &fake, key('i'));
     set_pool_pos(&mut app, 4.0);
-    handle_key(&mut app, &fake, key(']'));
+    handle_key(&mut app, &fake, key('o'));
     assert_eq!(
         app.source_marks(),
         PoolMarks {
             in_at: Some(2.0),
             out_at: Some(4.0)
         }
+    );
+    assert_eq!(
+        super::super::view_state::load(&app.path).pool_marks.get(&1),
+        Some(&PoolMarks {
+            in_at: Some(2.0),
+            out_at: Some(4.0)
+        }),
+        "marks persist in the session sidecar"
     );
 
     insert_from_pool(&mut app, &fake);
@@ -672,9 +680,9 @@ fn pool_source_marks_reject_an_out_before_in_and_clear() {
     let fake = FakeMpv::new();
 
     set_pool_pos(&mut app, 4.0);
-    handle_key(&mut app, &fake, key('['));
+    handle_key(&mut app, &fake, key('i'));
     set_pool_pos(&mut app, 2.0);
-    handle_key(&mut app, &fake, key(']'));
+    handle_key(&mut app, &fake, key('o'));
     assert!(app.message.contains("after the in"), "{}", app.message);
     assert_eq!(app.source_marks().out_at, None);
 
@@ -691,13 +699,13 @@ fn pool_source_marks_are_per_asset() {
     open_pool_mode(&mut app, 0);
     let fake = FakeMpv::new();
     set_pool_pos(&mut app, 1.0);
-    handle_key(&mut app, &fake, key('['));
+    handle_key(&mut app, &fake, key('i'));
     assert_eq!(app.source_marks().in_at, Some(1.0));
 
     open_pool_mode(&mut app, 1);
     assert_eq!(app.source_marks(), PoolMarks::default());
     set_pool_pos(&mut app, 2.0);
-    handle_key(&mut app, &fake, key(']'));
+    handle_key(&mut app, &fake, key('o'));
     assert_eq!(app.source_marks().out_at, Some(2.0));
     assert_ne!(app.source_marks().in_at, Some(1.0));
     assert!(app.project.asset(other).is_some());

@@ -229,7 +229,7 @@ fn a_command_from_the_pool_restores_the_timeline() {
     let mut app = App::new(asset_project(), temp_project_path("pool-cmd"));
     app.loaded = true;
     handle_key(&mut app, &fake, key('m')); // open the pool
-    handle_key(&mut app, &fake, key('i')); // …and its `:import` line
+    handle_key(&mut app, &fake, key('a')); // …and its `:import` line
     assert!(matches!(app.mode, Mode::Command(_)));
     handle_key(
         &mut app,

@@ -381,8 +381,8 @@ trimming of a transition's own span (retime it with `x`/`X`,
   `Ctrl-b`/`Ctrl-f` pan.
 - Zoom is anchored on the playhead and follows seeks, playback and edits.
 - Max zoom is one frame per column; fit shows the whole timeline.
-- Zoom, scroll, and the active track are saved in `.nile/<stem>/view.json`
-  and restored on the next session.
+- Zoom, scroll, the active track, and pool source marks are saved in
+  `.nile/<stem>/view.json` and restored on the next session.
 
 ## Pool keyframes (shipped)
 
@@ -403,8 +403,8 @@ trimming of a transition's own span (retime it with `x`/`X`,
 
 ## Pool source marks (shipped)
 
-- `[`/`]` set source in/out at the preview clock; `x` clears them. Marks are
-  frame-snapped, keyed by asset id, and session-only.
+- `i`/`o` set source in/out at the preview clock; `x` clears them. Marks are
+  frame-snapped, keyed by asset id, and saved in `view.json` across restarts.
 - `enter` inserts the marked source range; with no marks it inserts the whole
   asset. The strip shows the marks and the metadata pane shows the range.
 
