@@ -118,6 +118,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   at/past the end is one gap (`append_at_end`) — never two adjacent gaps.
   `e`/`E`/`[`/`]` must agree on a leading gap's `GapHead`; retire redundant
   variants so paths can't drift.
+- **The base video track is the master sequence.** A ripple insert there
+  (`ripple_other_tracks`) shifts every other track by the inserted span;
+  overlay/audio inserts stay local. Multi-track batches are one `Change::Tracks`.
 - **Floors that shift a segment are slivers.** `insert_from_pool` floors an
   asset duration to whole frames (6.006 → 6.0) so later splits can't strand a
   sub-frame stump; the renderer skips zero-width segments.

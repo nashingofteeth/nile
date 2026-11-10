@@ -48,6 +48,30 @@ impl History {
             project.validate()?;
             return Ok(());
         }
+        // A sync ripple edits several tracks at once. Snapshot the whole track
+        // list (the same shape as track add/mute/rm), so one undo restores
+        // every shifted track together.
+        let touched = batch_tracks(&batch);
+        if touched.len() > 1 {
+            let before = project.timeline.tracks.clone();
+            if let Err(e) = apply_batch(project, &batch.ops).map(|_| {
+                clamp_project(project);
+            }) {
+                project.timeline.tracks = before;
+                return Err(e);
+            }
+            if let Err(e) = project.validate() {
+                project.timeline.tracks = before;
+                return Err(e.into());
+            }
+            self.push_change(Change::Tracks(TracksChange {
+                before,
+                after: project.timeline.tracks.clone(),
+                desc: batch.desc,
+                playhead,
+            }));
+            return Ok(());
+        }
         let track = batch_track(&batch, project)?;
         let before = snapshot_track(&project.timeline.tracks[track]);
         let saved = project.timeline.tracks[track].segments.clone();
@@ -517,7 +541,23 @@ fn snapshot_track(track: &Track) -> Vec<Atom> {
     track.segments.iter().map(atom_from_segment).collect()
 }
 
-/// Which track a batch touches (all current batches are single-track).
+/// The distinct tracks a batch touches, in first-seen order.
+fn batch_tracks(batch: &Batch) -> Vec<usize> {
+    let mut tracks = Vec::new();
+    for op in &batch.ops {
+        let track = match op {
+            EditOp::Insert { track, .. }
+            | EditOp::Remove { track, .. }
+            | EditOp::Replace { track, .. } => *track,
+        };
+        if !tracks.contains(&track) {
+            tracks.push(track);
+        }
+    }
+    tracks
+}
+
+/// Which track a single-track batch touches.
 fn batch_track(batch: &Batch, project: &Project) -> Result<usize, EditError> {
     match batch.ops.first() {
         Some(EditOp::Insert { track, .. })

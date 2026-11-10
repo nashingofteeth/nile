@@ -634,6 +634,67 @@ fn pool_a_requests_the_import_picker() {
     assert!(is_pool(&app), "the pool stays open for the picker");
 }
 
+// Inserting on the base video track is a timeline insert: an audio track
+// gets a gap of the same length, so its clip follows the picture.
+#[test]
+fn inserting_at_the_start_ripples_an_audio_track() {
+    let mut p = asset_project();
+    let (audio_asset, _) = p.add_asset(
+        "/media/tone.m4a".into(),
+        RawProbe {
+            streams: vec![RawStream {
+                index: 0,
+                codec_type: Some("audio".into()),
+                codec_name: Some("aac".into()),
+                sample_rate: Some("48000".into()),
+                channels: Some(2),
+                ..Default::default()
+            }],
+            format: RawFormat {
+                format_name: "m4a".into(),
+                duration: Some("10".into()),
+                ..Default::default()
+            },
+        },
+    );
+    let audio = p.timeline.add_track(TrackKind::Audio);
+    p.timeline.track_mut(audio).unwrap().segments = vec![TimelineSegment::Clip(nle_core::Clip {
+        id: 99,
+        asset: audio_asset,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(2),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+    let (spare, _) = p.add_asset("/media/spare.mp4".into(), p.asset(1).unwrap().probe.clone());
+    let mut app = App::new(p, temp_project_path("insert-ripple"));
+    app.loaded = true;
+    app.active_track = 0;
+    app.playhead = 0.0;
+    let sel = app
+        .project
+        .media
+        .iter()
+        .position(|a| a.id == spare)
+        .unwrap();
+    open_pool_mode(&mut app, sel);
+    let fake = FakeMpv::new();
+    insert_from_pool(&mut app, &fake);
+
+    let audio_track = app.project.timeline.track(audio).unwrap();
+    assert!(
+        matches!(audio_track.segments.first(), Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(10)),
+        "the audio track takes the inserted 10 s: {:?}",
+        audio_track.segments
+    );
+    assert_eq!(
+        audio_track.start_of(1),
+        Seconds::from_integer(10),
+        "the audio clip moved with the insert"
+    );
+    assert_eq!(app.project.depth(), 1, "one undo entry");
+}
+
 #[test]
 fn pool_source_marks_trim_the_insert() {
     let mut app = App::new(asset_project(), temp_project_path("pool-marks"));
