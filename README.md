@@ -170,9 +170,15 @@ the strip marks them with `·`). The metadata pane shows a cached half-block
 thumbnail of the selected video. `i`/`o` set the source in/out at the preview
 clock, `I`/`O` jump to them, `x` clears them, and `enter` inserts that source
 range at the timeline cursor (whole asset when unmarked). `d` removes the
-asset; `a` imports; `u` undoes. While the pool is open, the timeline row and
-monitor show the selected asset; reopening returns to the same asset and
-preview clock.
+asset; `u` undoes; `:` opens the command line.
+
+`a` opens the **import picker**: yazi starts in the selected asset's folder
+(or the project folder), `space` selects files/directories, and `enter`
+imports them. Yazi is optional — without it, `a` opens the pre-filled
+`:import` line, where Tab completes paths (spaces are quoted for you).
+Importing probes on a worker and adds the whole batch as one undo step.
+While the pool is open, the timeline row and monitor show the selected asset;
+reopening returns to the same asset and preview clock.
 
 ### Extend mode
 
@@ -198,7 +204,9 @@ The `:` line is the CLI grammar, flag for flag:
 :undo / :redo                 :purge
 :track add video|audio        :track mute [N] / :track rm N
 :media ls|rm                  :cache prune [--days N] [--dry-run]
-:import / :add                :show / :seek T
+:import PATH|DIR …            :add FILE
+# Tab completes paths; quote paths with spaces, or use the yazi picker (`a`)
+:show / :seek T
 :export -o FILE [--preset T]  :detect FILE
 #        [--parallel N] (chunked export; opt-in)
 :edl-import / :otio-import    :help / :q
@@ -262,6 +270,8 @@ Every command has `--help`. Times accept seconds (`12.5`) or timecodes
 ```sh
 nile init
 nile import intro.mp4 b-roll.mov
+nile import footage/                      # immediate media files, one undo step
+nile import "clip one.mp4" 'b roll.mov'   # quoted paths (the shell eats these)
 nile add intro.mp4 --in 2.5 --out 7       # auto-imports a new file
 nile add b-roll.mov --at 10 --track 2     # tracks are 1-based
 nile track add video                      # overlay track
@@ -413,8 +423,9 @@ Every timeline edit is one `Action` in `nle-core`, executed by one runner:
 | CLI | every action | `nile delete --at 3 --ripple` |
 
 Edits made in either front-end share undo history, the playhead, and the yank
-register. Commands that need processes (`:export`, `:detect`, `:edl-import`,
-`:otio-import`, `:add`) run in a worker while the monitor keeps playing.
+register. Commands that need processes (`:import`, `:export`, `:detect`,
+`:edl-import`, `:otio-import`, `:add`) run in a worker while the monitor keeps
+playing.
 
 ## Compatibility
 

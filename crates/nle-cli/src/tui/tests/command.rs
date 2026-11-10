@@ -1,6 +1,7 @@
 use super::super::jobs::start_job;
-use super::super::keys::command::{import_command, parse_defaults, run_command};
+use super::super::keys::command::{import_command, parse_defaults, run_command, split_paths};
 use super::super::keys::handle_key;
+use super::super::open_import_fallback;
 use super::*;
 use nle_core::time::Seconds;
 use nle_core::{Action, Target};
@@ -28,12 +29,64 @@ fn track_command_adds_mutes_and_removes() {
 }
 
 #[test]
-fn import_command_reports_usage_and_missing_files() {
+fn import_command_reports_usage_and_parses_quoted_paths() {
     let mut app = App::new(asset_project(), temp_project_path("import-cmd"));
     assert!(import_command(&mut app, "import").contains("usage"));
-    let msg = import_command(&mut app, "import /no/such/file.xyz");
-    assert!(msg.contains("not found"), "{msg}");
-    assert_eq!(app.project.media.len(), 1, "nothing was added");
+    assert!(
+        import_command(&mut app, "import \"unterminated").contains("unterminated"),
+        "a broken quote is refused before a job starts"
+    );
+    assert_eq!(
+        split_paths(r#"one.mp4 "two files.mov" 'three four.mp4'"#).unwrap(),
+        vec!["one.mp4", "two files.mov", "three four.mp4"]
+    );
+    assert_eq!(
+        split_paths(r"one\ two.mp4").unwrap(),
+        vec!["one two.mp4"],
+        "backslash escapes spaces too"
+    );
+}
+
+#[test]
+fn missing_import_paths_are_reported_by_expansion() {
+    let (files, errors) =
+        crate::cmd::import::expand_import_paths(&[PathBuf::from("/no/such/file.xyz")]);
+    assert!(files.is_empty());
+    assert!(errors[0].contains("not found"), "{errors:?}");
+}
+
+#[test]
+fn tab_completes_an_import_path() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("solo.mp4"), b"").unwrap();
+    let mut app = App::new(asset_project(), temp_project_path("complete"));
+    app.mode = Mode::Command(format!("import {}/so", dir.path().display()));
+    let fake = FakeMpv::new();
+    handle_key(
+        &mut app,
+        &fake,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    );
+    let Mode::Command(line) = &app.mode else {
+        panic!("still on the command line")
+    };
+    assert_eq!(line, &format!("import {}/solo.mp4 ", dir.path().display()));
+}
+
+#[test]
+fn a_directory_import_expands_to_its_immediate_media_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.mp4"), b"").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"").unwrap();
+    std::fs::write(dir.path().join("c.mov"), b"").unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    let (files, errors) = crate::cmd::import::expand_import_paths(&[dir.path().to_path_buf()]);
+    assert!(errors.is_empty(), "{errors:?}");
+    let names: Vec<_> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["a.mp4", "c.mov"]);
 }
 
 // The `:cmd` grammar is the CLI's, flag for flag, with --at defaulting
@@ -220,7 +273,7 @@ fn help_command_lists_commands() {
     assert!(app.message.contains(":track"), "{}", app.message);
 }
 
-// A command line opened from the pool (`i`) puts the timeline back on the
+// A command line opened from the pool (`:`) puts the timeline back on the
 // monitor when it closes, or the monitor keeps playing the pooled file
 // while the UI shows the timeline.
 #[test]
@@ -229,7 +282,7 @@ fn a_command_from_the_pool_restores_the_timeline() {
     let mut app = App::new(asset_project(), temp_project_path("pool-cmd"));
     app.loaded = true;
     handle_key(&mut app, &fake, key('m')); // open the pool
-    handle_key(&mut app, &fake, key('a')); // …and its `:import` line
+    handle_key(&mut app, &fake, key(':')); // …and the command line
     assert!(matches!(app.mode, Mode::Command(_)));
     handle_key(
         &mut app,
@@ -242,8 +295,24 @@ fn a_command_from_the_pool_restores_the_timeline() {
         "the timeline goes back on the monitor"
     );
 
-    // A `:` line opened from Normal does not force a reload.
+    // The no-yazi fallback opens the pre-filled import line and remembers
+    // that it came from the pool.
     let mut app = App::new(asset_project(), temp_project_path("pool-cmd2"));
+    app.loaded = true;
+    handle_key(&mut app, &fake, key('m'));
+    handle_key(&mut app, &fake, key('a'));
+    assert!(app.pending_import_picker);
+    open_import_fallback(&mut app);
+    assert_eq!(app.mode, Mode::Command("import ".to_string()));
+    handle_key(
+        &mut app,
+        &fake,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    );
+    assert!(app.reload_requested);
+
+    // A `:` line opened from Normal does not force a reload.
+    let mut app = App::new(asset_project(), temp_project_path("pool-cmd3"));
     app.loaded = true;
     handle_key(&mut app, &fake, key(':'));
     handle_key(

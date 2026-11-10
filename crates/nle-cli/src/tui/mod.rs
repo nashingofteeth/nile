@@ -34,12 +34,14 @@ use motion::{TimelineView, Viewport, fmt_timecode, gap_under, secs, snap_to_cut,
 // ------------------------------------------------------------ cut motions
 
 mod croc;
+mod import_picker;
 mod jobs;
 
 use croc::{CrocAct, CrocState};
 use jobs::{
-    Job, KeyframeJob, PreviewJob, PreviewProgress, ThumbnailJob, WaveJob, poll_job, poll_keyframes,
-    poll_preview, poll_thumbnails, poll_waveforms, start_preview,
+    ImportJob, Job, KeyframeJob, PreviewJob, PreviewProgress, ThumbnailJob, WaveJob, poll_import,
+    poll_job, poll_keyframes, poll_preview, poll_thumbnails, poll_waveforms, start_import,
+    start_preview,
 };
 
 // ------------------------------------------------------------ app state
@@ -273,6 +275,14 @@ pub struct App {
     last_pool_asset: Option<u32>,
     /// Source marks for pooled assets, keyed by asset id.
     pub(crate) pool_marks: BTreeMap<u32, PoolMarks>,
+    /// Where the import picker last opened (session-only). Falls back to the
+    /// selected asset's folder, then the project directory.
+    pub(crate) last_import_dir: Option<PathBuf>,
+    /// `a` asked for the import picker; the event loop owns the terminal and
+    /// performs the suspend/run/restore handoff.
+    pub(crate) pending_import_picker: bool,
+    /// The background media import, if one is probing.
+    import_job: Option<ImportJob>,
     /// The scale form's aspect lock is sticky across forms and edits and on by
     /// default; turning it off keeps later scale forms unlocked.
     fx_scale_lock: bool,
@@ -343,6 +353,9 @@ impl App {
             last_pool_pos: 0.0,
             last_pool_asset: None,
             pool_marks: BTreeMap::new(),
+            last_import_dir: None,
+            pending_import_picker: false,
+            import_job: None,
             fx_scale_lock: true,
             active_track: 0,
             timeline_view: TimelineView::default(),
@@ -528,6 +541,27 @@ impl App {
             return PoolMarks::default();
         };
         self.pool_marks.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Where the external import picker should start: the last folder this
+    /// session, else the selected asset's folder, else the project's.
+    pub(crate) fn import_start_dir(&self) -> PathBuf {
+        self.last_import_dir
+            .clone()
+            .filter(|p| p.is_dir())
+            .or_else(|| {
+                pool_sel(self)
+                    .and_then(|i| self.project.media.get(i))
+                    .and_then(|a| a.path.parent().map(|p| p.to_path_buf()))
+                    .filter(|p| p.is_dir())
+            })
+            .or_else(|| {
+                self.path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .filter(|p| p.is_dir())
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// Record the terminal width and derive the timeline bar's usable width.
@@ -897,6 +931,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         // A finished worker reports in (export, or an importer that just
         // rewrote the project).
         poll_job(&mut app, &player);
+        poll_import(&mut app, &player);
         poll_preview(&mut app, &player);
         poll_waveforms(&mut app);
         poll_keyframes(&mut app);
@@ -939,6 +974,43 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
 
         if app.quit {
             break;
+        }
+
+        // `a` in the pool asks for the import picker. The event loop owns
+        // the terminal, so the handoff happens here rather than in the key
+        // handler: restore cooked mode, let yazi take over the tty, then
+        // initialise ratatui again.
+        if std::mem::take(&mut app.pending_import_picker) {
+            if app.job.is_some() || app.import_job.is_some() {
+                app.set_message("a job is already running — wait for it");
+            } else if import_picker::yazi_available() {
+                let start = app.import_start_dir();
+                ratatui::restore();
+                let picked = import_picker::run_yazi(&start);
+                terminal = ratatui::init();
+                terminal.clear()?;
+                match picked {
+                    Ok(import_picker::Picked { paths, cwd }) => {
+                        if let Some(dir) = cwd.or_else(|| {
+                            paths
+                                .first()
+                                .and_then(|p| p.parent())
+                                .map(|p| p.to_path_buf())
+                        }) {
+                            app.last_import_dir = Some(dir);
+                        }
+                        if !paths.is_empty() {
+                            match start_import(&mut app, paths) {
+                                Ok(notice) => app.set_message(&notice),
+                                Err(e) => app.fail(&e),
+                            }
+                        }
+                    }
+                    Err(e) => app.fail(&format!("import picker: {e} — use :import")),
+                }
+            } else {
+                open_import_fallback(&mut app);
+            }
         }
 
         terminal.draw(|f| render(f, &app))?;
@@ -1061,6 +1133,17 @@ use keys::extend::clamp_extend;
 use keys::pool::{load_pool_preview_at, pool_last_frame, pool_strip_active};
 
 // ------------------------------------------------------------ keys
+
+/// Yazi is absent: open the `:import` line instead. The pool's selection has
+/// to be remembered first, because Command mode replaces Pool mode.
+fn open_import_fallback(app: &mut App) {
+    if is_pool(app) {
+        remember_pool(app);
+        app.command_from_pool = true;
+    }
+    app.mode = Mode::Command("import ".to_string());
+    app.set_message("yazi not found — Tab completes paths");
+}
 
 /// Snapshot the pool's selected asset and preview clock for the next open.
 fn remember_pool(app: &mut App) {

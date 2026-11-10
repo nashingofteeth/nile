@@ -129,10 +129,10 @@ pub(crate) fn render_message(f: &mut Frame, area: Rect, app: &App) {
 pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
     if let Mode::Command(_) = app.mode {
         return vec![
-            "type a command · enter run · esc cancel · flags: --at T --track N --ripple",
+            "type a command · enter run · esc cancel · tab completes paths",
             "edits   :split :trim-in|out :delete :yank :paste :gap :extend :speed",
             "history :undo :redo · tracks :track add video|audio · :track rm N",
-            "media   :import PATH… · :add FILE · :media ls · :media rm N",
+            "media   :import PATH|DIR · :add FILE · :media ls · :media rm N",
             "more    :show :seek :purge :detect :edl-import :otio-import :export",
         ];
     }
@@ -156,7 +156,7 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
             "j/k assets · { } ends · J/K keyframe · gg/0 start · G/$ end",
             "h/l ±1s · H/L ±5s · f/F frame · space play",
             "i/o source in/out · I/O jump · x clear · enter inserts the range",
-            "a import · d remove · u undo · t/T target · m/esc close",
+            "a import (yazi) · : cmd · d remove · u undo · t/T target · m/esc close",
         ];
     }
     if matches!(app.mode, Mode::Transition(_)) {

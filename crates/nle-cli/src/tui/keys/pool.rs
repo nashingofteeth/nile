@@ -69,11 +69,14 @@ pub(crate) fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('G') | KeyCode::Char('$') => pool_seek_end(app, player),
         KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
         KeyCode::Char('d') => remove_from_pool(app, player),
-        // Import a file into the pool: opens the command line pre-filled.
-        KeyCode::Char('a') => {
+        // Import media: the event loop opens yazi (or the `:import` fallback).
+        KeyCode::Char('a') => app.pending_import_picker = true,
+        // A command-line detour from the pool; remember the selection so
+        // reopening returns to it.
+        KeyCode::Char(':') => {
             remember_pool(app);
             app.command_from_pool = true;
-            app.mode = Mode::Command("import ".to_string());
+            app.mode = Mode::Command(String::new());
         }
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),

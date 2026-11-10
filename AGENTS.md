@@ -141,11 +141,11 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   it. An opposite-end extend commit is a delete, by id for a clip and by index
   for a gap.
 - **Undo/history.** Writes through `History` (edits, `add_asset` /
-  `remove_asset`, `edit_tracks`) record; only whole-project rebuilds (`init`,
-  `import-*`, `detect-edits`) re-baseline it via `save_and_reset_history`, or
-  the next undo refuses ("history entry does not apply"). Both stacks persist.
-  Track add/mute/rm are whole-list changes (`Change::Tracks`), verified by
-  exact equality.
+  `add_assets` / `remove_asset`, `edit_tracks`) record; only whole-project
+  rebuilds (`init`, `import-*`, `detect-edits`) re-baseline it via
+  `save_and_reset_history`, or the next undo refuses ("history entry does not
+  apply"). Both stacks persist. Track add/mute/rm are whole-list changes
+  (`Change::Tracks`), verified by exact equality.
 - **State lives with the project.** `nile.json` plus `.nile/<stem>/`
   (`history.json`, `clipboard.json`, `cache/`); `nile default FILE` sets a
   directory default (`.nile/config.json`), `--project` overrides. Legacy
@@ -215,6 +215,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - A key-capturing panel forwards valid actions; `m` toggles the pool. Opening
   it notices "media", closing "timeline". Track changes work while it is open:
   they retarget `enter` but keep the asset preview (`select_active_track`).
+- **Import is yazi-first but optional.** `a` in the pool runs
+  `yazi --chooser-file`; without yazi it opens `:import`. Never shell out.
+  `:import` quotes paths, expands `~`/directories, and probes on a worker.
 - **The timeline panel sizes to show every track** (`panel_heights`): one row
   per track + marker row + borders; keys/message drop first on a short
   terminal. Keep hint lines ≲76 columns.

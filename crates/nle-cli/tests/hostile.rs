@@ -516,6 +516,7 @@ fn odd_media() {
             ("import a missing file", &[&["import", "nope.mp4"]]),
             ("import an empty file", &[&["import", "empty.mp4"]]),
             ("import a text file", &[&["import", "notmedia.txt"]]),
+            ("import a directory", &[&["import", "."]]),
             (
                 "detect-edits a missing file",
                 &[&["detect-edits", "nope.mov", "--force"]],

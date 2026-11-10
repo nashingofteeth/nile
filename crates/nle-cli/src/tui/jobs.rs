@@ -1,7 +1,11 @@
 //! Background work: the ffmpeg render/import job and the off-thread preview
 //! build. Both are polled from the event loop; neither blocks a keystroke.
 
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
+
+use nle_core::media::RawProbe;
 
 use crate::keyframes::{self, Keyframes};
 use crate::mpv::Mpv;
@@ -10,6 +14,7 @@ use crate::thumbnails::{self, Thumbnail};
 use crate::waveform::{self, Waveform};
 
 use super::keys::extend::extend_state;
+use super::keys::pool::pool_select;
 use super::{App, is_pool, pool_sel, reload_project};
 /// A background job (an ffmpeg render, a heavy import): its label for
 /// notices, whether the project file changed underneath us (reload after),
@@ -47,6 +52,32 @@ pub(crate) struct PreviewJob {
     pub(crate) started: Instant,
 }
 
+/// A media import probing batch. Separate from `Job` because it reports
+/// per-file progress and carries the probed reports the main thread needs to
+/// add assets (the worker must not mutate the project).
+pub(crate) struct ImportJob {
+    pub(crate) rx: Receiver<ImportMsg>,
+}
+
+pub(crate) enum ImportMsg {
+    /// How many probeable files the path/directory expansion produced.
+    Total(usize),
+    Progress {
+        done: usize,
+        total: usize,
+        path: PathBuf,
+    },
+    Done {
+        outcomes: Vec<ImportOutcome>,
+        errors: Vec<String>,
+    },
+}
+
+pub(crate) struct ImportOutcome {
+    pub(crate) path: PathBuf,
+    pub(crate) probe: Result<RawProbe, String>,
+}
+
 pub(crate) enum PreviewMsg {
     /// `(finished renders, total renders, fraction of the one in flight)`.
     Progress {
@@ -71,7 +102,7 @@ pub(crate) fn start_job(
     label: &'static str,
     reload: bool,
 ) -> Option<std::sync::mpsc::Sender<Result<String, String>>> {
-    if app.job.is_some() {
+    if app.job.is_some() || app.import_job.is_some() {
         return None;
     }
     let (tx, rx) = std::sync::mpsc::channel();
@@ -109,6 +140,177 @@ pub(crate) fn poll_job(app: &mut App, player: &dyn Mpv) {
         }
         Err(TryRecvError::Empty) => {}
     }
+}
+
+/// Start probing an import batch off-thread. The worker expands directories
+/// and canonicalizes paths (both can hit a slow mount), then probes each file;
+/// the main thread applies the reports so the project is only mutated in one
+/// place.
+pub(crate) fn start_import(app: &mut App, paths: Vec<PathBuf>) -> Result<String, String> {
+    if app.job.is_some() || app.import_job.is_some() {
+        return Err("a job is already running — wait for it".to_string());
+    }
+    if paths.is_empty() {
+        return Err("usage: :import PATH|DIR …".to_string());
+    }
+    let (tx, rx) = mpsc::channel();
+    app.import_job = Some(ImportJob { rx });
+    std::thread::spawn(move || {
+        let (files, errors) = crate::cmd::import::expand_import_paths(&paths);
+        let total = files.len();
+        if tx.send(ImportMsg::Total(total)).is_err() {
+            return;
+        }
+        let mut outcomes = Vec::with_capacity(total);
+        for (i, file) in files.into_iter().enumerate() {
+            let probe = nle_ffmpeg::probe(&file).map_err(|e| e.to_string());
+            outcomes.push(ImportOutcome {
+                path: file.clone(),
+                probe,
+            });
+            if tx
+                .send(ImportMsg::Progress {
+                    done: i + 1,
+                    total,
+                    path: file,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = tx.send(ImportMsg::Done { outcomes, errors });
+    });
+    Ok("importing…".to_string())
+}
+
+/// Drain the import worker. Progress updates the message line; a finished
+/// batch is added to the pool as one undo step, saved, and selected.
+pub(crate) fn poll_import(app: &mut App, player: &dyn Mpv) {
+    loop {
+        let Some(msg) = app.import_job.as_ref().map(|j| j.rx.try_recv()) else {
+            return;
+        };
+        match msg {
+            Ok(ImportMsg::Total(total)) => {
+                if total > 0 {
+                    app.set_message(&format!("importing 0/{total}…"));
+                }
+            }
+            Ok(ImportMsg::Progress { done, total, path }) => {
+                app.set_message(&format!("importing {done}/{total} · {}", short_name(&path)));
+            }
+            Ok(ImportMsg::Done { outcomes, errors }) => {
+                app.import_job = None;
+                finish_import(app, player, outcomes, errors);
+                return;
+            }
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                app.import_job = None;
+                app.fail("import failed: worker died");
+                return;
+            }
+        }
+    }
+}
+
+fn short_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let mut short: String = name.chars().take(48).collect();
+    if name.chars().count() > 48 {
+        short.push('…');
+    }
+    short
+}
+
+fn finish_import(
+    app: &mut App,
+    player: &dyn Mpv,
+    outcomes: Vec<ImportOutcome>,
+    mut errors: Vec<String>,
+) {
+    let playhead = nle_core::frame_of(app.project.fps.as_ref(), app.playhead);
+    let mut fresh = Vec::new();
+    let mut existing = 0usize;
+    for outcome in outcomes {
+        match outcome.probe {
+            Ok(report) => {
+                if app.project.asset_by_path(&outcome.path).is_some() {
+                    existing += 1;
+                } else {
+                    fresh.push((outcome.path, report));
+                }
+            }
+            Err(e) => errors.push(format!("{}: {e}", outcome.path.display())),
+        }
+    }
+    if fresh.is_empty() {
+        let mut msg = if existing > 0 {
+            format!("no new assets — {existing} already pooled")
+        } else {
+            "no media files imported".to_string()
+        };
+        append_errors(&mut msg, &errors);
+        if errors.is_empty() {
+            app.set_message(&msg);
+        } else {
+            app.fail(&msg);
+        }
+        return;
+    }
+
+    let ids = app.project.add_assets(fresh, playhead);
+    if ids.is_empty() {
+        let mut msg = "no new assets imported".to_string();
+        append_errors(&mut msg, &errors);
+        app.set_message(&msg);
+        return;
+    }
+    let mut msg = format!("imported {} new", ids.len());
+    if existing > 0 {
+        msg.push_str(&format!(", {existing} already pooled"));
+    }
+    if let Err(e) = app.project.save(&app.path) {
+        let mut msg = format!("imported {} — save failed: {e}", ids.len());
+        append_errors(&mut msg, &errors);
+        app.fail(&msg);
+        return;
+    }
+    if let Err(e) = app
+        .project
+        .save_history(&nle_core::History::sidecar_path(&app.path))
+    {
+        let mut msg = format!("imported {} — history save failed: {e}", ids.len());
+        append_errors(&mut msg, &errors);
+        app.fail(&msg);
+        return;
+    }
+    app.note_seen();
+    start_waveforms(app);
+
+    if let Some(last) = ids.last().copied()
+        && let Some(idx) = app.project.media.iter().position(|a| a.id == last)
+    {
+        app.last_pool_sel = idx;
+        app.last_pool_asset = Some(last);
+        if is_pool(app) {
+            pool_select(app, player, idx);
+        }
+    }
+    append_errors(&mut msg, &errors);
+    app.set_message(&msg);
+}
+
+fn append_errors(msg: &mut String, errors: &[String]) {
+    if errors.is_empty() {
+        return;
+    }
+    msg.push_str(" — failed: ");
+    msg.push_str(&errors.join("; "));
 }
 
 /// Load any audio-master peaks the timeline needs, off-thread. Cached files

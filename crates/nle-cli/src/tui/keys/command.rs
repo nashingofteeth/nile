@@ -13,7 +13,7 @@ use nle_core::{History, frame_of, track_label};
 use crate::mpv::Mpv;
 
 use super::super::actions::{clip_under, run_action};
-use super::super::jobs::{start_job, start_waveforms};
+use super::super::jobs::{start_import, start_job};
 use super::super::keys::pool::leave_pool_command;
 use super::super::motion::fmt_timecode;
 use super::super::{App, Mode, persist_playhead, secs};
@@ -22,53 +22,72 @@ use super::super::{App, Mode, persist_playhead, secs};
 /// playhead here).
 pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :cache · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
-/// `:import PATH…` — probe files and add them to the media pool. An
-/// out-of-band pool write, so it re-baselines the undo sidecar (a stale
-/// `Change::Assets` entry would otherwise refuse to apply).
+/// Split a `:import` argument string into paths. Quoted paths keep their
+/// spaces; a backslash escapes the next character, so `a\ b.mp4` works too.
+pub(crate) fn split_paths(input: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else if q == '"' && ch == '\\' {
+                    escaped = true;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => escaped = true,
+                c if c.is_whitespace() => {
+                    if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                }
+                c => cur.push(c),
+            },
+        }
+    }
+    if escaped {
+        return Err("trailing backslash".to_string());
+    }
+    if let Some(q) = quote {
+        return Err(format!("unterminated {q} quote"));
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// `:import PATH|DIR …` — expand paths/directories, then probe them on a
+/// worker. The pool write is one undo step (`u` removes the whole batch).
 pub(crate) fn import_command(app: &mut App, cmd: &str) -> String {
     let rest = cmd.strip_prefix("import").unwrap_or("").trim();
     if rest.is_empty() {
-        return "usage: :import PATH [PATH…]".to_string();
+        return "usage: :import PATH|DIR … (Tab completes paths)".to_string();
     }
-    let playhead = frame_of(app.project.fps.as_ref(), app.playhead);
-    let mut new = 0usize;
-    let mut existing = 0usize;
-    let mut failed: Vec<String> = Vec::new();
-    for arg in rest.split_whitespace() {
-        match PathBuf::from(arg).canonicalize() {
-            Ok(path) => {
-                if app.project.asset_by_path(&path).is_some() {
-                    existing += 1;
-                    continue;
-                }
-                match nle_ffmpeg::probe(&path) {
-                    Ok(report) => {
-                        app.project.add_asset(path, report, playhead);
-                        new += 1;
-                    }
-                    Err(e) => failed.push(format!("{arg}: {e}")),
-                }
-            }
-            Err(_) => failed.push(format!("{arg}: not found")),
-        }
+    let args = match split_paths(rest) {
+        Ok(args) => args,
+        Err(e) => return format!("import: {e}"),
+    };
+    if args.is_empty() {
+        return "usage: :import PATH|DIR … (Tab completes paths)".to_string();
     }
-    if new > 0 {
-        // Recorded pool additions (`u` removes them again). The timeline is
-        // untouched, so no preview rebuild is needed.
-        if let Err(e) = app.project.save(&app.path) {
-            return format!("imported {new} — save failed: {e}");
-        }
-        if let Err(e) = app.project.save_history(&History::sidecar_path(&app.path)) {
-            return format!("imported {new} — history save failed: {e}");
-        }
-        app.note_seen();
-        start_waveforms(app);
+    let paths = args.into_iter().map(PathBuf::from).collect();
+    match start_import(app, paths) {
+        Ok(notice) => notice,
+        Err(e) => e,
     }
-    let mut msg = format!("imported {new} new, {existing} already pooled");
-    if !failed.is_empty() {
-        msg.push_str(&format!(" — failed: {}", failed.join("; ")));
-    }
-    msg
 }
 
 /// The front-end's own (non-edit) commands: queries, imports, and the two
@@ -485,6 +504,16 @@ pub(crate) fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: Key
             let mut b = buf;
             b.pop();
             app.mode = Mode::Command(b)
+        }
+        KeyCode::Tab => {
+            if let Some(done) = super::complete::complete_path(&buf) {
+                app.mode = Mode::Command(done.buffer);
+                if let Some(note) = done.note {
+                    app.set_message(&note);
+                }
+            } else {
+                app.mode = Mode::Command(buf);
+            }
         }
         KeyCode::Char(c) => app.mode = Mode::Command(buf + &c.to_string()),
         _ => app.mode = Mode::Command(buf),

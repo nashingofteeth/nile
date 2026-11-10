@@ -17,6 +17,7 @@ mod command;
 mod extend;
 mod extend_sides;
 mod fx;
+mod import;
 mod keys;
 mod motion;
 mod playhead;

@@ -594,8 +594,8 @@ fn pool_reopen_returns_to_the_last_row() {
     assert_eq!(pool_pos(&app), 3.0, "and at the last preview clock");
 }
 
-// The `i` command closes the panel to use the command line; the selected
-// asset and clock survive that detour too.
+// The `:` command detour closes the panel to use the command line; the
+// selected asset and clock survive that detour too.
 #[test]
 fn pool_command_preserves_the_pool_state() {
     let mut p = asset_project();
@@ -607,7 +607,7 @@ fn pool_command_preserves_the_pool_state() {
     handle_key(&mut app, &fake, key('m'));
     handle_key(&mut app, &fake, key('j'));
     set_pool_pos(&mut app, 4.0);
-    handle_key(&mut app, &fake, key('a'));
+    handle_key(&mut app, &fake, key(':'));
     assert!(matches!(app.mode, Mode::Command(_)));
     handle_key(
         &mut app,
@@ -621,15 +621,17 @@ fn pool_command_preserves_the_pool_state() {
     assert_eq!(pool_pos(&app), 4.0, "same preview clock");
 }
 
-// `a` in the pool opens the import path prompt (command line pre-filled).
+// `a` in the pool asks the event loop for the import picker; the mode stays
+// Pool so the loop can suspend and restore the terminal around yazi.
 #[test]
-fn pool_a_opens_the_import_prompt() {
+fn pool_a_requests_the_import_picker() {
     let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true;
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('m')); // open the pool
     handle_key(&mut app, &fake, key('a'));
-    assert_eq!(app.mode, Mode::Command("import ".to_string()));
+    assert!(app.pending_import_picker);
+    assert!(is_pool(&app), "the pool stays open for the picker");
 }
 
 #[test]
