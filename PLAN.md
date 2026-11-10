@@ -110,6 +110,9 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 - **Ops:** every track-resolving edit op is `*_on(project, track, …)`; the
   unsuffixed name wraps the first video track. A stale index returns
   `TrackNotFound` (never panics).
+- **Sync ripple:** a ripple insert on the first video track shifts every
+  other track by the inserted span; inserts on overlay/audio tracks stay
+  local. Multi-track edits record as one `Change::Tracks` entry.
 - **Export:** one video track with no audio track keeps the classic concat
   path **byte-for-byte**; otherwise each track is padded to the timeline
   length and video layers composite bottom→top with `overlay` (upper gaps

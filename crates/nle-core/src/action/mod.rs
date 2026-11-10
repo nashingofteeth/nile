@@ -405,7 +405,21 @@ pub fn run_action(
                     .resolve(project)?,
             };
             let batch = if *ripple {
-                edit::paste_ripple_on(project, *track, &seg, *at)?
+                let mut batch = edit::paste_ripple_on(project, *track, &seg, *at)?;
+                // The base video track is the master sequence: inserting
+                // there shifts the other tracks by the inserted span, so a
+                // separate audio/overlay track does not fall out of sync.
+                // Inserts on an overlay/audio track stay local (layering a
+                // clip at 0 must not push the base right).
+                if is_base_video_track(project, *track) && !matches!(seg, Segment::Transition(_)) {
+                    batch.ops.extend(edit::ripple_other_tracks(
+                        project,
+                        *track,
+                        *at,
+                        seg.duration(),
+                    )?);
+                }
+                batch
             } else {
                 edit::paste_on(project, *track, &seg, *at)?
             };
@@ -442,7 +456,15 @@ pub fn run_action(
                 return Err(EditError::RegisterEmpty);
             }
             let segments = register.resolve_range(project)?;
-            let batch = edit::insert_segments_on(project, *track, *at, &segments)?;
+            let mut batch = edit::insert_segments_on(project, *track, *at, &segments)?;
+            if is_base_video_track(project, *track) {
+                let dur = segments
+                    .iter()
+                    .fold(Seconds::from_integer(0), |acc, s| acc + s.duration());
+                batch
+                    .ops
+                    .extend(edit::ripple_other_tracks(project, *track, *at, dur)?);
+            }
             let mut out = apply(project, history, batch, from)?;
             out.playhead = Some(frame_of(project.fps.as_ref(), *at));
             Ok(out)
@@ -533,6 +555,18 @@ pub fn run_action(
             })
         }
     }
+}
+
+/// Whether `track` is the first video track — the timeline's master
+/// sequence. Only inserts there ripple the other tracks; overlays and audio
+/// beds stay where they were put.
+fn is_base_video_track(project: &Project, track: usize) -> bool {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .position(|t| t.kind == TrackKind::Video)
+        == Some(track)
 }
 
 /// Apply a batch as one undo step (the playhead `from` is recorded so

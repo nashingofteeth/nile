@@ -90,6 +90,11 @@ and the monitor follow the **active track**. The keymap is vim-flavored rather
 than a vim clone: motions and pending operators use vim vocabulary, while
 edits keep NLE mnemonics (`i`/`o` are trim in/out; `s`/`S` split).
 
+A ripple insert (`P`, `:add`, or `enter` from the pool) on the **first video
+track** is a timeline insert: every other track gets the same gap, so separate
+audio/overlay tracks stay in sync. Inserts on an overlay or audio track stay
+local, so layering a clip at 0 does not move the base.
+
 ### Transport and motion
 
 | Key | Action |

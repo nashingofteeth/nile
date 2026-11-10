@@ -20,8 +20,8 @@ use crate::timeline::{
 
 use super::extend::extend_gap_ending_at;
 use super::util::{
-    at_least_a_frame, clip_at, merge_pair, replace_with_many, segment_note, snap, source_span,
-    split_sides, stamp, track_at, video_track_index,
+    at_least_a_frame, clip_at, merge_pair, replace_with_many, secs_f64, segment_note, snap,
+    source_span, split_sides, stamp, track_at, video_track_index,
 };
 use super::{Batch, EditError, EditOp};
 
@@ -712,6 +712,41 @@ fn restore_right(segment: &mut Segment, transition: &Transition) -> bool {
     }
     right.asset_in = *src_in;
     true
+}
+
+/// Insert a gap of `dur` on every track except `except`, so a ripple insert
+/// keeps the timeline in sync. A track with nothing at or after `at` has
+/// nothing to shift; a blend at `at` takes the gap at its start rather than
+/// being split.
+pub fn ripple_other_tracks(
+    project: &Project,
+    except: usize,
+    at: f64,
+    dur: Seconds,
+) -> Result<Vec<EditOp>, EditError> {
+    if dur <= Seconds::from_integer(0) {
+        return Ok(Vec::new());
+    }
+    let at = snap(project, at)?;
+    let gap = Segment::Gap(Gap { duration: dur });
+    let mut ops = Vec::new();
+    for (ti, tr) in project.timeline.tracks.iter().enumerate() {
+        if ti == except || tr.segments.is_empty() || tr.end() <= at {
+            continue;
+        }
+        let insert_at = match tr.index_at(at) {
+            Some(si) if matches!(tr.segments[si], Segment::Transition(_)) => tr.start_of(si),
+            _ => at,
+        };
+        let batch = insert_segments_on(
+            project,
+            ti,
+            secs_f64(&insert_at),
+            std::slice::from_ref(&gap),
+        )?;
+        ops.extend(batch.ops);
+    }
+    Ok(ops)
 }
 
 /// Insert whole segments at any playhead, giving copied clips/transitions

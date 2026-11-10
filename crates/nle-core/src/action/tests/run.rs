@@ -248,6 +248,147 @@ fn yank_fills_the_register_and_paste_consumes_it() {
     assert_eq!(p.timeline.video_track().unwrap().segments.len(), 6);
 }
 
+// A ripple insert is an insert edit for the whole timeline: a separate
+// audio/overlay track gets the same gap, so it stays in sync. One undo
+// restores every shifted track.
+#[test]
+fn a_ripple_insert_shifts_every_track() {
+    let mut p = fixture();
+    let ai = p.timeline.add_track(TrackKind::Audio);
+    let a = p.media[0].id;
+    p.timeline.track_mut(ai).unwrap().segments = vec![Segment::Clip(Clip {
+        id: 99,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(2),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+    let pasted = Segment::Clip(Clip {
+        id: 0,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(1),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Paste {
+            track: 0,
+            at: 0.0,
+            ripple: true,
+            segment: Some(pasted),
+        },
+        0.0,
+    )
+    .unwrap();
+
+    let audio = &p.timeline.track(ai).unwrap().segments;
+    assert!(
+        matches!(audio.first(), Some(Segment::Gap(g)) if g.duration == Seconds::from_integer(1)),
+        "the audio track takes a 1 s gap: {audio:?}"
+    );
+    assert_eq!(
+        p.timeline.track(ai).unwrap().start_of(1),
+        Seconds::from_integer(1),
+        "the audio clip moved with the insert"
+    );
+    assert_eq!(h.depth(), 1, "the multi-track edit is one undo entry");
+
+    run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
+    assert!(
+        matches!(p.timeline.track(ai).unwrap().segments.first(), Some(Segment::Clip(c)) if c.id == 99),
+        "undo restores the audio track"
+    );
+    assert_eq!(h.depth(), 0);
+}
+
+// An overlay track is not the master sequence: a ripple insert there must
+// not push the base video track.
+#[test]
+fn a_ripple_insert_on_an_overlay_stays_local() {
+    let mut p = fixture();
+    let vi = p.timeline.add_track(TrackKind::Video);
+    let a = p.media[0].id;
+    let base_before = p.timeline.track(0).unwrap().segments.clone();
+    let pasted = Segment::Clip(Clip {
+        id: 0,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(1),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Paste {
+            track: vi,
+            at: 0.0,
+            ripple: true,
+            segment: Some(pasted),
+        },
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(
+        p.timeline.track(0).unwrap().segments,
+        base_before,
+        "the base track stays put"
+    );
+    assert_eq!(p.timeline.track(vi).unwrap().segments.len(), 1);
+}
+
+// An overwrite paste is deliberately track-local: it does not shift the
+// timeline, so separate tracks must keep their positions.
+#[test]
+fn an_overwrite_paste_leaves_other_tracks_alone() {
+    let mut p = fixture();
+    let ai = p.timeline.add_track(TrackKind::Audio);
+    let a = p.media[0].id;
+    let audio_before = vec![Segment::Clip(Clip {
+        id: 99,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(2),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+    p.timeline.track_mut(ai).unwrap().segments = audio_before.clone();
+    let pasted = Segment::Clip(Clip {
+        id: 0,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(1),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Paste {
+            track: 0,
+            at: 0.0,
+            ripple: false,
+            segment: Some(pasted),
+        },
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(p.timeline.track(ai).unwrap().segments, audio_before);
+}
+
 #[test]
 fn track_edits_are_undoable() {
     let mut p = fixture();
