@@ -167,9 +167,9 @@ of both neighbours, so trimming/extending nearby moves the blend’s edge.
 `h`/`l`, `f`/`F`, `gg`/`0`, `G`/`$` seek; `J`/`K` jump to the next/previous
 video keyframe (probed on a worker and cached under `.nile/<stem>/cache/`;
 the strip marks them with `·`). The metadata pane shows a cached half-block
-thumbnail of the selected video. `[`/`]` set the source in/out at the preview
+thumbnail of the selected video. `i`/`o` set the source in/out at the preview
 clock, `x` clears them, and `enter` inserts that source range at the timeline
-cursor (whole asset when unmarked). `d` removes the asset; `i` imports; `u`
+cursor (whole asset when unmarked). `d` removes the asset; `a` imports; `u`
 undoes. While the pool is open, the timeline row and monitor show the selected
 asset; reopening returns to the same asset and preview clock.
 
@@ -377,7 +377,7 @@ video/
     └── nile/
         ├── history.json
         ├── clipboard.json
-        ├── view.json      # timeline zoom, scroll, and active track
+        ├── view.json      # zoom, scroll, active track, pool source marks
         └── cache/
             ├── proxy/         # rendered video proxies
             ├── audio/         # continuous preview audio masters
@@ -391,8 +391,8 @@ video/
 Multiple projects in one directory get separate `.nile/<stem>/` folders.
 Legacy adjacent `*.history.json` / `*.clipboard.json` files are copied into
 the state directory on first load; old `nle.json` projects still open with
-`--project nle.json`. The timeline viewport and active track are saved in
-`view.json` and restored on the next session. The old global
+`--project nle.json`. The timeline viewport, active track, and pool source
+marks are saved in `view.json` and restored on the next session. The old global
 `~/.cache/nile` is no longer used, and `nile cache prune` only touches the current project’s cache — proxy
 renders, preview audio masters, waveform peaks, keyframe lists, asset
 thumbnails, and completed export chunks.

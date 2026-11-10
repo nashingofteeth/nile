@@ -5,11 +5,12 @@
 //! command line. Playback keys are sent to mpv; state flows back through
 //! the reader thread and is rendered on the next tick (~20fps redraw).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use serde::{Deserialize, Serialize};
 
 use nle_core::action;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
@@ -92,7 +93,7 @@ pub struct PoolState {
 
 /// Source in/out marks for one pooled asset. Session state; marks are keyed
 /// by asset id so switching rows never applies one file's range to another.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PoolMarks {
     pub in_at: Option<f64>,
     pub out_at: Option<f64>,
@@ -271,7 +272,7 @@ pub struct App {
     last_pool_pos: f64,
     last_pool_asset: Option<u32>,
     /// Source marks for pooled assets, keyed by asset id.
-    pub(crate) pool_marks: HashMap<u32, PoolMarks>,
+    pub(crate) pool_marks: BTreeMap<u32, PoolMarks>,
     /// The scale form's aspect lock is sticky across forms and edits and on by
     /// default; turning it off keeps later scale forms unlocked.
     fx_scale_lock: bool,
@@ -341,7 +342,7 @@ impl App {
             last_pool_sel: 0,
             last_pool_pos: 0.0,
             last_pool_asset: None,
-            pool_marks: HashMap::new(),
+            pool_marks: BTreeMap::new(),
             fx_scale_lock: true,
             active_track: 0,
             timeline_view: TimelineView::default(),
@@ -605,6 +606,7 @@ impl App {
         let state = view_state::SessionState {
             view: self.timeline_view,
             active_track: self.active_track,
+            pool_marks: self.pool_marks.clone(),
         };
         if let Err(e) = view_state::save(&self.path, state) {
             crate::log::line(&format!("session state save failed: {e}"));
@@ -741,6 +743,11 @@ fn apply_session_state(app: &mut App, state: view_state::SessionState) {
     app.active_track = state
         .active_track
         .min(app.project.timeline.tracks.len().saturating_sub(1));
+    app.pool_marks = state
+        .pool_marks
+        .into_iter()
+        .filter(|(id, _)| app.project.asset(*id).is_some())
+        .collect();
 }
 
 /// Render the TUI once at `size` and return a text dump: the project path and
@@ -1039,7 +1046,8 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     app.keyframe_job = None;
     app.thumbnails.clear();
     app.thumb_job = None;
-    app.pool_marks.clear();
+    let ids: std::collections::BTreeSet<u32> = app.project.media.iter().map(|a| a.id).collect();
+    app.pool_marks.retain(|id, _| ids.contains(id));
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())
