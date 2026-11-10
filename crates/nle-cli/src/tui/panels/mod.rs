@@ -154,7 +154,8 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
         return vec![
             "media pool — the monitor previews the selected file",
             "j/k assets · { } ends · J/K keyframe · gg/0 start · G/$ end",
-            "h/l ±1s · H/L ±5s · f/F frame · space play · enter insert",
+            "h/l ±1s · H/L ±5s · f/F frame · space play",
+            "[ / ] source in/out · x clear · enter inserts the marked range",
             "i import · d remove · u undo · t/T target · m/esc close",
         ];
     }

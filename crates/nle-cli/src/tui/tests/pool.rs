@@ -631,3 +631,74 @@ fn pool_i_opens_the_import_prompt() {
     handle_key(&mut app, &fake, key('i'));
     assert_eq!(app.mode, Mode::Command("import ".to_string()));
 }
+
+#[test]
+fn pool_source_marks_trim_the_insert() {
+    let mut app = App::new(asset_project(), temp_project_path("pool-marks"));
+    app.loaded = true;
+    app.playhead = 0.0;
+    open_pool_mode(&mut app, 0);
+    let fake = FakeMpv::new();
+
+    set_pool_pos(&mut app, 2.0);
+    handle_key(&mut app, &fake, key('['));
+    set_pool_pos(&mut app, 4.0);
+    handle_key(&mut app, &fake, key(']'));
+    assert_eq!(
+        app.source_marks(),
+        PoolMarks {
+            in_at: Some(2.0),
+            out_at: Some(4.0)
+        }
+    );
+
+    insert_from_pool(&mut app, &fake);
+    let segs = &app.project.timeline.video_track().unwrap().segments;
+    assert!(matches!(
+        &segs[0],
+        TimelineSegment::Clip(c)
+            if c.asset == 1
+                && c.asset_in == Seconds::from_integer(2)
+                && c.asset_out == Seconds::from_integer(4)
+    ));
+    assert_eq!(segs[0].duration(), Seconds::from_integer(2));
+}
+
+#[test]
+fn pool_source_marks_reject_an_out_before_in_and_clear() {
+    let mut app = App::new(asset_project(), temp_project_path("pool-marks-reject"));
+    app.loaded = true;
+    open_pool_mode(&mut app, 0);
+    let fake = FakeMpv::new();
+
+    set_pool_pos(&mut app, 4.0);
+    handle_key(&mut app, &fake, key('['));
+    set_pool_pos(&mut app, 2.0);
+    handle_key(&mut app, &fake, key(']'));
+    assert!(app.message.contains("after the in"), "{}", app.message);
+    assert_eq!(app.source_marks().out_at, None);
+
+    handle_key(&mut app, &fake, key('x'));
+    assert_eq!(app.source_marks(), PoolMarks::default());
+}
+
+#[test]
+fn pool_source_marks_are_per_asset() {
+    let mut p = asset_project();
+    let (other, _) = p.add_asset("/media/other.mp4".into(), p.asset(1).unwrap().probe.clone());
+    let mut app = App::new(p, temp_project_path("pool-marks-assets"));
+    app.loaded = true;
+    open_pool_mode(&mut app, 0);
+    let fake = FakeMpv::new();
+    set_pool_pos(&mut app, 1.0);
+    handle_key(&mut app, &fake, key('['));
+    assert_eq!(app.source_marks().in_at, Some(1.0));
+
+    open_pool_mode(&mut app, 1);
+    assert_eq!(app.source_marks(), PoolMarks::default());
+    set_pool_pos(&mut app, 2.0);
+    handle_key(&mut app, &fake, key(']'));
+    assert_eq!(app.source_marks().out_at, Some(2.0));
+    assert_ne!(app.source_marks().in_at, Some(1.0));
+    assert!(app.project.asset(other).is_some());
+}

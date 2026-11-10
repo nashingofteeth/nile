@@ -401,6 +401,13 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - Frames live in `.nile/<stem>/cache/thumbs/<hash>.rgb`, keyed by source path
   + mtime, and are pruned with the other caches.
 
+## Pool source marks (shipped)
+
+- `[`/`]` set source in/out at the preview clock; `x` clears them. Marks are
+  frame-snapped, keyed by asset id, and session-only.
+- `enter` inserts the marked source range; with no marks it inserts the whole
+  asset. The strip shows the marks and the metadata pane shows the range.
+
 ## Open / deferred
 
 - Timeline filmstrips and M7 GUI.

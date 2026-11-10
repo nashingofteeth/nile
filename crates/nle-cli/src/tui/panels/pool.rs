@@ -14,7 +14,7 @@ use nle_core::timeline::{Clip, Segment as TimelineSegment, Track, TrackKind};
 use nle_core::track_label;
 
 use super::super::motion::Viewport;
-use super::super::{App, PoolState, pool_sel, secs};
+use super::super::{App, PoolMarks, PoolState, pool_sel, secs};
 use super::timeline::{draw_track_row, track_parts};
 /// The pool takes over the info pane: asset list on the left, probe
 /// metadata for the selection on the right.
@@ -108,6 +108,15 @@ pub(crate) fn render_pool(f: &mut Frame, area: Rect, app: &App) {
                     }
                     None => {}
                 }
+            }
+            let marks = app.source_marks();
+            if marks.in_at.is_some() || marks.out_at.is_some() {
+                let in_at = marks.in_at.unwrap_or(0.0);
+                let out_at = marks
+                    .out_at
+                    .or_else(|| a.duration().map(|d| secs(&d)))
+                    .unwrap_or(in_at);
+                lines.push(format!("marks  {in_at:.3} – {out_at:.3}s"));
             }
             lines
         }
@@ -306,7 +315,7 @@ pub(crate) fn render_pool_strip(f: &mut Frame, area: Rect, app: &App, st: &PoolS
         .get(&asset.id)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    draw_pool_marker_row(f, marker, total, st.pos, app.eof, keys);
+    draw_pool_marker_row(f, marker, total, st.pos, app.eof, keys, app.source_marks());
 }
 
 /// A marker row for the pool strip: keyframe ticks, then red `▏` / `▕` at
@@ -318,6 +327,7 @@ pub(crate) fn draw_pool_marker_row(
     pos: f64,
     eof: bool,
     keyframes: &[f64],
+    marks: PoolMarks,
 ) {
     if bar.width == 0 {
         return;
@@ -328,6 +338,13 @@ pub(crate) fn draw_pool_marker_row(
             let x = marker_col(key, total, bar.width) as usize;
             cells[x] = ('·', Style::default().fg(Color::DarkGray));
         }
+    }
+    let mark_style = Style::default().fg(Color::Yellow);
+    if let Some(at) = marks.in_at.filter(|at| *at >= 0.0 && *at <= total) {
+        cells[marker_col(at, total, bar.width) as usize] = ('[', mark_style);
+    }
+    if let Some(at) = marks.out_at.filter(|at| *at >= 0.0 && *at <= total) {
+        cells[marker_col(at, total, bar.width) as usize] = (']', mark_style);
     }
     let ph = marker_col(pos, total, bar.width) as usize;
     let ch = if eof { '▕' } else { '▏' };
