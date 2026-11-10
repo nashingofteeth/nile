@@ -403,8 +403,9 @@ trimming of a transition's own span (retime it with `x`/`X`,
 
 ## Pool source marks (shipped)
 
-- `i`/`o` set source in/out at the preview clock; `x` clears them. Marks are
-  frame-snapped, keyed by asset id, and saved in `view.json` across restarts.
+- `i`/`o` set source in/out at the preview clock; `I`/`O` seek to them and
+  `x` clears them. Marks are frame-snapped, keyed by asset id, and saved in
+  `view.json` across restarts.
 - `enter` inserts the marked source range; with no marks it inserts the whole
   asset. The strip shows the marks and the metadata pane shows the range.
 
