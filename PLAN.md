@@ -409,6 +409,14 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - `enter` inserts the marked source range; with no marks it inserts the whole
   asset. The strip shows the marks and the metadata pane shows the range.
 
+## Import picker + async import (shipped)
+
+- `a` in the pool opens yazi as a multi-file chooser
+  (`--chooser-file`/`--cwd-file`); without yazi it falls back to `:import`.
+- `:import PATH|DIR …` parses quoted paths, expands `~`, expands a directory
+  to its immediate media files, and probes on a worker with progress.
+- A batch import is one undo step; the last new asset is selected in the pool.
+
 ## Open / deferred
 
 - Timeline filmstrips and M7 GUI.

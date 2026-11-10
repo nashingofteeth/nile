@@ -1,10 +1,10 @@
 //! Undo/redo history: what changed, how to invert it, and the sidecar that
 //! carries both stacks across processes.
 //!
-//! `History::apply` (timeline) and `remove_asset` (pool) are the only ways
-//! in: each snapshots the affected state before mutating and records the
-//! before/after pair as a `Change`. Undo and redo verify the live state
-//! against the recorded side and substitute the other.
+//! `History::apply` (timeline) and the asset add/remove methods (pool) are
+//! the only ways in: each snapshots the affected state before mutating and
+//! records the before/after pair as a `Change`. Undo and redo verify the
+//! live state against the recorded side and substitute the other.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -23,11 +23,12 @@ use super::clamp::clamp_project;
 use super::util::video_track_index;
 use super::{Batch, EditError, EditOp, HISTORY_VERSION, MAX_HISTORY};
 
-/// Undo/redo stack of project changes. `apply` (timeline) and `remove_asset`
-/// (pool) are the only ways in: each snapshots the affected state before
-/// mutating and stores the before/after pair as a `Change`. Undo and redo
-/// verify the live state against the recorded side (segment id/frame for
-/// tracks, exact pool equality for assets) and substitute the other.
+/// Undo/redo stack of project changes. `apply` (timeline) and the asset
+/// add/remove methods (pool) are the only ways in: each snapshots the
+/// affected state before mutating and stores the before/after pair as a
+/// `Change`. Undo and redo verify the live state against the recorded side
+/// (segment id/frame for tracks, exact pool equality for assets) and
+/// substitute the other.
 #[derive(Debug, Default, Clone)]
 pub struct History {
     done: Vec<Change>,
@@ -152,6 +153,39 @@ impl History {
             playhead,
         }));
         (id, desc)
+    }
+
+    /// Add a batch of files to the pool as **one** undo step. An import often
+    /// brings in several clips; undoing it should remove the whole batch, not
+    /// require one `u` per file. Returns the new asset ids in insertion order.
+    pub fn add_assets(
+        &mut self,
+        project: &mut Project,
+        assets: Vec<(PathBuf, RawProbe)>,
+        playhead: i64,
+    ) -> Vec<u32> {
+        let before = project.media.clone();
+        let mut ids = Vec::new();
+        for (path, probe) in assets {
+            let (id, added) = project.add_asset(path, probe);
+            if added {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            return ids;
+        }
+        let desc = match ids.as_slice() {
+            [id] => format!("import asset #{id}"),
+            _ => format!("import {} assets", ids.len()),
+        };
+        self.push_change(Change::Assets(AssetChange {
+            before,
+            after: project.media.clone(),
+            desc,
+            playhead,
+        }));
+        ids
     }
 
     /// Push onto `done`, clear redo, and enforce the depth cap.

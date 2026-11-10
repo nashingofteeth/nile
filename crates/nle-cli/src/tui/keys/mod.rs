@@ -22,6 +22,7 @@ use super::motion::{
 use super::{App, Mode, Pending, is_fx, is_pool};
 
 pub(crate) mod command;
+pub(crate) mod complete;
 pub(crate) mod extend;
 pub(crate) mod fx;
 pub(crate) mod pool;

@@ -542,6 +542,29 @@ fn undoable_track_rm_media_rm_imports() {
 }
 
 #[test]
+fn importing_a_directory_is_one_undoable_batch() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    let batch = s.path().join("batch");
+    fs::create_dir(&batch).unwrap();
+    fs::copy(s.file("red.mp4"), batch.join("red.mp4")).unwrap();
+    fs::copy(s.file("green.mp4"), batch.join("green.mp4")).unwrap();
+    fs::copy(s.file("notmedia.txt"), batch.join("ignore.txt")).unwrap();
+
+    s.ok(&["import", "batch"]);
+    let assets = s.ok(&["media", "ls"]);
+    assert!(assets.contains("2 asset(s)"), "{assets}");
+    assert!(!assets.contains("ignore.txt"), "{assets}");
+
+    s.ok(&["undo"]);
+    let assets = s.ok(&["media", "ls"]);
+    assert!(
+        assets.contains("media pool is empty") || assets.contains("0 asset(s)"),
+        "one undo removes the batch:\n{assets}"
+    );
+}
+
+#[test]
 fn head_material_reaches_back_past_time_zero() {
     let s = Sandbox::new();
     s.ok(&["init", "--force"]);

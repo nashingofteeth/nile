@@ -174,6 +174,32 @@ fn asset_addition_is_undoable() {
     assert!(p.asset(id).is_some(), "and redoes");
 }
 
+// A picker import of several files is one undo step: one `u` removes the
+// whole batch, and one redo puts it back.
+#[test]
+fn batch_asset_additions_are_one_undo_step() {
+    let mut p = fixture();
+    let before = p.media.clone();
+    let mut h = History::default();
+    let ids = h.add_assets(
+        &mut p,
+        vec![
+            ("/media/one.mp4".into(), probe_report("5")),
+            ("/media/two.mp4".into(), probe_report("6")),
+        ],
+        42,
+    );
+    assert_eq!(ids.len(), 2);
+    assert_eq!(p.media.len(), before.len() + 2);
+    assert_eq!(h.depth(), 1, "the batch is one history entry");
+
+    let outcome = h.undo(&mut p).unwrap();
+    assert_eq!(outcome.playhead, 42);
+    assert_eq!(p.media, before, "one undo removes the whole batch");
+    h.redo(&mut p).unwrap();
+    assert_eq!(p.media.len(), before.len() + 2, "and redo restores it");
+}
+
 // Undoing an import that a clip now depends on refuses loudly (validate
 // catches the dangling asset) rather than leaving a broken project.
 #[test]

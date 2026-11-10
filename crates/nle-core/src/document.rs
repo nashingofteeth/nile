@@ -125,6 +125,15 @@ impl Document {
             .add_asset(&mut self.project, path, report, playhead)
     }
 
+    /// Add a batch of files as one undo entry (a picker or CLI import).
+    pub fn add_assets(
+        &mut self,
+        assets: Vec<(std::path::PathBuf, crate::media::RawProbe)>,
+        playhead: i64,
+    ) -> Vec<u32> {
+        self.history.add_assets(&mut self.project, assets, playhead)
+    }
+
     pub fn remove_asset(&mut self, id: u32, playhead: i64) -> Result<String, EditError> {
         self.history.remove_asset(&mut self.project, id, playhead)
     }

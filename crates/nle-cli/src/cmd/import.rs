@@ -1,7 +1,7 @@
 //! `nile import`, `nile import-edl` and `nile import-otio`: probe media into
 //! the pool and rebuild a timeline from an EDL or an OTIO document.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -24,26 +24,35 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
         edit::History::load_project(project_path).unwrap_or_default(),
     );
     let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
-    let mut added = 0usize;
+    let (files, errors) = expand_import_paths(files);
+    for e in &errors {
+        say!("· {e}");
+    }
+    if files.is_empty() && !errors.is_empty() {
+        bail!("{}", errors.join("; "));
+    }
+
+    let mut fresh: Vec<(PathBuf, nle_core::media::RawProbe)> = Vec::new();
     for file in files {
-        let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
-        let canonical = file
-            .canonicalize()
-            .with_context(|| format!("resolving {}", file.display()))?;
-        if let Some(a) = doc.asset_by_path(&canonical) {
+        let report = probe(&file).with_context(|| format!("importing {}", file.display()))?;
+        if let Some(a) = doc.asset_by_path(&file) {
             say!("· {} already imported (asset #{})", file.display(), a.id);
             continue;
         }
-        // Recorded: `nile undo` removes the asset again.
-        let (id, _) = doc.add_asset(canonical, report, playhead);
-        added += 1;
-        let asset = doc.asset(id).context("asset vanished")?;
+        fresh.push((file, report));
+    }
+    let imported_paths: Vec<PathBuf> = fresh.iter().map(|(p, _)| p.clone()).collect();
+    // One undo entry for the whole command: `nile undo` peels the batch.
+    let ids = doc.add_assets(fresh, playhead);
+    for (id, path) in ids.iter().zip(&imported_paths) {
+        let asset = doc.asset(*id).context("asset vanished")?;
         say!(
             "✓ asset #{id}  {}  {}",
-            file.display(),
+            path.display(),
             asset_summary(asset)
         );
     }
+    let added = ids.len();
     if added > 0 {
         doc.save(project_path)?;
         doc.save_history(&edit::History::sidecar_path(project_path))?;
@@ -69,6 +78,84 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
 pub(crate) const MEDIA_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "m4v", "avi", "webm", "wav", "mp3", "m4a", "aac", "flac", "ogg",
 ];
+
+/// Expand `~`/`~/…` without a shell. `~user` is left alone: resolving
+/// another account's home is not needed here.
+pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return path.to_path_buf();
+    };
+    if text == "~" {
+        return home;
+    }
+    if let Some(rest) = text.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    path.to_path_buf()
+}
+
+/// Expand import arguments into canonical files. A directory contributes its
+/// immediate media files, matching the EDL `--media` scan; nested directories
+/// are left to the picker. Missing paths and empty directories are returned as
+/// warnings instead of aborting the batch.
+pub(crate) fn expand_import_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in paths {
+        let raw = expand_tilde(raw);
+        let canonical = match raw.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                errors.push(format!("{}: not found", raw.display()));
+                continue;
+            }
+        };
+        if canonical.is_dir() {
+            let mut found: Vec<PathBuf> = Vec::new();
+            match std::fs::read_dir(&canonical) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        let is_media = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| MEDIA_EXTS.iter().any(|m| e.eq_ignore_ascii_case(m)));
+                        if path.is_file() && is_media {
+                            found.push(path);
+                        }
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {e}", raw.display()));
+                    continue;
+                }
+            }
+            found.sort();
+            if found.is_empty() {
+                errors.push(format!("no media files in {}", raw.display()));
+                continue;
+            }
+            for path in found {
+                if let Ok(path) = path.canonicalize()
+                    && seen.insert(path.clone())
+                {
+                    files.push(path);
+                }
+            }
+        } else if canonical.is_file() {
+            if seen.insert(canonical.clone()) {
+                files.push(canonical);
+            }
+        } else {
+            errors.push(format!("{}: not a file or directory", raw.display()));
+        }
+    }
+    (files, errors)
+}
 
 /// Match a reel/clip name to a pooled asset in three tiers — exact
 /// filename, exact stem, then a case-insensitive substring at a stem
