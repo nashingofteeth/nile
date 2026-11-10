@@ -781,6 +781,13 @@ fn pool_draws_keyframe_ticks_and_a_thumbnail() {
     app.loaded = true;
     open_pool_mode(&mut app, 0);
     app.keyframes.insert(1, vec![2.0, 4.0]);
+    app.pool_marks.insert(
+        1,
+        PoolMarks {
+            in_at: Some(1.5),
+            out_at: Some(5.0),
+        },
+    );
     app.thumbnails.insert(
         1,
         Thumbnail::new(vec![
@@ -805,6 +812,7 @@ fn pool_draws_keyframe_ticks_and_a_thumbnail() {
         .flat_map(|y| (0..60).map(move |x| buf[(x, y)].symbol()))
         .collect();
     assert_eq!(strip.matches('·').count(), 2, "{strip}");
+    assert!(strip.contains('[') && strip.contains(']'), "{strip}");
 
     // The metadata pane renders the cached frame as half-blocks.
     let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -815,6 +823,10 @@ fn pool_draws_keyframe_ticks_and_a_thumbnail() {
         .collect();
     assert!(text.contains('▀'), "thumbnail half-blocks missing:\n{text}");
     assert!(text.contains("keys   2"), "keyframe count missing:\n{text}");
+    assert!(
+        text.contains("marks  1.500 – 5.000s"),
+        "source range missing:\n{text}"
+    );
 }
 
 // Metadata pane formats the stored probe (no re-probe).

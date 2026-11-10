@@ -167,10 +167,11 @@ of both neighbours, so trimming/extending nearby moves the blend’s edge.
 `h`/`l`, `f`/`F`, `gg`/`0`, `G`/`$` seek; `J`/`K` jump to the next/previous
 video keyframe (probed on a worker and cached under `.nile/<stem>/cache/`;
 the strip marks them with `·`). The metadata pane shows a cached half-block
-thumbnail of the selected video. `enter` inserts at the timeline cursor and
-returns; `d` removes the asset; `i` imports; `u` undoes. While the pool is
-open, the timeline row and monitor show the selected asset; reopening returns
-to the same asset and preview clock.
+thumbnail of the selected video. `[`/`]` set the source in/out at the preview
+clock, `x` clears them, and `enter` inserts that source range at the timeline
+cursor (whole asset when unmarked). `d` removes the asset; `i` imports; `u`
+undoes. While the pool is open, the timeline row and monitor show the selected
+asset; reopening returns to the same asset and preview clock.
 
 ### Extend mode
 

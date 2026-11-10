@@ -17,6 +17,7 @@ use super::super::keys::count_digit;
 use super::super::keys::do_redo;
 use super::super::keys::do_undo;
 use super::super::keys::select_active_track;
+use super::super::motion::snap_to_frame;
 use super::super::{
     App, Mode, Pending, PoolState, is_pool, pool_pos, pool_resume, pool_sel, remember_pool, secs,
     set_pool_pos, set_pool_sel,
@@ -54,6 +55,10 @@ pub(crate) fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => pool_move(app, player, -1, n),
         KeyCode::Char('{') => pool_select(app, player, 0),
         KeyCode::Char('}') => pool_select(app, player, n.saturating_sub(1)),
+        // Source in/out marks for the insert range.
+        KeyCode::Char('[') => pool_mark_in(app),
+        KeyCode::Char(']') => pool_mark_out(app),
+        KeyCode::Char('x') => pool_clear_marks(app),
         // Keyframe navigation (file, not list).
         KeyCode::Char('J') => pool_keyframe(app, player, 1),
         KeyCode::Char('K') => pool_keyframe(app, player, -1),
@@ -364,6 +369,62 @@ pub(crate) fn pool_step_target(app: &App, dir: i64) -> (f64, f64) {
     (idx as f64 / fps, fps)
 }
 
+/// Snap a preview clock to the selected asset's frame grid and bounds.
+fn snapped_mark(app: &App, asset: &nle_core::Asset, at: f64) -> f64 {
+    let snapped = snap_to_frame(at, asset.fps().as_ref());
+    let last = asset
+        .duration()
+        .map(|d| pool_last_frame(app, secs(&d)))
+        .unwrap_or(snapped);
+    snapped.clamp(0.0, last)
+}
+
+/// Set the selected asset's source in-point from the preview clock.
+pub(crate) fn pool_mark_in(app: &mut App) {
+    let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
+        app.set_message("no asset selected");
+        return;
+    };
+    let id = asset.id;
+    let at = snapped_mark(app, asset, pool_pos(app));
+    if let Some(out) = app.pool_marks.get(&id).and_then(|m| m.out_at)
+        && at >= out
+    {
+        app.fail("source in must be before the out mark");
+        return;
+    }
+    app.pool_marks.entry(id).or_default().in_at = Some(at);
+    app.set_message(&format!("source in {at:.3}s"));
+}
+
+/// Set the selected asset's source out-point from the preview clock.
+pub(crate) fn pool_mark_out(app: &mut App) {
+    let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
+        app.set_message("no asset selected");
+        return;
+    };
+    let id = asset.id;
+    let at = snapped_mark(app, asset, pool_pos(app));
+    if let Some(inn) = app.pool_marks.get(&id).and_then(|m| m.in_at)
+        && at <= inn
+    {
+        app.fail("source out must be after the in mark");
+        return;
+    }
+    app.pool_marks.entry(id).or_default().out_at = Some(at);
+    app.set_message(&format!("source out {at:.3}s"));
+}
+
+/// Clear the selected asset's source marks.
+pub(crate) fn pool_clear_marks(app: &mut App) {
+    let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
+        app.set_message("no asset selected");
+        return;
+    };
+    app.pool_marks.remove(&asset.id);
+    app.set_message("source marks cleared");
+}
+
 /// Insert a clip from the selected pool asset at the playhead (ripple).
 pub(crate) fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
     let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
@@ -386,11 +447,24 @@ pub(crate) fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
             return;
         }
     };
+    let marks = app.source_marks();
+    let src_in = marks
+        .in_at
+        .map(|t| nle_core::grid_time(asset.fps().as_ref(), t))
+        .unwrap_or_else(|| Seconds::from_integer(0));
+    let src_out = marks
+        .out_at
+        .map(|t| nle_core::grid_time(asset.fps().as_ref(), t))
+        .unwrap_or(whole);
+    if src_in >= src_out {
+        app.set_message("source in must be before the out mark");
+        return;
+    }
     let snapshot = TimelineSegment::Clip(Clip {
         id: 0,
         asset: asset.id,
-        asset_in: Seconds::from_integer(0),
-        asset_out: whole,
+        asset_in: src_in,
+        asset_out: src_out,
         speed: Seconds::from_integer(1),
         effects: Vec::new(),
     });
@@ -419,7 +493,11 @@ pub(crate) fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
         app.set_message("no asset selected");
         return;
     };
-    run_action(app, player, &Action::AssetRm { id: asset.id });
+    let id = asset.id;
+    run_action(app, player, &Action::AssetRm { id });
+    if app.project.asset(id).is_none() {
+        app.pool_marks.remove(&id);
+    }
 }
 
 /// Switch the active track from the pool: retarget where `enter` inserts and

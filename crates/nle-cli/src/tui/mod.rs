@@ -90,6 +90,14 @@ pub struct PoolState {
     pub resume: f64,
 }
 
+/// Source in/out marks for one pooled asset. Session state; marks are keyed
+/// by asset id so switching rows never applies one file's range to another.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct PoolMarks {
+    pub in_at: Option<f64>,
+    pub out_at: Option<f64>,
+}
+
 /// A one-field transition length form, opened by `x`/`X` when the playhead
 /// is inside a blend. `frames` is the typed text (blank = keep `current`).
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +270,8 @@ pub struct App {
     last_pool_sel: usize,
     last_pool_pos: f64,
     last_pool_asset: Option<u32>,
+    /// Source marks for pooled assets, keyed by asset id.
+    pub(crate) pool_marks: HashMap<u32, PoolMarks>,
     /// The scale form's aspect lock is sticky across forms and edits and on by
     /// default; turning it off keeps later scale forms unlocked.
     fx_scale_lock: bool,
@@ -331,6 +341,7 @@ impl App {
             last_pool_sel: 0,
             last_pool_pos: 0.0,
             last_pool_asset: None,
+            pool_marks: HashMap::new(),
             fx_scale_lock: true,
             active_track: 0,
             timeline_view: TimelineView::default(),
@@ -505,6 +516,17 @@ impl App {
     pub(crate) fn timeline_viewport(&self, width: u16) -> Viewport {
         self.timeline_view
             .viewport(self.total().max(1e-9), width, self.project.fps.as_ref())
+    }
+
+    /// Source in/out marks for the selected pooled asset.
+    pub(crate) fn source_marks(&self) -> PoolMarks {
+        let Some(sel) = pool_sel(self) else {
+            return PoolMarks::default();
+        };
+        let Some(id) = self.project.media.get(sel).map(|a| a.id) else {
+            return PoolMarks::default();
+        };
+        self.pool_marks.get(&id).copied().unwrap_or_default()
     }
 
     /// Record the terminal width and derive the timeline bar's usable width.
@@ -1017,6 +1039,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     app.keyframe_job = None;
     app.thumbnails.clear();
     app.thumb_job = None;
+    app.pool_marks.clear();
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())
