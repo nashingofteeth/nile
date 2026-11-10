@@ -58,6 +58,8 @@ pub(crate) fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         // Source in/out marks for the insert range.
         KeyCode::Char('i') => pool_mark_in(app),
         KeyCode::Char('o') => pool_mark_out(app),
+        KeyCode::Char('I') => pool_seek_in(app, player),
+        KeyCode::Char('O') => pool_seek_out(app, player),
         KeyCode::Char('x') => pool_clear_marks(app),
         // Keyframe navigation (file, not list).
         KeyCode::Char('J') => pool_keyframe(app, player, 1),
@@ -415,6 +417,22 @@ pub(crate) fn pool_mark_out(app: &mut App) {
     app.pool_marks.entry(id).or_default().out_at = Some(at);
     app.save_session_state();
     app.set_message(&format!("source out {at:.3}s"));
+}
+
+/// Seek the preview to the selected asset's in mark.
+pub(crate) fn pool_seek_in(app: &mut App, player: &dyn Mpv) {
+    match app.source_marks().in_at {
+        Some(at) => pool_seek_abs(app, player, at),
+        None => app.set_message("no in mark"),
+    }
+}
+
+/// Seek the preview to the selected asset's out mark.
+pub(crate) fn pool_seek_out(app: &mut App, player: &dyn Mpv) {
+    match app.source_marks().out_at {
+        Some(at) => pool_seek_abs(app, player, at),
+        None => app.set_message("no out mark"),
+    }
 }
 
 /// Clear the selected asset's source marks.

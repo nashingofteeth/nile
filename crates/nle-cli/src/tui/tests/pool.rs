@@ -710,3 +710,31 @@ fn pool_source_marks_are_per_asset() {
     assert_ne!(app.source_marks().in_at, Some(1.0));
     assert!(app.project.asset(other).is_some());
 }
+
+#[test]
+fn pool_jumps_to_source_marks() {
+    let mut app = App::new(asset_project(), temp_project_path("pool-mark-jump"));
+    app.loaded = true;
+    open_pool_mode(&mut app, 0);
+    let fake = FakeMpv::new();
+
+    set_pool_pos(&mut app, 2.0);
+    handle_key(&mut app, &fake, key('i'));
+    set_pool_pos(&mut app, 4.0);
+    handle_key(&mut app, &fake, key('o'));
+
+    set_pool_pos(&mut app, 0.0);
+    handle_key(&mut app, &fake, key('I'));
+    assert_eq!(pool_pos(&app), 2.0);
+    assert_eq!(fake.calls(), vec![Call::SeekAbs(2.0)]);
+
+    handle_key(&mut app, &fake, key('O'));
+    assert_eq!(pool_pos(&app), 4.0);
+    assert_eq!(fake.calls().last(), Some(&Call::SeekAbs(4.0)));
+
+    handle_key(&mut app, &fake, key('x'));
+    handle_key(&mut app, &fake, key('I'));
+    assert_eq!(app.message, "no in mark");
+    handle_key(&mut app, &fake, key('O'));
+    assert_eq!(app.message, "no out mark");
+}
