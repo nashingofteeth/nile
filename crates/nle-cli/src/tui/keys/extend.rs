@@ -257,6 +257,7 @@ pub(crate) fn enter_extend(app: &mut App, player: &dyn Mpv, ripple: bool) {
     // Land on the armed edge: a gap on the right presents its tail, which
     // sits away from the cut `e` was pressed at.
     app.playhead = plan.edge_pos;
+    app.follow_timeline();
     apply_extend_plan(app, player, plan, ripple);
     if hopped {
         app.message
@@ -524,6 +525,7 @@ pub(crate) fn enter_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
             // Land on the armed edge (a gap presents its tail, which can
             // be away from the cut we armed it from).
             app.playhead = edge;
+            app.follow_timeline();
             apply_extend_plan(app, player, plan, false);
             if let Some(note) = note {
                 app.message.push_str(&format!(" — {note}"));
@@ -552,6 +554,7 @@ pub(crate) fn set_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
     match plan_for_armed(&app.project, armed, edge, st.track) {
         Ok(plan) => {
             app.playhead = edge;
+            app.follow_timeline();
             apply_extend_plan(app, player, plan, st.ripple);
         }
         Err(m) => app.fail(&m),
@@ -598,6 +601,7 @@ pub(crate) fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
             // Anchor the playhead before handing the monitor over so the
             // material preview opens on the armed source point.
             app.playhead = edge;
+            app.follow_timeline();
             apply_extend_plan(app, player, plan, st.ripple);
         }
         Err(m) => app.fail(&m),
@@ -614,6 +618,7 @@ pub(crate) fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
 pub(crate) fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
     app.playhead = pos;
     app.mode = Mode::Normal;
+    app.follow_timeline();
     // The material preview is still (or just now) the monitor's file; its
     // clock must not drive the playhead until the timeline EDL reports its
     // landing. The poll raises `pool_handoff` when it loads.
@@ -742,6 +747,8 @@ pub(crate) fn seek_to_mode(app: &mut App, player: &dyn Mpv, st: &ExtendState, t:
     }
     let target = snap_extend_target(app.project.fps.as_ref(), st, t);
     app.playhead = target;
+    // Seeking keeps the playhead in the zoomed viewport, like normal mode.
+    app.follow_timeline();
     // mpv can't seek before its file start; the gap head can push the
     // mapped position negative, so clamp (the preview is black anyway).
     player.seek_absolute((target - st.preview_off + 0.004).max(0.0));

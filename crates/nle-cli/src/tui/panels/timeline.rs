@@ -42,13 +42,10 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // In extend mode the row rescales past the timeline end so the
-    // projected range stays visible while navigating outward.
+    // projected range stays visible while navigating outward (the viewport
+    // uses the same `view_total`, so the padded tail is not clipped).
     let in_extend = matches!(app.mode, Mode::Extend(_));
-    let total = if in_extend {
-        app.total().max(app.playhead).max(0.001)
-    } else {
-        app.total().max(0.001)
-    };
+    let total = app.view_total();
 
     // Each visible track gets its own row; an audio-bearing track also gets
     // a waveform row directly beneath it. The marker row always takes one.
@@ -431,7 +428,11 @@ pub(crate) fn draw_track_row(
     }
 
     let mut spans: Vec<Span> = Vec::new();
-    if notch {
+    // The marker row hides an off-screen playhead; the notch must agree or it
+    // paints at the clamped edge column while the marker row shows nothing.
+    let playhead_on_screen =
+        app.playhead >= view.start - 1e-9 && app.playhead <= view.start + view.span + 1e-9;
+    if notch && playhead_on_screen {
         // Split the containing part's text around the playhead marker.
         let ph = view.col(app.playhead, bar.width);
         let edge = match &app.mode {

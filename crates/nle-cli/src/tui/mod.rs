@@ -530,10 +530,23 @@ impl App {
         secs(&self.project.timeline.end())
     }
 
+    /// The span the rows and the viewport draw. In extend mode the playhead
+    /// can roam past the last cut (handle material), so the row rescales to
+    /// keep the projected range visible; the viewport must use the same span
+    /// or the extension is clipped away.
+    pub(crate) fn view_total(&self) -> f64 {
+        let base = self.total().max(0.001);
+        if matches!(self.mode, Mode::Extend(_)) {
+            base.max(self.playhead)
+        } else {
+            base
+        }
+    }
+
     /// The current horizontal viewport for a given bar width.
     pub(crate) fn timeline_viewport(&self, width: u16) -> Viewport {
         self.timeline_view
-            .viewport(self.total().max(1e-9), width, self.project.fps.as_ref())
+            .viewport(self.view_total(), width, self.project.fps.as_ref())
     }
 
     /// Source in/out marks for the selected pooled asset.
@@ -653,7 +666,7 @@ impl App {
 
     fn max_zoom_now(&self) -> f64 {
         TimelineView::max_zoom(
-            self.total().max(1e-9),
+            self.view_total(),
             self.timeline_width,
             self.project.fps.as_ref(),
         )
@@ -664,7 +677,7 @@ impl App {
     pub(crate) fn follow_timeline(&mut self) {
         self.timeline_view.follow(
             self.playhead,
-            self.total().max(1e-9),
+            self.view_total(),
             self.timeline_width,
             self.project.fps.as_ref(),
         );
