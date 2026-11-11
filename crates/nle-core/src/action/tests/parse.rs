@@ -488,4 +488,23 @@ fn unknown_verbs_and_bad_flags_stay_apart() {
     assert!(f.positional().is_none(), "no stray positionals");
 }
 
+// Tab-completed paths come back quoted; the shared tokenizer must hand them
+// to `:add`/`:import` as one argument (the shell would do this for the CLI).
+#[test]
+fn a_quoted_path_is_one_argument() {
+    let (verb, mut f) = split_args("add \"/m/my clip.mp4\" --at 2").unwrap();
+    assert_eq!(verb, "add");
+    assert_eq!(f.positional().as_deref(), Some("/m/my clip.mp4"));
+    assert_eq!(f.take("at").as_deref(), Some("2"));
+    assert!(f.positional().is_none());
+
+    let (_, mut f) = split_args("add /m/my\\ clip.mp4").unwrap();
+    assert_eq!(f.positional().as_deref(), Some("/m/my clip.mp4"));
+
+    assert!(matches!(
+        split_args("add \"unterminated"),
+        Err(ParseError::Invalid(_))
+    ));
+}
+
 // ------------------------------------------------------------ run

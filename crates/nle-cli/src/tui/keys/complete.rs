@@ -133,16 +133,45 @@ fn path_token(buffer: &str) -> Option<usize> {
     if verb == "add" && (after.starts_with('-') || after.contains(" --")) {
         return None;
     }
-    let start = buffer
-        .char_indices()
-        .rev()
-        .find(|(_, c)| c.is_whitespace())
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(verb_end);
+    let start = last_token_start(buffer, verb_end);
     if verb == "add" && buffer[start..].starts_with('-') {
         return None;
     }
     Some(start)
+}
+
+/// Byte offset where the last (possibly unterminated) token starts, scanning
+/// from `from`. Quote-aware: a whitespace inside a quoted section is part of
+/// the token, so `import "/a/my vids/` keeps the quoted path whole and a
+/// second Tab completes inside it instead of falling back to a relative read.
+/// A trailing separator yields the empty token at the buffer end.
+fn last_token_start(buffer: &str, from: usize) -> usize {
+    let mut start = from;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, ch) in buffer[from..].char_indices() {
+        let at = from + i;
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else if q == '"' && ch == '\\' {
+                    escaped = true;
+                }
+            }
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => escaped = true,
+                c if c.is_whitespace() => start = at + c.len_utf8(),
+                _ => {}
+            },
+        }
+    }
+    start
 }
 
 fn expand_dir(dir_part: &str) -> std::path::PathBuf {
@@ -277,5 +306,22 @@ mod tests {
     #[test]
     fn a_closed_quote_is_not_recompleted() {
         assert!(complete_path("import \"done.mp4\"").is_none());
+    }
+
+    #[test]
+    fn a_second_tab_inside_a_quoted_directory_keeps_completing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("my vids");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("take one.mp4"), b"").unwrap();
+        let first = complete_path(&format!("import {}/my", dir.path().display())).unwrap();
+        let quoted = format!("import \"{}/my vids/", dir.path().display());
+        assert_eq!(first.buffer, quoted);
+        let second = complete_path(&format!("{quoted}ta")).unwrap();
+        assert_eq!(
+            second.buffer,
+            format!("import \"{}/my vids/take one.mp4\" ", dir.path().display()),
+            "the space inside the quote must not start a new token"
+        );
     }
 }
