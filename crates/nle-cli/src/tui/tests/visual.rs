@@ -31,6 +31,28 @@ fn v_selects_whole_segments_and_d_deletes_them_as_one_undo() {
     );
 }
 
+// Visual mode delegates motions (and counts) to normal mode, so a zoom key
+// must consume a pending count the way normal mode's do — otherwise `3` then
+// `+` leaves the 3 to multiply the next motion.
+#[test]
+fn a_visual_zoom_key_consumes_the_count() {
+    let mut app = visual_app();
+    let fake = FakeMpv::new();
+    handle_key(&mut app, &fake, key('v'));
+    assert!(matches!(app.mode, Mode::Visual(_)), "{:?}", app.mode);
+    handle_key(&mut app, &fake, key('3'));
+    assert_eq!(app.count, Some(3));
+    handle_key(&mut app, &fake, key('+'));
+    assert_eq!(app.count, None, "the zoom key took the count");
+    let before = app.playhead;
+    handle_key(&mut app, &fake, key('l'));
+    assert_eq!(
+        app.playhead,
+        before + 1.0,
+        "the next motion moves one second, not the stale count"
+    );
+}
+
 #[test]
 fn visual_delete_reports_a_merged_seam() {
     // [gap][clip #1][gap][clip #2]: deleting only clip #1 joins the gaps.
