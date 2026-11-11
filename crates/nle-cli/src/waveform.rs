@@ -122,10 +122,11 @@ fn peaks_from_pcm(pcm: &[u8], bins: usize, rate: u32, asset: &Asset) -> Waveform
     }
     Waveform {
         peaks,
-        duration: asset
-            .duration()
-            .map(|d| *d.numer() as f64 / *d.denom() as f64)
-            .unwrap_or(samples as f64 / f64::from(rate)),
+        // The peaks cover the decoded audio stream, so the drawing must map
+        // source time by the PCM's own length — the container duration can
+        // differ (audio embedded in a longer video), which stretched the
+        // waveform by that factor and drifted it near the clip end.
+        duration: samples as f64 / f64::from(rate),
     }
 }
 
@@ -193,7 +194,10 @@ mod tests {
             .collect();
         let w = peaks_from_pcm(&pcm, 2, 8000, &asset());
         assert_eq!(w.peaks.len(), 2);
-        assert_eq!(w.duration, 1.0);
+        // The peaks cover the decoded stream, not the container: a video whose
+        // audio stream is shorter than its container must not stretch the
+        // waveform. 8 samples @ 8 kHz = 1 ms, despite the 1 s container.
+        assert!((w.duration - 8.0 / 8000.0).abs() < 1e-9, "{}", w.duration);
         assert!((w.peaks[0] - 0.5).abs() < 1e-6);
         assert!((w.peaks[1] - 1.0).abs() < 1e-6);
     }

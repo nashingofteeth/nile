@@ -210,7 +210,10 @@ fn draw_waveform_row(
                         && wave.duration > 0.0
                         && !wave.peaks.is_empty()
                     {
-                        let t = view.start + (f64::from(x) + 0.5) * cell;
+                        // Sample the column's centre — the instant
+                        // `Viewport::col` assigns to it — so a peak aligns
+                        // with the cut dividers drawn from the same view.
+                        let t = view.start + f64::from(x) * cell;
                         let offset = (t - start).max(0.0);
                         let source =
                             c.source_at(Seconds::new((offset * 1_000_000.0) as i64, 1_000_000));
