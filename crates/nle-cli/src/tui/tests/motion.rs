@@ -265,6 +265,90 @@ fn a_seek_keeps_the_playhead_in_view() {
     );
 }
 
+// Extend mode has its own seek plumbing (`seek_to_mode`); it must follow the
+// viewport too, or the playhead walks off-screen at zoom.
+#[test]
+fn an_extend_seek_keeps_the_playhead_in_view() {
+    use nle_core::Armed;
+    let mut app = App::new(asset_project(), temp_project_path("zoom-follow-extend"));
+    app.loaded = true;
+    app.note_terminal_width(40);
+    app.timeline_view.zoom = 4.0;
+    app.playhead = 3.0;
+    app.mode = Mode::Extend(ExtendState {
+        track: 0,
+        armed: Armed::Clip { id: 1, head: false },
+        edge_pos: 3.0,
+        ripple: false,
+        lo: 0.0,
+        hi: Some(9.0),
+        mat: None,
+        preview_off: -1.0,
+    });
+    let fake = FakeMpv::new();
+    for _ in 0..6 {
+        handle_key(&mut app, &fake, key('l'));
+    }
+    let view = app.timeline_viewport(app.timeline_width);
+    assert!(
+        view.start <= app.playhead && app.playhead <= view.start + view.span,
+        "extend seek followed the playhead: {view:?} playhead={}",
+        app.playhead
+    );
+}
+
+// The armed-track notch used to clamp to the edge column while the marker
+// row hid an off-screen playhead. Both must agree: with the playhead outside
+// the drawn span neither paints it.
+#[test]
+fn the_extend_notch_is_hidden_when_the_playhead_is_offscreen() {
+    use nle_core::Armed;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut p = asset_project();
+    // One unbroken clip: the row then carries no cut dividers (which also use
+    // `▏`), so the glyph's absence is meaningful.
+    p.timeline.video_track_mut().unwrap().segments = vec![seg_clip(1, 7)];
+    let mut app = App::new(p, temp_project_path("notch-offscreen"));
+    app.loaded = true;
+    app.note_terminal_width(60);
+    app.playhead = 3.0;
+    app.mode = Mode::Extend(ExtendState {
+        track: 0,
+        armed: Armed::Clip { id: 1, head: false },
+        edge_pos: 3.0,
+        ripple: false,
+        lo: 0.0,
+        hi: Some(9.0),
+        mat: None,
+        preview_off: -1.0,
+    });
+    app.timeline_view.zoom = 8.0; // span ≈ 0.875 s
+    app.timeline_view.start = 5.0; // window [5, 5.875), playhead at 3 s
+    let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
+    term.draw(|f| {
+        render_timeline(
+            f,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 60,
+                height: 4,
+            },
+            &app,
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+    let rows: Vec<String> = (0..4)
+        .map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect())
+        .collect();
+    assert!(
+        rows.iter().all(|r| !r.contains('▏')),
+        "no clamped notch or marker while the playhead is off-screen: {rows:?}"
+    );
+}
+
 #[test]
 fn timecode_formatting() {
     let fps30 = Seconds::new(30, 1);
