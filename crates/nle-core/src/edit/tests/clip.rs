@@ -1038,3 +1038,100 @@ fn deleting_the_right_clip_beside_a_transition_restores_the_left_tail() {
     ));
     assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
 }
+
+// The sync-ripple half: cut a time span out of another track, keep the
+// outside material, and give the split-off right piece a fresh id.
+#[test]
+fn remove_span_cuts_a_clip_and_allocates_a_fresh_id() {
+    let p = fixture();
+    let mut next = 50;
+    let batch = remove_span_on(&p, 0, Seconds::new(1, 2), Seconds::new(7, 2), &mut next).unwrap();
+    let mut q = p.clone();
+    let mut h = History::default();
+    h.apply(&mut q, batch, 0).unwrap();
+    let segs = &q.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 2, "{segs:?}");
+    assert_eq!(
+        q.timeline.video_track().unwrap().end(),
+        Seconds::from_integer(2)
+    );
+    assert!(
+        matches!(&segs[0], Segment::Clip(c) if c.id == 1 && c.duration() == Seconds::new(1, 2))
+    );
+    assert!(matches!(&segs[1], Segment::Clip(c) if c.id == 51 && c.asset_in == Seconds::new(1, 2)));
+}
+
+#[test]
+fn remove_span_merges_the_gap_ends() {
+    let mut p = Project::new();
+    p.fps = Some(Seconds::from_integer(30));
+    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+        id: 1,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(10),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+    // A gap inside the clip is not possible; use a track that is one long gap.
+    p.timeline.video_track_mut().unwrap().segments = vec![Segment::Gap(Gap {
+        duration: Seconds::from_integer(4),
+    })];
+    let mut next = 50;
+    let batch = remove_span_on(
+        &p,
+        0,
+        Seconds::from_integer(1),
+        Seconds::from_integer(3),
+        &mut next,
+    )
+    .unwrap();
+    let mut q = p.clone();
+    let mut h = History::default();
+    h.apply(&mut q, batch, 0).unwrap();
+    let segs = &q.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 1, "the two gap ends merge: {segs:?}");
+    assert!(matches!(&segs[0], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+}
+
+#[test]
+fn remove_span_refuses_a_transition_edge() {
+    let mut p = Project::new();
+    p.fps = Some(Seconds::from_integer(30));
+    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let clip = |id, ain: i64, aout: i64| {
+        Segment::Clip(Clip {
+            id,
+            asset: a,
+            asset_in: Seconds::from_integer(ain),
+            asset_out: Seconds::from_integer(aout),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })
+    };
+    p.timeline.video_track_mut().unwrap().segments = vec![clip(1, 0, 2), clip(2, 2, 4)];
+    let batch = add_transition(
+        &p,
+        0,
+        2.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    let mut h = History::default();
+    h.apply(&mut p, batch, 0).unwrap();
+    let tr = p.timeline.video_track().unwrap();
+    let ti = tr
+        .segments
+        .iter()
+        .position(|s| matches!(s, Segment::Transition(_)))
+        .unwrap();
+    let start = tr.start_of(ti);
+    let end = start + tr.segments[ti].duration();
+    let mut next = 50;
+    assert!(matches!(
+        remove_span_on(&p, 0, start + Seconds::new(1, 30), end, &mut next),
+        Err(EditError::Transition)
+    ));
+}

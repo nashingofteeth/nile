@@ -542,6 +542,51 @@ fn undoable_track_rm_media_rm_imports() {
 }
 
 #[test]
+fn ripple_delete_keeps_a_separate_audio_track_in_sync() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["add", "green.mp4", "--at", "2", "--in", "0", "--out", "2"]);
+    s.ok(&["track", "add", "audio"]);
+    s.ok(&[
+        "add",
+        "green.mp4",
+        "--track",
+        "2",
+        "--in",
+        "0",
+        "--out",
+        "2",
+    ]);
+    s.ok(&[
+        "add", "red.mp4", "--track", "2", "--at", "2", "--in", "0", "--out", "2",
+    ]);
+    // Removing the base head must remove the same span from the audio track.
+    s.ok(&["delete", "--clip", "1", "--ripple"]);
+
+    let p = nle_core::Project::load(&s.file(P)).unwrap();
+    let base = p.timeline.track(0).unwrap();
+    assert_eq!(base.segments.len(), 1, "the base kept only green");
+    assert_eq!(base.end(), nle_core::time::Seconds::from_integer(2));
+    let audio = p.timeline.track(1).unwrap();
+    assert_eq!(audio.segments.len(), 1, "{:?}", audio.segments);
+    assert_eq!(audio.start_of(0), nle_core::time::Seconds::from_integer(0));
+    assert_eq!(audio.end(), nle_core::time::Seconds::from_integer(2));
+    let nle_core::timeline::Segment::Clip(c) = &audio.segments[0] else {
+        panic!("expected the surviving audio clip")
+    };
+    assert!(
+        p.asset(c.asset)
+            .unwrap()
+            .path
+            .to_string_lossy()
+            .ends_with("red.mp4"),
+        "the red audio at 2 s slid to 0 s"
+    );
+}
+
+#[test]
 fn importing_a_directory_is_one_undoable_batch() {
     let s = Sandbox::new();
     s.ok(&["init", "--force"]);

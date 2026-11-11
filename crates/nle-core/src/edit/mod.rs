@@ -29,8 +29,8 @@ pub use clip::{
     delete_clip_by_id, delete_clip_by_id_on, delete_clip_ripple_by_id, delete_clip_ripple_by_id_on,
     delete_range_on, delete_ripple, delete_ripple_on, delete_segment, delete_segment_on,
     delete_under, delete_under_on, insert_gap, insert_gap_on, insert_segments_on, paste, paste_on,
-    paste_ripple, paste_ripple_on, ripple_other_tracks, split, split_on, trim_consume_target,
-    trim_consume_target_on,
+    paste_ripple, paste_ripple_on, remove_span_on, ripple_other_tracks, split, split_on,
+    trim_consume_target, trim_consume_target_on,
 };
 pub use effects::{
     add_effect, add_effect_on, clear_effects_on, remove_effect_on, replace_effect_on,

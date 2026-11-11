@@ -308,6 +308,259 @@ fn a_ripple_insert_shifts_every_track() {
     assert_eq!(h.depth(), 0);
 }
 
+fn sync_pair() -> (Project, usize) {
+    let mut p = Project::new();
+    p.fps = Some(Seconds::from_integer(30));
+    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let clip = |id, ain: i64, aout: i64| {
+        Segment::Clip(Clip {
+            id,
+            asset: a,
+            asset_in: Seconds::from_integer(ain),
+            asset_out: Seconds::from_integer(aout),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })
+    };
+    // Base: [0..2][2..4]; audio: one 4 s clip.
+    p.timeline.video_track_mut().unwrap().segments = vec![clip(1, 0, 2), clip(2, 2, 4)];
+    let ai = p.timeline.add_track(TrackKind::Audio);
+    p.timeline.track_mut(ai).unwrap().segments = vec![clip(99, 0, 4)];
+    (p, ai)
+}
+
+fn total(track: &crate::timeline::Track) -> Seconds {
+    track.end()
+}
+
+#[test]
+fn a_ripple_delete_shifts_every_track() {
+    let (mut p, ai) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Delete {
+            track: 0,
+            target: Target::Clip(1),
+            ripple: true,
+        },
+        0.0,
+    )
+    .unwrap();
+
+    let audio = &p.timeline.track(ai).unwrap().segments;
+    assert_eq!(
+        audio.len(),
+        1,
+        "the audio clip is cut, not shifted: {audio:?}"
+    );
+    assert_eq!(
+        p.timeline.track(ai).unwrap().start_of(0),
+        Seconds::from_integer(0)
+    );
+    assert_eq!(
+        total(p.timeline.track(ai).unwrap()),
+        Seconds::from_integer(2)
+    );
+    assert!(
+        matches!(audio.first(), Some(Segment::Clip(c)) if c.asset_in == Seconds::from_integer(2)),
+        "the surviving audio starts at its source 2 s mark: {audio:?}"
+    );
+    assert_eq!(h.depth(), 1, "one undo entry for both tracks");
+
+    run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
+    assert_eq!(
+        total(p.timeline.track(ai).unwrap()),
+        Seconds::from_integer(4),
+        "undo restores the audio span"
+    );
+    assert_eq!(p.timeline.video_track().unwrap().segments.len(), 2);
+}
+
+#[test]
+fn a_ripple_trim_shifts_every_track() {
+    let (mut p, ai) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::TrimIn {
+            track: 0,
+            at: 1.0,
+            ripple: true,
+        },
+        1.0,
+    )
+    .unwrap();
+    assert_eq!(
+        total(p.timeline.track(ai).unwrap()),
+        Seconds::from_integer(3)
+    );
+    let audio = &p.timeline.track(ai).unwrap().segments;
+    assert_eq!(audio.len(), 2, "the middle second is removed: {audio:?}");
+    assert_eq!(
+        p.timeline.track(ai).unwrap().start_of(1),
+        Seconds::from_integer(1)
+    );
+    assert!(
+        matches!(&audio[1], Segment::Clip(c) if c.asset_in == Seconds::from_integer(2)),
+        "{audio:?}"
+    );
+}
+
+#[test]
+fn a_speed_change_shifts_every_track() {
+    let (mut p, ai) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::SetSpeed {
+            track: 0,
+            clip: 1,
+            rate: Seconds::from_integer(2),
+        },
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(
+        total(p.timeline.track(ai).unwrap()),
+        Seconds::from_integer(3)
+    );
+    let audio = &p.timeline.track(ai).unwrap().segments;
+    assert_eq!(
+        audio.len(),
+        2,
+        "the retime frees the second second: {audio:?}"
+    );
+}
+
+#[test]
+fn an_inserted_gap_shifts_every_track() {
+    let (mut p, ai) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::InsertGap {
+            track: 0,
+            at: 0.0,
+            len: GapLen::Frames(30),
+        },
+        0.0,
+    )
+    .unwrap();
+    let audio = &p.timeline.track(ai).unwrap().segments;
+    assert_eq!(
+        total(p.timeline.track(ai).unwrap()),
+        Seconds::from_integer(5)
+    );
+    assert!(
+        matches!(audio.first(), Some(Segment::Gap(g)) if g.duration == Seconds::from_integer(1)),
+        "the audio starts with the inserted second: {audio:?}"
+    );
+    assert!(
+        matches!(&audio[1], Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)),
+        "{audio:?}"
+    );
+}
+
+#[test]
+fn extend_out_shifts_at_the_old_end() {
+    let (mut p, ai) = sync_pair();
+    // Give the audio track material after the extend point, so the shift is
+    // visible; a shorter track ending at the shift point needs no padding.
+    p.timeline
+        .track_mut(ai)
+        .unwrap()
+        .segments
+        .push(Segment::Clip(Clip {
+            id: 100,
+            asset: 1,
+            asset_in: Seconds::from_integer(4),
+            asset_out: Seconds::from_integer(6),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        }));
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Extend {
+            track: 0,
+            target: Target::Clip(2),
+            edge: Edge::Out,
+            to: 5.0,
+            ripple: true,
+        },
+        4.0,
+    )
+    .unwrap();
+    let audio = &p.timeline.track(ai).unwrap().segments;
+    assert_eq!(
+        total(p.timeline.track(ai).unwrap()),
+        Seconds::from_integer(7)
+    );
+    assert!(
+        matches!(&audio[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)),
+        "the tail grows into a gap on the audio track: {audio:?}"
+    );
+    assert_eq!(
+        p.timeline.track(ai).unwrap().start_of(2),
+        Seconds::from_integer(5),
+        "the audio after the old end shifted by one second"
+    );
+}
+
+#[test]
+fn extend_in_shifts_at_the_clip_start() {
+    let (mut p, ai) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Extend {
+            track: 0,
+            target: Target::Clip(2),
+            edge: Edge::In,
+            to: 1.0,
+            ripple: true,
+        },
+        2.0,
+    )
+    .unwrap();
+    assert_eq!(
+        total(p.timeline.track(ai).unwrap()),
+        Seconds::from_integer(5)
+    );
+    let audio = &p.timeline.track(ai).unwrap().segments;
+    assert!(
+        matches!(&audio[0], Segment::Clip(c) if c.asset_out == Seconds::from_integer(2)),
+        "{audio:?}"
+    );
+    assert!(
+        matches!(&audio[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)),
+        "the head grows into a gap at the clip start: {audio:?}"
+    );
+    assert!(
+        matches!(&audio[2], Segment::Clip(c) if c.asset_in == Seconds::from_integer(2)),
+        "{audio:?}"
+    );
+}
+
 // An overlay track is not the master sequence: a ripple insert there must
 // not push the base video track.
 #[test]
@@ -662,4 +915,114 @@ fn range_delete_and_paste_are_catalog_actions() {
         .unwrap_err(),
         EditError::RangeRegister
     ));
+}
+
+#[test]
+fn a_length_change_on_an_overlay_stays_local() {
+    let (mut p, ai) = sync_pair();
+    let vi = p.timeline.add_track(TrackKind::Video);
+    p.timeline.track_mut(vi).unwrap().segments = vec![Segment::Clip(Clip {
+        id: 200,
+        asset: 1,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(2),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+    let base_before = p.timeline.track(0).unwrap().segments.clone();
+    let audio_before = p.timeline.track(ai).unwrap().segments.clone();
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Delete {
+            track: vi,
+            target: Target::At(0.5),
+            ripple: true,
+        },
+        0.5,
+    )
+    .unwrap();
+    assert_eq!(p.timeline.track(0).unwrap().segments, base_before);
+    assert_eq!(p.timeline.track(ai).unwrap().segments, audio_before);
+}
+
+// A transition boundary on another track cannot be cut without guessing at
+// its handles. The base edit still lands; the notice says sync was skipped.
+#[test]
+fn a_transition_boundary_skips_sync_with_a_notice() {
+    let mut p = Project::new();
+    p.fps = Some(Seconds::from_integer(30));
+    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let clip = |id, ain: i64, aout: i64| {
+        Segment::Clip(Clip {
+            id,
+            asset: a,
+            asset_in: Seconds::from_integer(ain),
+            asset_out: Seconds::from_integer(aout),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })
+    };
+    // The base clip ends one frame inside the overlay's 1 s dissolve.
+    p.timeline.video_track_mut().unwrap().segments = vec![clip(1, 0, 2)];
+    let vi = p.timeline.add_track(TrackKind::Video);
+    p.timeline.track_mut(vi).unwrap().segments = vec![clip(200, 0, 2), clip(201, 2, 4)];
+    let batch = edit::add_transition(
+        &p,
+        vi,
+        2.0,
+        TransitionKind::Dissolve,
+        Seconds::from_integer(1),
+    )
+    .unwrap();
+    let mut th = History::default();
+    th.apply(&mut p, batch, 0).unwrap();
+    let overlay_before = p.timeline.track(vi).unwrap().segments.clone();
+    let ts = p
+        .timeline
+        .track(vi)
+        .unwrap()
+        .segments
+        .iter()
+        .position(|s| matches!(s, Segment::Transition(_)))
+        .map(|i| p.timeline.track(vi).unwrap().start_of(i))
+        .unwrap();
+    let base_end = ts + Seconds::new(1, 30);
+    p.timeline.track_mut(0).unwrap().segments = vec![Segment::Clip(Clip {
+        id: 1,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: base_end,
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+
+    let mut h = History::default();
+    let mut reg = None;
+    let out = run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Delete {
+            track: 0,
+            target: Target::At(0.0),
+            ripple: true,
+        },
+        0.0,
+    )
+    .unwrap();
+    assert!(
+        out.desc.contains("sync skipped"),
+        "the notice names the skipped sync: {}",
+        out.desc
+    );
+    assert_eq!(
+        p.timeline.track(vi).unwrap().segments,
+        overlay_before,
+        "the overlay with the transition stayed put"
+    );
+    assert!(p.timeline.video_track().unwrap().segments.is_empty());
 }

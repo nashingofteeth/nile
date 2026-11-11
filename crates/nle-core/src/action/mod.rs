@@ -11,11 +11,11 @@
 //! processes (probe, export, detect, EDL/OTIO import) stay in the CLI crate
 //! and speak to this module only through the values they construct.
 
-use crate::edit::{self, EditError, History};
+use crate::edit::{self, EditError, EditOp, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
 use crate::time::{Seconds, frame_of, grid_time, secs_f64};
-use crate::timeline::{Effect, Segment, TrackKind, TransitionKind};
+use crate::timeline::{Effect, Segment, Track, TrackKind, TransitionKind};
 
 /// Default crossfade length, in project frames.
 pub const DEFAULT_TRANSITION_FRAMES: i64 = 12;
@@ -256,11 +256,11 @@ pub fn run_action(
     match action {
         Action::TrimIn { track, at, ripple } => {
             let batch = edit::trim_at_on(project, *track, *at, false, *ripple)?;
-            apply(project, history, batch, from)
+            apply_synced(project, history, *track, batch, from, Some(*at))
         }
         Action::TrimOut { track, at, ripple } => {
             let batch = edit::trim_at_on(project, *track, *at, true, *ripple)?;
-            apply(project, history, batch, from)
+            apply_synced(project, history, *track, batch, from, Some(*at))
         }
         Action::Split { track, at } => {
             let batch = edit::split_on(project, *track, *at)?;
@@ -275,7 +275,7 @@ pub fn run_action(
                 }
             };
             let batch = edit::insert_gap_on(project, *track, *at, frames)?;
-            apply(project, history, batch, from)
+            apply_synced(project, history, *track, batch, from, Some(*at))
         }
         Action::Transition {
             track,
@@ -308,7 +308,7 @@ pub fn run_action(
                 // keep it so the playhead can land in the new blend below.
                 let blend_id = project.next_clip_id();
                 let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
-                let mut out = apply(project, history, batch, from)?;
+                let mut out = apply_synced(project, history, *track, batch, from, None)?;
                 land_on_blend(project, *track, blend_id, &mut out);
                 return Ok(out);
             };
@@ -339,7 +339,7 @@ pub fn run_action(
                     playhead: None,
                 });
             };
-            let mut out = apply(project, history, batch, from)?;
+            let mut out = apply_synced(project, history, *track, batch, from, None)?;
             land_on_blend(project, *track, blend_id, &mut out);
             Ok(out)
         }
@@ -376,7 +376,7 @@ pub fn run_action(
         } => {
             let ti = resolve_track(project, *track, *target)?;
             let batch = delete_batch(project, ti, *target, *ripple)?;
-            apply(project, history, batch, from)
+            apply_synced(project, history, ti, batch, from, None)
         }
         Action::Yank { track, target } => {
             let ti = resolve_track(project, *track, *target)?;
@@ -428,7 +428,7 @@ pub fn run_action(
         Action::DeleteRange { track, start, end } => {
             let range_start = project.timeline.track(*track).map(|tr| tr.start_of(*start));
             let batch = edit::delete_range_on(project, *track, *start, *end)?;
-            let mut out = apply(project, history, batch, from)?;
+            let mut out = apply_synced(project, history, *track, batch, from, None)?;
             if let Some(at) = range_start {
                 out.playhead = Some(frame_of(project.fps.as_ref(), secs_f64(&at)));
             }
@@ -475,7 +475,7 @@ pub fn run_action(
             // the default for position-addressed targets, not a constraint).
             let ti = resolve_track(project, *track, Target::Clip(*clip))?;
             let batch = edit::set_speed_on(project, ti, *clip, *rate)?;
-            apply(project, history, batch, from)
+            apply_synced(project, history, ti, batch, from, None)
         }
         Action::Extend {
             track,
@@ -492,7 +492,7 @@ pub fn run_action(
             let batch = extend::commit_batch(project, *to, &armed, kind, *ripple, ti)?;
             // Undo attribution: like an extend-mode entry, the edit is
             // made from the edge it moved — undo returns there.
-            apply(project, history, batch, edge_pos)
+            apply_synced(project, history, ti, batch, edge_pos, Some(edge_pos))
         }
         Action::PurgeStumps { track } => purge_stumps(project, history, *track, from),
         Action::TrackAdd { kind } => {
@@ -567,6 +567,122 @@ fn is_base_video_track(project: &Project, track: usize) -> bool {
         .iter()
         .position(|t| t.kind == TrackKind::Video)
         == Some(track)
+}
+
+/// The shift a base-track edit causes on every other track: the old timeline
+/// position where the track's length changes and the signed delta. Comparing
+/// exact segment snapshots absorbs transition-handle restoration: the net
+/// delta is what followers move by.
+fn track_shift(old: &Track, new: &Track) -> Option<(Seconds, Seconds)> {
+    let mut prefix = 0;
+    while prefix < old.segments.len()
+        && prefix < new.segments.len()
+        && old.segments[prefix] == new.segments[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old.segments.len().saturating_sub(prefix)
+        && suffix < new.segments.len().saturating_sub(prefix)
+        && old.segments[old.segments.len() - 1 - suffix]
+            == new.segments[new.segments.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let old_end = old.start_of(old.segments.len() - suffix);
+    let new_end = new.start_of(new.segments.len() - suffix);
+    let delta = new_end - old_end;
+    if delta == Seconds::from_integer(0) {
+        None
+    } else {
+        Some((old_end, delta))
+    }
+}
+
+/// Shift every other track by the base edit's delta. Growth inserts a gap;
+/// shrink removes the span `[at + delta, at)`.
+fn shift_other_tracks(
+    project: &Project,
+    except: usize,
+    at: Seconds,
+    delta: Seconds,
+    next_id: &mut u32,
+) -> Result<Vec<EditOp>, String> {
+    if delta > Seconds::from_integer(0) {
+        return edit::ripple_other_tracks(project, except, secs_f64(&at), delta)
+            .map_err(|e| e.to_string());
+    }
+    let zero = Seconds::from_integer(0);
+    let start = {
+        let s = at + delta;
+        if s < zero { zero } else { s }
+    };
+    let mut ops = Vec::new();
+    for (ti, tr) in project.timeline.tracks.iter().enumerate() {
+        if ti == except || tr.segments.is_empty() || tr.end() <= start {
+            continue;
+        }
+        let batch = edit::remove_span_on(project, ti, start, at, next_id)
+            .map_err(|e| format!("{}: {e}", track_label(project, ti)))?;
+        ops.extend(batch.ops);
+    }
+    Ok(ops)
+}
+
+/// Compute the sync ops for a base-track batch. `growth_at` overrides the
+/// shift point for an edit that grows (extend's armed edge, a gap insert);
+/// shrink always removes at the end of the changed region.
+fn sync_ops(
+    project: &Project,
+    track: usize,
+    batch: &edit::Batch,
+    growth_at: Option<f64>,
+) -> Result<Vec<EditOp>, String> {
+    let old = project
+        .timeline
+        .track(track)
+        .ok_or_else(|| format!("track {} not found", track + 1))?;
+    let mut after = project.clone();
+    for op in &batch.ops {
+        op.apply(&mut after).map_err(|e| e.to_string())?;
+    }
+    let new = after
+        .timeline
+        .track(track)
+        .ok_or_else(|| format!("track {} not found", track + 1))?;
+    let Some((at, delta)) = track_shift(old, new) else {
+        return Ok(Vec::new());
+    };
+    let at = if delta > Seconds::from_integer(0) {
+        growth_at
+            .map(|g| grid_time(project.fps.as_ref(), g))
+            .unwrap_or(at)
+    } else {
+        at
+    };
+    let mut next = after.next_clip_id();
+    shift_other_tracks(project, track, at, delta, &mut next)
+}
+
+/// Apply a batch, extending it with the other-track shift when the target is
+/// the base video track. A sync that cannot be expressed (a transition
+/// boundary on another track) leaves that track local and says so; the base
+/// edit still lands.
+fn apply_synced(
+    project: &mut Project,
+    history: &mut History,
+    track: usize,
+    mut batch: edit::Batch,
+    from: f64,
+    growth_at: Option<f64>,
+) -> Result<Outcome, EditError> {
+    if is_base_video_track(project, track) {
+        match sync_ops(project, track, &batch, growth_at) {
+            Ok(ops) => batch.ops.extend(ops),
+            Err(reason) => batch.desc.push_str(&format!(" — sync skipped: {reason}")),
+        }
+    }
+    apply(project, history, batch, from)
 }
 
 /// Apply a batch as one undo step (the playhead `from` is recorded so

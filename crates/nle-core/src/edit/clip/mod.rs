@@ -749,6 +749,133 @@ pub fn ripple_other_tracks(
     Ok(ops)
 }
 
+/// Remove the timeline span `[start, end)` from `track`, leaving everything
+/// outside it untouched. This is the other-track half of a base-track sync
+/// ripple: a hard time removal, not a blend-aware delete, so a transition
+/// wholly inside the span is dropped without restoring its handles.
+pub fn remove_span_on(
+    project: &Project,
+    track: usize,
+    start: Seconds,
+    end: Seconds,
+    next_id: &mut u32,
+) -> Result<Batch, EditError> {
+    let tr = track_at(project, track)?;
+    let total = tr.end();
+    let zero = Seconds::from_integer(0);
+    let start = if start < zero { zero } else { start };
+    let end = if end > total { total } else { end };
+    if end <= start {
+        return Ok(Batch {
+            ops: Vec::new(),
+            desc: "sync ripple: nothing to remove".to_string(),
+        });
+    }
+    let before = tr.segments.clone();
+    let si = tr.index_at(start).ok_or(EditError::NoSegment)?;
+    let si_start = tr.start_of(si);
+    if matches!(before[si], Segment::Transition(_)) && start > si_start {
+        return Err(EditError::Transition);
+    }
+    let ei = if end >= total {
+        before.len()
+    } else {
+        tr.index_at(end).ok_or(EditError::NoSegment)?
+    };
+    if ei < before.len() {
+        let ei_start = tr.start_of(ei);
+        if matches!(before[ei], Segment::Transition(_)) && end > ei_start {
+            return Err(EditError::Transition);
+        }
+    }
+
+    let mut after = before[..si].to_vec();
+    if start > si_start {
+        let (left, _) = split_segment_at(project, &before[si], start - si_start, next_id)?;
+        after.push(left);
+    }
+    let mut suffix = Vec::new();
+    if end < total && end > tr.start_of(ei) {
+        let (_, right) = split_segment_at(project, &before[ei], end - tr.start_of(ei), next_id)?;
+        suffix.push(right);
+        suffix.extend_from_slice(&before[ei + 1..]);
+    } else {
+        suffix.extend_from_slice(&before[ei..]);
+    }
+    if let (Some(left), Some(right)) = (after.last(), suffix.first())
+        && let Some(merged) = merge_pair(left, right)
+    {
+        after.pop();
+        after.push(merged);
+        suffix.remove(0);
+    }
+    after.extend(suffix);
+    // A track cannot start or end with a blend: the removed span may have
+    // taken away the clip the transition borrowed its picture from.
+    if matches!(after.first(), Some(Segment::Transition(_)))
+        || matches!(after.last(), Some(Segment::Transition(_)))
+    {
+        return Err(EditError::Transition);
+    }
+    Ok(replace_track_batch(
+        track,
+        &before,
+        after,
+        format!(
+            "sync ripple (removed {} to {})",
+            stamp(project, &start),
+            stamp(project, &end)
+        ),
+    ))
+}
+
+/// Split one segment at a timeline offset. Transitions cannot be split; the
+/// caller guards those boundaries before calling.
+fn split_segment_at(
+    project: &Project,
+    seg: &Segment,
+    offset: Seconds,
+    next_id: &mut u32,
+) -> Result<(Segment, Segment), EditError> {
+    match seg {
+        Segment::Clip(c) => {
+            at_least_a_frame(project, &offset)?;
+            at_least_a_frame(project, &(c.duration() - offset))?;
+            let split = c.asset_in + source_span(c, offset);
+            let (left, right) = (
+                Clip {
+                    id: c.id,
+                    asset: c.asset,
+                    asset_in: c.asset_in,
+                    asset_out: split,
+                    speed: c.speed,
+                    effects: c.effects.clone(),
+                },
+                Clip {
+                    id: *next_id,
+                    asset: c.asset,
+                    asset_in: split,
+                    asset_out: c.asset_out,
+                    speed: c.speed,
+                    effects: c.effects.clone(),
+                },
+            );
+            *next_id = next_id.saturating_add(1);
+            Ok((Segment::Clip(left), Segment::Clip(right)))
+        }
+        Segment::Gap(g) => {
+            let (left, right) = (offset, g.duration - offset);
+            at_least_a_frame(project, &left)?;
+            at_least_a_frame(project, &right)?;
+            Ok((
+                Segment::Gap(Gap { duration: left }),
+                Segment::Gap(Gap { duration: right }),
+            ))
+        }
+        Segment::Transition(_) => Err(EditError::Transition),
+    }
+}
+
 /// Insert whole segments at any playhead, giving copied clips/transitions
 /// fresh ids. A playhead inside a clip or gap splits that segment first; a
 /// playhead inside a transition is refused because a blend owns both sides.
