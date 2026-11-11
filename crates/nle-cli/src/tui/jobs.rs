@@ -323,7 +323,11 @@ pub(crate) fn start_waveforms(app: &mut App) {
         .project
         .media
         .iter()
-        .filter(|a| a.probe.has_audio() && !app.waveforms.contains_key(&a.id))
+        .filter(|a| {
+            a.probe.has_audio()
+                && !app.waveforms.contains_key(&a.id)
+                && !app.waveform_failed.contains(&a.id)
+        })
         .cloned()
         .collect();
     if missing.is_empty() {
@@ -352,7 +356,11 @@ pub(crate) fn poll_waveforms(app: &mut App) {
             Ok((id, Ok(wave))) => {
                 app.waveforms.insert(id, wave);
             }
-            Ok((_, Err(e))) => {
+            Ok((id, Err(e))) => {
+                // A deterministic failure (corrupt/unsupported audio): don't
+                // respawn ffmpeg on every preview rebuild. A reload or a
+                // re-import clears the mark.
+                app.waveform_failed.insert(id);
                 crate::log::line(&format!("waveform load failed: {e}"));
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
