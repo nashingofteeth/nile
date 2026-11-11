@@ -561,6 +561,150 @@ fn extend_in_shifts_at_the_clip_start() {
     );
 }
 
+fn clip_ids(p: &Project) -> Vec<(usize, u32)> {
+    p.timeline
+        .tracks
+        .iter()
+        .enumerate()
+        .flat_map(|(ti, t)| {
+            t.segments.iter().filter_map(move |s| match s {
+                Segment::Clip(c) => Some((ti, c.id)),
+                Segment::Transition(t) => Some((ti, t.id)),
+                Segment::Gap(_) => None,
+            })
+        })
+        .collect()
+}
+
+fn assert_ids_unique(p: &Project) {
+    let ids = clip_ids(p);
+    let mut sorted = ids.iter().map(|&(_, id)| id).collect::<Vec<_>>();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        ids.len(),
+        "clip ids must stay unique across tracks (a split on one track must \
+         not reuse an id the base edit just handed out): {ids:?}"
+    );
+}
+
+// The sync ripple plans its gap inserts against the pre-edit project, so its
+// split halves must draw ids past the ones the base edit already took. With a
+// shared counter a clip-addressed action (`--clip`, `x`, extend) finds the
+// wrong track (`resolve_track` takes the first match).
+#[test]
+fn a_synced_gap_split_keeps_clip_ids_unique() {
+    let (mut p, _) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    // `at` 1 s is inside the audio clip too, so both tracks split.
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::InsertGap {
+            track: 0,
+            at: 1.0,
+            len: GapLen::Frames(30),
+        },
+        1.0,
+    )
+    .unwrap();
+    assert_ids_unique(&p);
+}
+
+#[test]
+fn a_synced_ripple_paste_keeps_clip_ids_unique() {
+    let (mut p, _) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    let pasted = Segment::Clip(Clip {
+        id: 0,
+        asset: 1,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(1),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Paste {
+            track: 0,
+            at: 1.0,
+            ripple: true,
+            segment: Some(pasted),
+        },
+        1.0,
+    )
+    .unwrap();
+    assert_ids_unique(&p);
+}
+
+// The audio track's split half is addressable by id: the delete lands on the
+// audio track, not on the base clip that used to share its id.
+#[test]
+fn a_synced_split_half_deletes_on_its_own_track() {
+    let (mut p, ai) = sync_pair();
+    let mut h = History::default();
+    let mut reg = None;
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::InsertGap {
+            track: 0,
+            at: 1.0,
+            len: GapLen::Frames(30),
+        },
+        1.0,
+    )
+    .unwrap();
+    // The audio right half is the clip whose source starts at 1 s.
+    let audio_id = p
+        .timeline
+        .track(ai)
+        .unwrap()
+        .segments
+        .iter()
+        .find_map(|s| match s {
+            Segment::Clip(c) if c.asset_in == Seconds::from_integer(1) => Some(c.id),
+            _ => None,
+        })
+        .expect("the audio track split at 1 s");
+    run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::Delete {
+            track: ai,
+            target: Target::Clip(audio_id),
+            ripple: false,
+        },
+        2.0,
+    )
+    .unwrap();
+    assert!(
+        !p.timeline
+            .track(ai)
+            .unwrap()
+            .segments
+            .iter()
+            .any(|s| matches!(s, Segment::Clip(c) if c.asset_in == Seconds::from_integer(1))),
+        "the delete removed the audio split half: {:?}",
+        p.timeline.track(ai).unwrap().segments
+    );
+    // The base track still has both halves (ids 1 and the split's fresh id).
+    assert_eq!(
+        p.timeline.video_track().unwrap().segments.len(),
+        4,
+        "the base track was untouched: {:?}",
+        p.timeline.video_track().unwrap().segments
+    );
+}
+
 // An overlay track is not the master sequence: a ripple insert there must
 // not push the base video track.
 #[test]

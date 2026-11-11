@@ -412,11 +412,16 @@ pub fn run_action(
                 // Inserts on an overlay/audio track stay local (layering a
                 // clip at 0 must not push the base right).
                 if is_base_video_track(project, *track) && !matches!(seg, Segment::Transition(_)) {
+                    // The base batch already took ids from the project
+                    // counter; start the sync above them so no two tracks
+                    // share a split-half id.
+                    let mut next = next_id_after(project, &batch)?;
                     batch.ops.extend(edit::ripple_other_tracks(
                         project,
                         *track,
                         *at,
                         seg.duration(),
+                        &mut next,
                     )?);
                 }
                 batch
@@ -461,9 +466,12 @@ pub fn run_action(
                 let dur = segments
                     .iter()
                     .fold(Seconds::from_integer(0), |acc, s| acc + s.duration());
-                batch
-                    .ops
-                    .extend(edit::ripple_other_tracks(project, *track, *at, dur)?);
+                // The range insert already took ids from the project counter;
+                // start the sync above them (see the Paste branch).
+                let mut next = next_id_after(project, &batch)?;
+                batch.ops.extend(edit::ripple_other_tracks(
+                    project, *track, *at, dur, &mut next,
+                )?);
             }
             let mut out = apply(project, history, batch, from)?;
             out.playhead = Some(frame_of(project.fps.as_ref(), *at));
@@ -609,7 +617,7 @@ fn shift_other_tracks(
     next_id: &mut u32,
 ) -> Result<Vec<EditOp>, String> {
     if delta > Seconds::from_integer(0) {
-        return edit::ripple_other_tracks(project, except, secs_f64(&at), delta)
+        return edit::ripple_other_tracks(project, except, secs_f64(&at), delta, next_id)
             .map_err(|e| e.to_string());
     }
     let zero = Seconds::from_integer(0);
@@ -627,6 +635,19 @@ fn shift_other_tracks(
         ops.extend(batch.ops);
     }
     Ok(ops)
+}
+
+/// The first free clip id once `batch` has been applied. The base edit draws
+/// ids from the project counter when it is planned, so the sync ripple must
+/// start above them — otherwise a split on another track reuses an id the
+/// base edit just handed out, and a clip-addressed action (`--clip`, `x`,
+/// extend) resolves to the wrong track.
+fn next_id_after(project: &Project, batch: &edit::Batch) -> Result<u32, EditError> {
+    let mut after = project.clone();
+    for op in &batch.ops {
+        op.apply(&mut after)?;
+    }
+    Ok(after.next_clip_id())
 }
 
 /// Compute the sync ops for a base-track batch. `growth_at` overrides the

@@ -717,12 +717,15 @@ fn restore_right(segment: &mut Segment, transition: &Transition) -> bool {
 /// Insert a gap of `dur` on every track except `except`, so a ripple insert
 /// keeps the timeline in sync. A track with nothing at or after `at` has
 /// nothing to shift; a blend at `at` takes the gap at its start rather than
-/// being split.
+/// being split. `next` is the shared id counter (see
+/// `insert_segments_on_with`): every split half takes a fresh id, so callers
+/// that planned other inserts against the same project must seed it past them.
 pub fn ripple_other_tracks(
     project: &Project,
     except: usize,
     at: f64,
     dur: Seconds,
+    next: &mut u32,
 ) -> Result<Vec<EditOp>, EditError> {
     if dur <= Seconds::from_integer(0) {
         return Ok(Vec::new());
@@ -738,11 +741,12 @@ pub fn ripple_other_tracks(
             Some(si) if matches!(tr.segments[si], Segment::Transition(_)) => tr.start_of(si),
             _ => at,
         };
-        let batch = insert_segments_on(
+        let batch = insert_segments_on_with(
             project,
             ti,
             secs_f64(&insert_at),
             std::slice::from_ref(&gap),
+            next,
         )?;
         ops.extend(batch.ops);
     }
@@ -886,13 +890,27 @@ pub fn insert_segments_on(
     at: f64,
     segments: &[Segment],
 ) -> Result<Batch, EditError> {
+    let mut next = project.next_clip_id();
+    insert_segments_on_with(project, track, at, segments, &mut next)
+}
+
+/// [`insert_segments_on`] drawing fresh ids from `next` instead of the
+/// project's own counter. A caller planning several inserts against the same
+/// pre-edit project (the base-track sync ripple) must share one counter, or
+/// two tracks end up with the same split-half id.
+pub(super) fn insert_segments_on_with(
+    project: &Project,
+    track: usize,
+    at: f64,
+    segments: &[Segment],
+    next: &mut u32,
+) -> Result<Batch, EditError> {
     if segments.is_empty() {
         return Err(EditError::NoSegment);
     }
     let t = snap(project, at)?;
     let tr = track_at(project, track)?;
-    let mut next = project.next_clip_id();
-    let payload = fresh_payload(segments, &mut next);
+    let payload = fresh_payload(segments, next);
     let desc = format!(
         "pasted {} segment(s) at {}",
         payload.len(),
@@ -949,13 +967,14 @@ pub fn insert_segments_on(
                 effects: c.effects.clone(),
             });
             let right = Segment::Clip(Clip {
-                id: next,
+                id: *next,
                 asset: c.asset,
                 asset_in: split_at,
                 asset_out: c.asset_out,
                 speed: c.speed,
                 effects: c.effects.clone(),
             });
+            *next = next.saturating_add(1);
             let mut pieces = vec![left];
             pieces.extend(payload);
             pieces.push(right);
