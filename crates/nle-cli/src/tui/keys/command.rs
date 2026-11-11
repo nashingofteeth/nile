@@ -72,7 +72,13 @@ pub(crate) fn split_paths(input: &str) -> Result<Vec<String>, String> {
 /// `:import PATH|DIR …` — expand paths/directories, then probe them on a
 /// worker. The pool write is one undo step (`u` removes the whole batch).
 pub(crate) fn import_command(app: &mut App, cmd: &str) -> String {
-    let rest = cmd.strip_prefix("import").unwrap_or("").trim();
+    // `io_command` already matched the verb case-insensitively; take the rest
+    // of the line rather than re-stripping the literal `import` (`:IMPORT`
+    // used to look argument-less).
+    let rest = cmd
+        .split_once(char::is_whitespace)
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
     if rest.is_empty() {
         return "usage: :import PATH|DIR … (Tab completes paths)".to_string();
     }

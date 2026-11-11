@@ -35,17 +35,23 @@ const BOOL_FLAGS: &[&str] = &["ripple", "range"];
 const SHORT_FLAGS: &[(&str, &str)] = &[("o", "out")];
 
 /// Split a command line into its verb and arguments.
+///
+/// Whitespace separates arguments; a quoted section (`"…"` or `'…'`) keeps
+/// its spaces and drops the quotes, and a backslash escapes the next
+/// character. The `:cmd` grammar is the CLI grammar, but there the shell has
+/// already done this split — in the TUI it is this tokenizer's job, so a
+/// Tab-completed path with spaces round-trips to `:import`/`:add`.
 pub fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
-    let mut it = input.split_whitespace();
-    let verb = it
-        .next()
-        .ok_or_else(|| ParseError::Invalid("empty command".into()))?
-        .to_lowercase();
-    let raw: Vec<&str> = it.collect();
+    let mut tokens = tokenize(input)?;
+    if tokens.is_empty() {
+        return Err(ParseError::Invalid("empty command".into()));
+    }
+    let verb = tokens.remove(0).to_lowercase();
+    let raw = tokens;
     let (mut opts, mut pos) = (Vec::new(), Vec::new());
     let mut i = 0;
     while i < raw.len() {
-        let tok = raw[i];
+        let tok = &raw[i];
         i += 1;
         let Some(name) = tok.strip_prefix("--") else {
             // `-o out.mp4`: a short flag with a known long form. Anything
@@ -65,10 +71,10 @@ pub fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
                     .get(i)
                     .ok_or_else(|| ParseError::Invalid(format!("{tok} needs a value")))?;
                 i += 1;
-                opts.push((name, Some((*v).to_string())));
+                opts.push((name, Some(v.clone())));
                 continue;
             }
-            pos.push(tok.to_string());
+            pos.push(tok.clone());
             continue;
         };
         let (name, inline) = match name.split_once('=') {
@@ -88,13 +94,73 @@ pub fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
                         .get(i)
                         .ok_or_else(|| ParseError::Invalid(format!("--{name} needs a value")))?;
                     i += 1;
-                    (*v).to_string()
+                    v.clone()
                 }
             })
         };
         opts.push((name, value));
     }
     Ok((verb, Flags { opts, pos }))
+}
+
+/// Split a command line on unquoted whitespace. Quotes are removed and
+/// backslashes escape the next character (inside double quotes too, matching
+/// `split_paths`); an unterminated quote or a trailing backslash is an error.
+fn tokenize(input: &str) -> Result<Vec<String>, ParseError> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else if q == '"' && ch == '\\' {
+                    escaped = true;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    started = true;
+                }
+                c if c.is_whitespace() => {
+                    if started {
+                        out.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    started = true;
+                }
+            },
+        }
+    }
+    if escaped {
+        return Err(ParseError::Invalid("trailing backslash".into()));
+    }
+    if let Some(q) = quote {
+        return Err(ParseError::Invalid(format!("unterminated {q} quote")));
+    }
+    if started {
+        out.push(cur);
+    }
+    Ok(out)
 }
 
 impl std::fmt::Display for ParseError {
