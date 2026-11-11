@@ -59,6 +59,10 @@ pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         .modifiers
         .contains(crossterm::event::KeyModifiers::CONTROL)
     {
+        // Panning never multiplies; drop a count typed for a motion so it
+        // cannot ride along to the next one (normal mode consumes it on
+        // every key).
+        app.count = None;
         match key.code {
             KeyCode::Char('b') => app.pan_timeline(-0.5),
             KeyCode::Char('f') => app.pan_timeline(0.5),
@@ -74,9 +78,18 @@ pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('d') => delete_selected(app, player, state),
         KeyCode::Char('y') => yank_selected(app, player, state),
         KeyCode::Char('p') => paste_selected(app, player, state),
-        KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_timeline(1.5),
-        KeyCode::Char('-') => app.zoom_timeline(1.0 / 1.5),
-        KeyCode::Char('z') => app.toggle_timeline_zoom(),
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            app.count = None;
+            app.zoom_timeline(1.5);
+        }
+        KeyCode::Char('-') => {
+            app.count = None;
+            app.zoom_timeline(1.0 / 1.5);
+        }
+        KeyCode::Char('z') => {
+            app.count = None;
+            app.toggle_timeline_zoom();
+        }
         // `V` selects the whole current segment (which is already the seed);
         // useful after extending the range.
         KeyCode::Char('V') => {
