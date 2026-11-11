@@ -121,6 +121,8 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - **The base video track is the master sequence.** A length-changing edit
   there shifts/removes the same span on every other track (`apply_synced`);
   overlay/audio edits stay local. A transition boundary skips with a notice.
+  Seed the sync's split ids from the base batch (`next_id_after`): a shared
+  counter gives two tracks the same id and `--clip` edits the wrong clip.
 - **Floors that shift a segment are slivers.** `insert_from_pool` floors an
   asset duration to whole frames (6.006 → 6.0) so later splits can't strand a
   sub-frame stump; the renderer skips zero-width segments.
