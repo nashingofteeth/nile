@@ -24,7 +24,7 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
         edit::History::load_project(project_path).unwrap_or_default(),
     );
     let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
-    let (files, errors) = expand_import_paths(files);
+    let (files, mut errors) = expand_import_paths(files);
     for e in &errors {
         say!("· {e}");
     }
@@ -34,12 +34,25 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
 
     let mut fresh: Vec<(PathBuf, nle_core::media::RawProbe)> = Vec::new();
     for file in files {
-        let report = probe(&file).with_context(|| format!("importing {}", file.display()))?;
+        // Dedup before probing: re-importing a directory must not spawn
+        // ffprobe for every file already in the pool.
         if let Some(a) = doc.asset_by_path(&file) {
             say!("· {} already imported (asset #{})", file.display(), a.id);
             continue;
         }
-        fresh.push((file, report));
+        match probe(&file) {
+            Ok(report) => fresh.push((file, report)),
+            // One unreadable file must not abort the rest of the batch (the
+            // TUI reports per file and imports the good ones the same way).
+            Err(e) => {
+                let msg = format!("importing {}: {e}", file.display());
+                say!("· {msg}");
+                errors.push(msg);
+            }
+        }
+    }
+    if fresh.is_empty() && !errors.is_empty() {
+        bail!("{}", errors.join("; "));
     }
     let imported_paths: Vec<PathBuf> = fresh.iter().map(|(p, _)| p.clone()).collect();
     // One undo entry for the whole command: `nile undo` peels the batch.

@@ -233,6 +233,18 @@ fn finish_import(
     outcomes: Vec<ImportOutcome>,
     mut errors: Vec<String>,
 ) {
+    // A shell may have written the project while we probed — an import is
+    // seconds long and pool mode holds foreign adoption. Saving over it would
+    // silently drop that edit, so adopt first (the import then re-dedups
+    // against the reloaded pool).
+    if app.external_change()
+        && let Err(e) = reload_project(app, player, true)
+    {
+        let mut msg = format!("import failed: reload failed: {e}");
+        append_errors(&mut msg, &errors);
+        app.fail(&msg);
+        return;
+    }
     let playhead = nle_core::frame_of(app.project.fps.as_ref(), app.playhead);
     let mut fresh = Vec::new();
     let mut existing = 0usize;
