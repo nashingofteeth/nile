@@ -118,9 +118,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   at/past the end is one gap (`append_at_end`) — never two adjacent gaps.
   `e`/`E`/`[`/`]` must agree on a leading gap's `GapHead`; retire redundant
   variants so paths can't drift.
-- **The base video track is the master sequence.** A ripple insert there
-  (`ripple_other_tracks`) shifts every other track by the inserted span;
-  overlay/audio inserts stay local. Multi-track batches are one `Change::Tracks`.
+- **The base video track is the master sequence.** A length-changing edit
+  there shifts/removes the same span on every other track (`apply_synced`);
+  overlay/audio edits stay local. A transition boundary skips with a notice.
 - **Floors that shift a segment are slivers.** `insert_from_pool` floors an
   asset duration to whole frames (6.006 → 6.0) so later splits can't strand a
   sub-frame stump; the renderer skips zero-width segments.
@@ -147,8 +147,8 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   `add_assets` / `remove_asset`, `edit_tracks`) record; only whole-project
   rebuilds (`init`, `import-*`, `detect-edits`) re-baseline it via
   `save_and_reset_history`, or the next undo refuses ("history entry does not
-  apply"). Both stacks persist. Track add/mute/rm are whole-list changes
-  (`Change::Tracks`), verified by exact equality.
+  apply"). Both stacks persist. Track add/mute/rm and multi-track sync ripples
+  are whole-list changes (`Change::Tracks`), verified by exact equality.
 - **State lives with the project.** `nile.json` plus `.nile/<stem>/`
   (`history.json`, `clipboard.json`, `cache/`); `nile default FILE` sets a
   directory default (`.nile/config.json`), `--project` overrides. Legacy

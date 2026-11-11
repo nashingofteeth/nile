@@ -110,9 +110,10 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 - **Ops:** every track-resolving edit op is `*_on(project, track, …)`; the
   unsuffixed name wraps the first video track. A stale index returns
   `TrackNotFound` (never panics).
-- **Sync ripple:** a ripple insert on the first video track shifts every
-  other track by the inserted span; inserts on overlay/audio tracks stay
-  local. Multi-track edits record as one `Change::Tracks` entry.
+- **Sync ripple:** a length-changing edit on the first video track shifts or
+  removes the same span on every other track; overlay/audio edits stay local.
+  A transition boundary on another track skips sync with a notice. Multi-track
+  edits record as one `Change::Tracks` entry.
 - **Export:** one video track with no audio track keeps the classic concat
   path **byte-for-byte**; otherwise each track is padded to the timeline
   length and video layers composite bottom→top with `overlay` (upper gaps
@@ -427,3 +428,5 @@ trimming of a transition's own span (retime it with `x`/`X`,
 ## Open decisions (non-blocking)
 
 1. M7 GUI technology.
+2. Per-track sync lock: let an overlay/audio track opt in or out of the base
+   track's ripple. Current rule: the first video track is always the master.
