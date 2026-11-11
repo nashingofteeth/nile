@@ -801,3 +801,38 @@ fn pool_jumps_to_source_marks() {
     handle_key(&mut app, &fake, key('O'));
     assert_eq!(app.message, "no out mark");
 }
+
+// Asset ids are reused (`next_asset_id` is max + 1). Removing an asset must
+// drop its id-keyed caches, or a later import of a different file draws the
+// removed one's waveform and walks its keyframes.
+#[test]
+fn removing_an_asset_prunes_its_cached_waveform() {
+    use super::super::actions::run_action;
+    use nle_core::action::Action;
+    let mut app = App::new(asset_project(), temp_project_path("cache-prune"));
+    app.loaded = true;
+    let probe = app.project.media[0].probe.clone();
+    let (id, _) = app.project.add_asset("/media/spare.mp4".into(), probe, 0);
+    app.waveforms.insert(
+        id,
+        crate::waveform::Waveform {
+            peaks: vec![0.5],
+            duration: 1.0,
+        },
+    );
+    app.keyframes.insert(id, vec![1.0]);
+    app.thumbnails
+        .insert(id, crate::thumbnails::Thumbnail { rgb: vec![0; 4] });
+    app.pool_marks.insert(id, PoolMarks::default());
+    let fake = FakeMpv::new();
+    assert!(run_action(&mut app, &fake, &Action::AssetRm { id }));
+    assert!(app.project.asset(id).is_none(), "the spare left the pool");
+    assert!(
+        app.waveforms.is_empty(),
+        "stale waveform: {:?}",
+        app.waveforms
+    );
+    assert!(app.keyframes.is_empty(), "stale keyframes");
+    assert!(app.thumbnails.is_empty(), "stale thumbnail");
+    assert!(app.pool_marks.is_empty(), "stale source marks");
+}

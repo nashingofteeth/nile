@@ -16,8 +16,8 @@ use crate::mpv::Mpv;
 use super::croc::CrocAct;
 use super::jobs::start_preview;
 use super::{
-    App, Mode, is_pool, load_pool_preview_at, persist_playhead, pool_pos, pool_sel, reload_project,
-    secs, set_pool_sel,
+    App, Mode, forget_missing_assets, is_pool, load_pool_preview_at, persist_playhead, pool_pos,
+    pool_sel, reload_project, secs, set_pool_sel,
 };
 /// The clip the playhead sits inside, if any.
 pub(crate) fn clip_under(project: &Project, t: f64, ti: usize) -> Option<&Clip> {
@@ -457,6 +457,9 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
     } else {
         app.note_history();
     }
+    // An asset removed (or an undone import) frees its id; drop any cache
+    // entries so a later import that reuses the id starts clean.
+    forget_missing_assets(app);
     if is_pool(app) {
         // A remove/undo changed the list; keep the selection in range and
         // reload the (possibly different) asset. Doing this here is why an

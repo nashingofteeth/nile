@@ -297,6 +297,9 @@ pub struct App {
     job: Option<Job>,
     /// Cached peak arrays for the waveform strip, by asset id.
     pub(crate) waveforms: HashMap<u32, Waveform>,
+    /// Assets whose waveform decode already failed: don't respawn ffmpeg on
+    /// every preview rebuild (a corrupt file fails the same way each time).
+    pub(crate) waveform_failed: std::collections::HashSet<u32>,
     /// The waveform decode worker, if one is running.
     wave_job: Option<WaveJob>,
     /// Cached keyframe timestamps for the pool preview, by asset id.
@@ -362,6 +365,7 @@ impl App {
             timeline_width: 80,
             job: None,
             waveforms: HashMap::new(),
+            waveform_failed: std::collections::HashSet::new(),
             wave_job: None,
             keyframes: HashMap::new(),
             keyframe_job: None,
@@ -1068,6 +1072,20 @@ fn persist_playhead(app: &mut App) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Drop cache entries for assets no longer in the pool. Asset ids are reused
+/// (`next_asset_id` is max + 1), so without this a newly imported asset draws
+/// the removed one's waveform / thumbnail, and `J`/`K` walk its keyframes.
+/// `reload_project` clears the maps outright (the media may have changed on
+/// disk); an in-app edit only needs the dead ids gone.
+fn forget_missing_assets(app: &mut App) {
+    let ids: std::collections::BTreeSet<u32> = app.project.media.iter().map(|a| a.id).collect();
+    app.waveforms.retain(|id, _| ids.contains(id));
+    app.waveform_failed.retain(|id| ids.contains(id));
+    app.keyframes.retain(|id, _| ids.contains(id));
+    app.thumbnails.retain(|id, _| ids.contains(id));
+    app.pool_marks.retain(|id, _| ids.contains(id));
+}
+
 /// Decide what to do about a foreign write to the shared files: adopt it
 /// now (Normal mode), or hold it until the mode ends — modes hold indices
 /// into the current state. Returns whether a reload should run now.
@@ -1113,6 +1131,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     // Re-key both caches against the reloaded timeline; a dropped receiver
     // simply discards a stale worker's results.
     app.waveforms.clear();
+    app.waveform_failed.clear();
     app.wave_job = None;
     app.keyframes.clear();
     app.keyframe_job = None;
