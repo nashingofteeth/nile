@@ -33,6 +33,7 @@ mod waveform;
 // Declared after the macros: a child module only sees a macro_rules! that
 // precedes the `mod` declaration.
 mod cmd;
+mod serve;
 
 /// Print a line, tolerating a closed consumer (`nile show | head`). Rust
 /// ignores `SIGPIPE`, so `say!` *panics* on the broken pipe; a Unix
@@ -535,6 +536,13 @@ enum Cmd {
         track: Option<usize>,
     },
 
+    /// Serve the project over JSON-RPC 2.0 on stdio (one object per line)
+    Serve {
+        /// Use stdio (the only transport for now)
+        #[arg(long)]
+        stdio: bool,
+    },
+
     /// Show what's inside a media file (streams, codecs, rates)
     Probe {
         /// Media file to inspect
@@ -705,6 +713,7 @@ fn main() -> Result<()> {
             dump_keys,
         } => return cmd_edit(&project, *dump, dump_size, dump_keys),
         Cmd::Edl { track } => return cmd_edl(&project, *track),
+        Cmd::Serve { stdio } => return serve::cmd_serve(&project, *stdio),
         Cmd::Init { force } => return cmd_init(&project, *force),
         Cmd::Import { files } => return cmd_import(&project, files),
         Cmd::Add {

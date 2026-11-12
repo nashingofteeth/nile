@@ -20,6 +20,7 @@ tui = ["dep:ratatui", "dep:crossterm"]
 [dependencies]
 nle-core = { path = "../nle-core" }
 nle-ffmpeg = { path = "../nle-ffmpeg" }
+nle-protocol = { path = "../nle-protocol" }
 clap.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
