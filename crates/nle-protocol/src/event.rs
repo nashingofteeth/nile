@@ -49,7 +49,7 @@ impl Event {
         let Notification { method, params, .. } = notification;
         let empty = params.is_null() || params.as_object().is_some_and(|o| o.is_empty());
         let encoded = if params.is_null() {
-            json!({ "method": method.as_str() })
+            json!({ "method": method.as_str(), "params": {} })
         } else {
             json!({ "method": method.as_str(), "params": params })
         };
