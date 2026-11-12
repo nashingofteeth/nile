@@ -414,3 +414,49 @@ fn failed_undo_keeps_its_history_entry() {
     assert!(h.undo(&mut p).is_ok());
     assert_eq!(h.depth(), 0);
 }
+
+#[test]
+fn history_entries_carry_actor_and_timestamp() {
+    let mut p = fixture();
+    let mut h = History::default();
+    assert_eq!(h.actor(), &Actor::Human);
+
+    let batch = split(&p, 4.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let entry = h.state().done.last().unwrap().clone();
+    assert_eq!(entry.provenance().actor, Actor::Human);
+    assert!(entry.provenance().at > 0, "a wall-clock timestamp");
+    let undone = h.undo(&mut p).unwrap();
+    assert_eq!(undone.provenance, *entry.provenance());
+
+    h.set_actor(Actor::Agent("planner".into()));
+    let batch = trim_in(&p, 1.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let state = h.state();
+    let entry = state.done.last().unwrap();
+    assert!(matches!(
+        &entry.provenance().actor,
+        Actor::Agent(name) if name == "planner"
+    ));
+}
+
+#[test]
+fn provenance_round_trips_through_the_sidecar() {
+    let mut p = fixture();
+    let mut h = History::default();
+    h.set_actor(Actor::Analysis("sampler".into()));
+    let batch = split(&p, 4.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let before = h.state().done.last().unwrap().provenance().clone();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nle.history.json");
+    h.save(&path).unwrap();
+    let loaded = History::load(&path).unwrap();
+    let after = loaded.state().done.last().unwrap().provenance().clone();
+    assert_eq!(after, before);
+    assert!(matches!(
+        after.actor,
+        Actor::Analysis(name) if name == "sampler"
+    ));
+}
