@@ -2,8 +2,11 @@
 
 Project and command: **nile**. Status: **M5 shipped; post-M5 polish shipped;
 M6 shipped** (presets, bench and the opt-in chunk scheduler/cache; auto stays
-single-worker until a workload shows a win). This file is the design/roadmap;
-the README is the user-facing how-to. Keep it in sync as milestones land.
+single-worker until a workload shows a win). **Next: pre-merge engine
+readiness** (sequences, protocol, time maps, annotations, keyframed effects,
+render reports, analysis jobs) so `clip-generator` can merge as a domain
+toolkit rather than a second engine. This file is the design/roadmap; the
+README is the user-facing how-to. Keep it in sync as milestones land.
 
 **Post-M5 additions:** transparent crop/scale masking and the offset effect
 (lower tracks show through); a TUI effects panel with one effect per kind,
@@ -84,6 +87,7 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **M4** | Multi-track + separate audio tracks | ✅ done |
 | **M5** | Transitions (`xfade`/`acrossfade`) + per-clip effects + proxy cache | ✅ done |
 | **M6** | Export scheduler (3 lanes), segment-parallel, `nile bench`, presets, resume+cache | shipped (scheduler opt-in) |
+| **Pre-merge** | Engine readiness for clipgen: sequences, protocol, time maps, annotations, keyframed effects, render reports, analysis jobs | next |
 | **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
 ### M3 — shipped (beyond the original scope)
@@ -421,6 +425,150 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - `:import PATH|DIR …` parses quoted paths, expands `~`, expands a directory
   to its immediate media files, and probes on a worker with progress.
 - A batch import is one undo step; the last new asset is selected in the pool.
+
+## Pre-merge — clipgen engine readiness (next)
+
+`~/clip-generator` (live-show ingest → transcript/CV mining → angle/crop
+planning → feedback cases → verification) merges into nile as a **domain
+toolkit** on top of the engine, not as a second pipeline. The engine work
+lands first so the merge is a port, not an integration.
+
+**Merge-ready means:** one project with several sequences, source↔timeline
+time maps and first-class annotations; an analysis job runs through nile and
+caches its results; a deliverable renders with a report that maps output
+frames back to the edit; all of it is reachable over a revisioned protocol
+shared by the TUI and agents — with no clipgen code present.
+
+### 0. Workspace, revisions, fixtures
+
+- Split the binary: `nle-protocol` (request/response/event types + client and
+  server, serde only) and keep the TUI in `nle-cli` for now. New domain
+  crates later: `nle-analysis`, `nle-director`. Keep the dependency freeze:
+  no async runtime, blocking stdio/socket threads suffice.
+- `Document` gains a monotonic `revision`; every apply/save bumps it. History
+  entries carry `{ actor, label, at }` provenance. This is the substrate for
+  protocol compare-and-swap and human/agent review.
+- `fixtures/` + a golden harness: a synthetic 2-cam show (program, mic, ATEM
+  switcher log, tiny Resolve project/EDL) with expected project JSON, EDL,
+  frame counts and sampled-frame PSNR, wired into `scripts/check.sh`.
+
+### 1. Sequences (blocking)
+
+- `Project { media, sequences, active }`; `Sequence { id, name, fps, video,
+  tracks, playhead }`. Output settings move onto the sequence so a 16:9 and a
+  9:16 deliverable (later a lesson) can coexist; project version bump.
+- History is sequence-scoped (`histories: BTreeMap<SequenceId, History>`), so
+  undo never mixes sequences. Actions stay unchanged: sequence is session
+  scope, resolved like the active track (`--sequence`, TUI switch, protocol
+  param).
+- `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
+  land now; derived sequences come later but must be traceable from day one.
+- Export takes a sequence; proxy/export caches key per sequence.
+- **Gate:** demo + EDL/OTIO builds `sequences[0]`; two sequences with
+  different sizes export; the TUI switches and undo is isolated.
+
+### 2. Protocol (blocking)
+
+- NDJSON JSON-RPC over `--stdio` or `.nile/<stem>/session.sock`; methods are
+  the action catalog plus reads (`project.show`, `timeline.edl`), jobs,
+  sequences and media: `action.preview`, `action.apply` (batched),
+  `undo/redo`, `sequence.*`, `media.*`, `job.*`.
+- `action.preview` applies a batch to a cloned `Document` and returns the
+  diff + warnings; `action.apply` is atomic and returns the new revision.
+  A mismatched `base_revision` is a typed conflict with the diff.
+- `nile serve` is the single writer when open; one-shot CLI stays file-based;
+  the TUI attaches to the server. Events: `project.changed`,
+  `sequence.changed`, `job.progress`, `annotation.added`, `playhead`.
+- **Gate:** protocol contract tests with golden JSON; the action slot-parity
+  test also walks the protocol; two writers get a clean conflict.
+
+### 3. Time maps + media groups (blocking)
+
+- `TimeMap` in `nle-core`: exact rationals, piecewise linear, gaps and
+  trimmed spans; `map`, `inverse`, `compose`, `map_range`. Property tests for
+  round-trip and boundary exactness.
+- `MediaGroup`: the ordered parts of one logical recording (MIC 1 01..N,
+  CAM 3 01..N) with per-part offsets; a map resolves group time to
+  `(asset, file time)`. This is the multi-part support the importers and
+  every analysis consumer need.
+- Importers emit maps alongside clips from the start; `nile show --json`
+  exposes the mapping so it is exercised, not dead code.
+- **Gate:** group → timeline → `(part, seek)` → back is exact; a wall time
+  inside a trimmed gap maps to "no media"; a multi-part fixture round-trips.
+
+### 4. Annotations (blocking)
+
+- `Annotation { id, sequence, kind, anchor, payload, provenance, status }`;
+  `Anchor = Source { group/asset, time } | Timeline { range }`.
+  Kinds: `Note`, `Expectation`, `Directive`, `Marker`, `Chapter`, `PlanSpan`,
+  `CropPlan`, `AnglePlan`. Large derived data (transcripts, CV) stays in a
+  content-addressed analysis store referenced by range/hash, never in
+  `nile.json`.
+- Timeline-anchored annotations remap with the same span transform as clips
+  on trim/split/ripple/paste, recorded in the undo `Change`; source-anchored
+  data survives edits for free.
+- Expectations are typed payloads (`cam`, `cropStable`, `workInFrame`,
+  `wordsComplete`, `absent`, `noSliver`, …) evaluated against a render
+  report. Protocol + TUI add/list/resolve; provenance shows human/model/
+  analysis.
+- **Gate:** ripple/split/trim/undo move timeline annotations while source
+  annotations stay put; a note round-trips through the protocol and is
+  visible in the TUI.
+
+### 5. Render: keyframed effects, audio post, reports, jobs (blocking)
+
+- `Effect::Crop` gains keyframes (`x`, `y`, `h`). The renderer groups passes
+  by constant `crop_h` (closed rung set), animates position with a filter
+  expression, snaps pass bounds to the frame grid and splits at camera cuts;
+  proxy hashes include the keys. `demo.sh` gets a pixel check.
+- Audio post becomes sequence settings: loudness normalization, speech-safe
+  fades, PCM joins with one AAC encode at the final mux (the chunk scheduler
+  already has the join discipline; reuse it here).
+- `RenderReport { sequence, revision, output, fps, frame_count, frame_map,
+  segments, windows, code }` beside the output or under
+  `.nile/<stem>/renders/`. The frame map maps output time back to
+  sequence/source — the basis for notes on a delivered file.
+- Jobs are persistent, observable and cancellable, with progress events and
+  retained reports; the TUI job list becomes the real queue.
+- **Gate:** a keyframed crop export is frame-exact and its report maps a
+  moved note to the right frame; a cancelled job leaves no half-written
+  deliverable.
+
+### 6. Analysis sampling + sidecar contract (supporting)
+
+- `nle-ffmpeg` samples frames/audio on demand into packed buffers/files with
+  a content-addressed cache (same key discipline as proxies/keyframes:
+  path + mtime + version + params). Sidecars consume packed data, not
+  per-frame JPEGs.
+- Define the sidecar contract (NDJSON requests + packed raw frames) and prove
+  it with one trivial analyzer before any ML arrives; ML stays out of process
+  and out of the Rust dependency graph.
+
+### 7. Toolkit hooks (after the core)
+
+- Derived sequences (`sequence derive --from … --preset 9x16`), export
+  presets per sequence, batch render jobs.
+- Marker/chapter annotations in the TUI; transcript and text-based editing
+  build on annotations + time maps later.
+- `nile mcp` as a thin protocol adapter; a review/log view that shows
+  history entries with actor and provenance.
+- Import completeness: additive EDL/OTIO import, audio-only EDL, multi-part
+  grouping (the ingest foundation for clipgen).
+
+### Non-goals before the merge
+
+No transcripts, CV, LLM calls, selection/crop **policy**, show-folder
+assumptions, "social" concepts, course features, titles or nested sequences
+in `nle-core`. Those belong to the toolkit on top; keeping the core generic
+is what makes the merge modular.
+
+### Order and merge gate
+
+Workspace/revisions/fixtures → sequences → protocol → time maps →
+annotations → render (keyframes, audio, reports, jobs) → sampling contract →
+toolkit hooks. Do not start the clipgen port until the merge-ready sentence
+above is true; then port ingest, planners and cases against the protocol and
+prove parity with the existing renders in `fixtures/`.
 
 ## Open / deferred
 
