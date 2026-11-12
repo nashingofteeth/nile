@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 struct Fake {
     revision: u64,
     events: Vec<Event>,
+    last_from: Option<Seconds>,
 }
 
 impl Fake {
@@ -22,6 +23,7 @@ impl Fake {
         Self {
             revision,
             events: Vec::new(),
+            last_from: None,
         }
     }
 
@@ -50,11 +52,12 @@ impl Handler for Fake {
                 from,
             } => {
                 self.check(*base_revision)?;
+                self.last_from = *from;
                 Ok(Reply::Outcome(Outcome {
                     revision: self.revision,
                     desc: format!("preview {}", action.slot()),
                     changed: true,
-                    playhead: *from,
+                    playhead: None,
                 }))
             }
             Call::ActionApply {
@@ -63,8 +66,12 @@ impl Handler for Fake {
                 from,
             } => {
                 self.check(*base_revision)?;
+                self.last_from = *from;
                 self.revision += 1;
-                let playhead = from.unwrap_or(Seconds::new(1, 2));
+                // The real handler computes this from nle_core::Outcome
+                // frames (a blend midpoint, the trimmed edge); it must not
+                // echo the request anchor.
+                let playhead = Seconds::new(5, 2);
                 self.events.push(Event::ProjectChanged {
                     revision: self.revision,
                 });
@@ -219,24 +226,34 @@ fn apply_moves_the_revision_and_preview_does_not() {
             revision: 8,
             desc: "applied 2".into(),
             changed: true,
-            playhead: Some(Seconds::new(1, 2)),
+            playhead: Some(Seconds::new(5, 2)),
         })
     );
 }
 
 #[test]
-fn the_anchor_is_used_as_the_playhead_and_undo_position() {
+fn the_anchor_is_an_input_and_the_playhead_is_the_result() {
+    let mut fake = Fake::new(7);
     let (reply, _) = exchange(
-        &mut Fake::new(7),
+        &mut fake,
         Call::ActionApply {
             base_revision: 7,
             action: Action::Split { track: 0, at: 1.5 },
             from: Some(Seconds::new(3, 2)),
         },
     );
+    assert_eq!(
+        fake.last_from,
+        Some(Seconds::new(3, 2)),
+        "the handler sees the undo anchor"
+    );
     match reply.expect("apply") {
         Reply::Outcome(outcome) => {
-            assert_eq!(outcome.playhead, Some(Seconds::new(3, 2)));
+            assert_eq!(
+                outcome.playhead,
+                Some(Seconds::new(5, 2)),
+                "the outcome is the edit's playhead, not the anchor"
+            );
         }
         other => panic!("expected an outcome, got {other:?}"),
     }
@@ -427,7 +444,7 @@ fn the_server_writes_the_response_before_its_events() {
     assert_eq!(
         client.next_event().expect("event"),
         Some(Event::Playhead {
-            at: Seconds::new(1, 2)
+            at: Seconds::new(5, 2)
         })
     );
 }
