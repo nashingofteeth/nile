@@ -249,6 +249,21 @@ fn all_actions() -> Vec<Action> {
 }
 
 #[test]
+fn unknown_action_fields_are_refused() {
+    let typo = serde_json::json!({
+        "action": "paste",
+        "track": 0,
+        "at": 1.0,
+        "ripple": false,
+        "segmnt": {"Gap": {"duration": "1/1"}}
+    });
+    assert!(
+        serde_json::from_value::<Action>(typo).is_err(),
+        "a typo in an optional field must not silently become None"
+    );
+}
+
+#[test]
 fn every_catalog_slot_has_a_wire_form() {
     let actions = all_actions();
     assert_eq!(

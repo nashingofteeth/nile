@@ -69,7 +69,7 @@ pub enum TransitionLen {
 /// `nle-protocol` sends catalog actions, not a parallel DTO, so a new
 /// variant is immediately addressable over the protocol.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     /// Move the in-edge of the segment under `at` (`i`; `ripple` = `I`).
     TrimIn {
