@@ -189,6 +189,11 @@ pub fn video_encode_args(encoder: Encoder, crf: u8, preset: &str, bitrate: &str)
         Encoder::VideoToolbox => {
             a.push("-c:v".into());
             a.push("h264_videotoolbox".into());
+            // Hardware is preferred; this only permits Apple's software
+            // encoder when the media engine is busy or absent (a VM), where
+            // the alternative is discarding the render and retrying on CPU.
+            a.push("-allow_sw".into());
+            a.push("1".into());
             a.push("-b:v".into());
             a.push(bitrate.into());
         }
@@ -516,6 +521,8 @@ mod tests {
         let line = args.join(" ");
         assert!(line.contains("-c:v h264_videotoolbox"), "{line}");
         assert!(line.contains("-b:v 8M"), "{line}");
+        // VT's own software encoder is the last resort before libx264.
+        assert!(line.contains("-allow_sw 1"), "{line}");
         // No device init: VT accepts software nv12/yuv420p and uploads itself.
         assert!(!line.contains("-init_hw_device"), "{line}");
         assert!(!line.contains("hwupload"), "{line}");
