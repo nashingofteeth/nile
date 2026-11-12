@@ -425,6 +425,9 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - `:import PATH|DIR …` parses quoted paths, expands `~`, expands a directory
   to its immediate media files, and probes on a worker with progress.
 - A batch import is one undo step; the last new asset is selected in the pool.
+- **Deferred:** remember the last import directory across restarts; extend Tab
+  completion to the other path-taking commands; add yazi preview/key hints;
+  revisit fzf as an alternate picker (yazi is the current one).
 
 ## Pre-merge — clipgen engine readiness (next)
 
@@ -445,12 +448,16 @@ shared by the TUI and agents — with no clipgen code present.
   server, serde only) and keep the TUI in `nle-cli` for now. New domain
   crates later: `nle-analysis`, `nle-director`. Keep the dependency freeze:
   no async runtime, blocking stdio/socket threads suffice.
-- `Document` gains a monotonic `revision`; every apply/save bumps it. History
-  entries carry `{ actor, label, at }` provenance. This is the substrate for
-  protocol compare-and-swap and human/agent review.
+- `Document` gains a monotonic `revision`; model mutations (edits, asset/track
+  changes, undo/redo) bump it, but playhead-only saves do not. History entries
+  carry `{ actor, label, at }` provenance. This is the substrate for protocol
+  compare-and-swap and human/agent review.
 - `fixtures/` + a golden harness: a synthetic 2-cam show (program, mic, ATEM
   switcher log, tiny Resolve project/EDL) with expected project JSON, EDL,
   frame counts and sampled-frame PSNR, wired into `scripts/check.sh`.
+- **Order within step 0:** revision + provenance first, then the
+  `nle-protocol` skeleton, then fixtures. These are breaking format changes:
+  close any live TUI before testing and rebuild old projects.
 
 ### 1. Sequences (blocking)
 
@@ -577,10 +584,14 @@ prove parity with the existing renders in `fixtures/`.
 - Strips are 64×4 RGB sprites sampled across each clip's source span, cached
   under `.nile/<stem>/cache/filmstrip/` and extracted on a worker. They show
   raw source frames; effects are not baked.
+- Extraction decodes the clip's source span; very long spans can be slow.
+  Keyframe-only sampling is a possible later optimization.
 
 ## Open / deferred
 
 - M7 GUI.
+- Tooling: make `demo.sh`/`scripts/check.sh` use a temporary sandbox or refuse
+  while a live TUI is attached, so a check cannot wipe a live demo project.
 
 ## Open decisions (non-blocking)
 
