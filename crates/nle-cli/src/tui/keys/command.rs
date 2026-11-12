@@ -13,14 +13,14 @@ use nle_core::{History, frame_of, track_label};
 use crate::mpv::Mpv;
 
 use super::super::actions::{clip_under, run_action};
-use super::super::jobs::{start_import, start_job};
+use super::super::jobs::{start_filmstrips, start_import, start_job};
 use super::super::keys::pool::leave_pool_command;
 use super::super::motion::fmt_timecode;
 use super::super::{App, Mode, persist_playhead, secs};
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :cache · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :cache · :filmstrip · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// Split a `:import` argument string into paths. Quoted paths keep their
 /// spaces; a backslash escapes the next character, so `a\ b.mp4` works too.
@@ -111,6 +111,7 @@ pub(crate) fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<S
         "media" => Some(media_ls_command(app)),
         "track" => Some(track_ls_command(app)),
         "cache" => cache_command(app, &mut f),
+        "filmstrip" => filmstrip_command(app, &mut f),
         "reload" => {
             app.reload_requested = true;
             None
@@ -602,6 +603,26 @@ pub(crate) fn track_ls_command(app: &App) -> String {
         .join(" · ")
 }
 
+/// `:filmstrip [on|off]` — toggle the two-row timeline strips. Session-only;
+/// `--dump` and tests start compact.
+pub(crate) fn filmstrip_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
+    const USAGE: &str = "usage: :filmstrip [on|off]";
+    let on = match f.positional().as_deref() {
+        None => !app.filmstrip_enabled,
+        Some("on") => true,
+        Some("off") => false,
+        Some(other) => return Some(format!(":filmstrip expects on|off, got {other:?}")),
+    };
+    if let Err(e) = f.finish(USAGE) {
+        return Some(e.to_string());
+    }
+    app.filmstrip_enabled = on;
+    if on {
+        start_filmstrips(app);
+    }
+    Some(format!("filmstrips {}", if on { "on" } else { "off" }))
+}
+
 /// `:cache prune [--days N] [--dry-run]` — delete old proxy renders. Not an
 /// edit: it touches no project state and has no undo.
 pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> {
@@ -644,17 +665,22 @@ pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> 
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
+    let filmstrip = match crate::filmstrip::prune(&app.path, age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
     let export = match crate::cmd::schedule::prune_export(&app.path, age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
     Some(format!(
-        "{}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; export: {}",
+        "{}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; filmstrip: {}; export: {}",
         proxy.summary_named(dry_run, "proxy render"),
         audio.summary_named(dry_run, "preview audio"),
         wave.summary_named(dry_run, "waveform"),
         keyframes.summary_named(dry_run, "keyframe list"),
         thumbs.summary_named(dry_run, "thumbnail"),
+        filmstrip.summary_named(dry_run, "filmstrip"),
         export.summary_named(dry_run, "export chunk")
     ))
 }

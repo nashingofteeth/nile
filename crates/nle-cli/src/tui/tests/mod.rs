@@ -16,6 +16,7 @@ use std::path::PathBuf;
 mod command;
 mod extend;
 mod extend_sides;
+mod filmstrip;
 mod fx;
 mod import;
 mod keys;

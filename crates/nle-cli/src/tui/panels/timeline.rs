@@ -7,8 +7,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
+use crate::filmstrip::{FILMSTRIP_ROWS, FilmstripKey};
 use nle_core::project::Project;
-use nle_core::timeline::{Segment as TimelineSegment, Track};
+use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind};
 use nle_core::track_label;
 use nle_core::{Seconds, secs_f64};
 
@@ -47,11 +48,14 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let in_extend = matches!(app.mode, Mode::Extend(_));
     let total = app.view_total();
 
-    // Each visible track gets its own row; an audio-bearing track also gets
-    // a waveform row directly beneath it. The marker row always takes one.
+    // Each visible track gets its own row; a video track can add two
+    // filmstrip rows and an audio-bearing track adds a waveform row. The
+    // marker row always takes one.
     let heights: Vec<usize> = tracks
         .iter()
-        .map(|track| 1 + usize::from(track_has_audio(&app.project, track)))
+        .map(|track| {
+            1 + filmstrip_rows(app, track) + usize::from(track_has_audio(&app.project, track))
+        })
         .collect();
     let capacity = inner.height.saturating_sub(1) as usize;
     let (start, count) = track_window_rows(&heights, app.active(), capacity.max(1));
@@ -92,6 +96,34 @@ pub(crate) fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         let parts = track_parts(&app.project, track, total);
         draw_track_row(f, bar, app, &parts, in_extend && active, view, ti);
         y += 1;
+
+        let film_rows = filmstrip_rows(app, track);
+        if film_rows > 0 && y + film_rows as u16 <= marker_limit {
+            if label_w > 0 {
+                let mut lines = vec![Line::from(Span::styled(
+                    "  ▦ ",
+                    Style::default().fg(Color::DarkGray),
+                ))];
+                lines.extend((1..film_rows).map(|_| Line::from(Span::raw("    "))));
+                f.render_widget(
+                    Paragraph::new(lines),
+                    Rect {
+                        x: inner.x,
+                        y,
+                        width: label_w,
+                        height: film_rows as u16,
+                    },
+                );
+            }
+            let bar = Rect {
+                x: inner.x + label_w,
+                y,
+                width: bar_w,
+                height: film_rows as u16,
+            };
+            draw_filmstrip_rows(f, bar, app, track, view, active);
+            y += film_rows as u16;
+        }
 
         if track_has_audio(&app.project, track) && y < marker_limit {
             if label_w > 0 {
@@ -143,6 +175,163 @@ pub(crate) fn track_has_audio(project: &Project, track: &Track) -> bool {
             }),
             TimelineSegment::Gap(_) => false,
         })
+}
+
+/// Whether a video track has picture to show in a filmstrip row. Muted video
+/// tracks still count; only the audio waveform row respects mute.
+pub(crate) fn track_has_video(project: &Project, track: &Track) -> bool {
+    track.kind == TrackKind::Video
+        && track.segments.iter().any(|seg| match seg {
+            TimelineSegment::Clip(c) => project.asset(c.asset).is_some_and(|a| a.probe.has_video()),
+            TimelineSegment::Transition(t) => [&t.a, &t.b].into_iter().any(|side| {
+                side.asset()
+                    .and_then(|id| project.asset(id))
+                    .is_some_and(|a| a.probe.has_video())
+            }),
+            TimelineSegment::Gap(_) => false,
+        })
+}
+
+pub(crate) fn filmstrip_rows(app: &App, track: &Track) -> usize {
+    if app.filmstrip_enabled && track_has_video(&app.project, track) {
+        FILMSTRIP_ROWS as usize
+    } else {
+        0
+    }
+}
+
+/// Draw the two-row truecolor filmstrip under a video track's clip row. The
+/// strip is sampled from the clip's source span; gaps and transitions keep
+/// the same bands as the label row. A strip that has not loaded yet falls
+/// back to a dark cyan placeholder.
+fn draw_filmstrip_rows(
+    f: &mut Frame,
+    bar: Rect,
+    app: &App,
+    track: &Track,
+    view: Viewport,
+    active: bool,
+) {
+    if bar.width == 0 || bar.height == 0 {
+        return;
+    }
+    let rows = usize::from(bar.height.min(FILMSTRIP_ROWS as u16));
+    let cell = view.span / f64::from(bar.width);
+    let view_end = view.start + view.span;
+    let gap_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
+    let trans_style = Style::default().fg(Color::Black).bg(Color::Magenta);
+    let placeholder = Style::default().bg(Color::Rgb(0, 64, 64));
+    let mut lines: Vec<Vec<(char, Style)>> = (0..rows)
+        .map(|_| vec![(' ', gap_style); bar.width as usize])
+        .collect();
+
+    let mut cum = 0.0;
+    for seg in &track.segments {
+        let start = cum;
+        cum += secs(&seg.duration());
+        if start >= view_end - 1e-9 {
+            continue;
+        }
+        let x0 = view.col(start, bar.width);
+        let x1 = if cum >= view_end - 1e-9 {
+            bar.width
+        } else {
+            view.col(cum, bar.width)
+        };
+        match seg {
+            TimelineSegment::Gap(_) => {
+                for x in x0..x1 {
+                    for line in &mut lines {
+                        line[x as usize] = (' ', gap_style);
+                    }
+                }
+            }
+            TimelineSegment::Transition(_) => {
+                for x in x0..x1 {
+                    for line in &mut lines {
+                        line[x as usize] = (' ', trans_style);
+                    }
+                }
+            }
+            TimelineSegment::Clip(c) => {
+                let key = FilmstripKey::new(c.asset, &c.asset_in, &c.asset_out);
+                let src_in = secs(&c.asset_in);
+                let span = secs(&c.asset_out) - src_in;
+                for x in x0..x1 {
+                    let Some(strip) = app.filmstrips.get(&key) else {
+                        for line in &mut lines {
+                            line[x as usize] = (' ', placeholder);
+                        }
+                        continue;
+                    };
+                    if span <= 0.0 {
+                        for line in &mut lines {
+                            line[x as usize] = (' ', placeholder);
+                        }
+                        continue;
+                    }
+                    let t = view.start + (f64::from(x) + 0.5) * cell;
+                    let offset = (t - start).max(0.0);
+                    let source =
+                        c.source_at(Seconds::new((offset * 1_000_000.0) as i64, 1_000_000));
+                    let pos = ((secs_f64(&source) - src_in) / span).clamp(0.0, 0.999_999);
+                    let col = (pos * strip.cols as f64).floor() as u32;
+                    for (r, line) in lines.iter_mut().enumerate() {
+                        let top = strip.pixel(col, (r * 2) as u32);
+                        let bottom = strip.pixel(col, (r * 2 + 1) as u32);
+                        let (fg, bg) = if active {
+                            (rgb_color(top), rgb_color(bottom))
+                        } else {
+                            (dim_color(top), dim_color(bottom))
+                        };
+                        line[x as usize] = ('▀', Style::default().fg(fg).bg(bg));
+                    }
+                }
+            }
+        }
+    }
+
+    // Mirror the label row's hard cut dividers. A transition boundary is
+    // soft; the blend band itself already carries the boundary colour.
+    let mut cum = 0.0;
+    for (i, seg) in track.segments.iter().enumerate() {
+        let start = cum;
+        cum += secs(&seg.duration());
+        if i > 0 && start >= view.start - 1e-9 && start < view_end - 1e-9 {
+            let soft = matches!(seg, TimelineSegment::Transition(_))
+                || track
+                    .segments
+                    .get(i - 1)
+                    .is_some_and(|s| matches!(s, TimelineSegment::Transition(_)));
+            if !soft {
+                let x = view.col(start, bar.width) as usize;
+                for line in &mut lines {
+                    line[x] = ('▏', Style::default().fg(Color::DarkGray).bg(Color::Black));
+                }
+            }
+        }
+    }
+
+    let lines: Vec<Line> = lines
+        .into_iter()
+        .map(|cells| {
+            Line::from(
+                cells
+                    .into_iter()
+                    .map(|(ch, style)| Span::styled(ch.to_string(), style))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), bar);
+}
+
+fn rgb_color((r, g, b): (u8, u8, u8)) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+fn dim_color((r, g, b): (u8, u8, u8)) -> Color {
+    Color::Rgb(r / 2, g / 2, b / 2)
 }
 
 const WAVE_BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

@@ -20,6 +20,9 @@ mod proxy;
 mod keyframes;
 #[cfg(feature = "tui")]
 mod tui;
+// Timeline filmstrips back the video rows; `prune` is used headless.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+mod filmstrip;
 // Asset thumbnails back the pool preview; `prune` is used headless.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod thumbnails;
