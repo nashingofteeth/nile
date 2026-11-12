@@ -10,6 +10,7 @@ use crate::timeline::{Clip, Gap};
 mod parse;
 mod register;
 mod run;
+mod wire;
 
 fn defaults() -> ParseDefaults {
     ParseDefaults {

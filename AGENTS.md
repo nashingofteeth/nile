@@ -11,6 +11,7 @@ build — see "Learning Rust along the way".
 |---|---|
 | `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops + undo history. No processes. |
 | `crates/nle-ffmpeg` | ffprobe/ffmpeg wrappers, filter-graph compiler. |
+| `crates/nle-protocol` | JSON-RPC 2.0 wire types + blocking client/server. Envelopes and typed calls only; no project I/O, process, or socket. |
 | `crates/nle-cli` | The `nile` binary (plus an `nle` symlink alias) + TUI + mpv IPC client. |
 
 | Before touching | Read |
@@ -21,14 +22,15 @@ build — see "Learning Rust along the way".
 | `graph.rs`, `preview.rs`, `proxy.rs`, mpv | `docs/pitfalls/mpv-ffmpeg.md` |
 | actions, trims, playhead | `docs/pitfalls/playhead.md` |
 | transitions, blends | `docs/pitfalls/transitions.md` |
+| `nle-protocol`, `serve`, wire methods | `docs/pitfalls/protocol.md` |
 | the borrow checker or clippy | `docs/rust-notes.md` |
 
 Low-dependency stance: **the current set is frozen.** No new runtime
 dependencies without explicit justification (a hand-rolled ~50 lines beats a
 transitive tree for most needs).
 
-- Direct deps (10): clap, anyhow, thiserror, serde, serde_json, num-rational,
-  tempfile, ratatui, crossterm (+3 internal crates). Zero network code.
+- Direct deps: clap, anyhow, thiserror, serde, serde_json, num-rational,
+  tempfile, ratatui, crossterm (+ the internal workspace crates). Zero network code.
 - **`tui` is a default Cargo feature.** `cargo build/test
   --no-default-features` is the headless variant — keep it compiling (gate
   `mod`s, commands, and TUI-only helpers).
@@ -197,7 +199,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   `--at`/`--track`/`--clip` default to the playhead/active track/clip-under in
   the TUI). A new action = an `Action` variant + a slot in `Action::slot`
   (exhaustive) + both parity tests. Session state (playhead, register
-  contents) is not an action.
+  contents) is not an action. The catalog is also the wire DTO (`Action`
+  serde): `nle-protocol` sends it, so don't add a parallel action request
+  type.
 - **Visual range ops are catalog actions.** `DeleteRange`, `YankRange`, and
   `PasteRange` back visual `d`/`y`/`p`; front-ends call `run_action`, never
   `edit::delete_range_on`/`insert_segments_on` directly. `DeleteRange`
