@@ -85,13 +85,12 @@ impl Call {
         if !METHODS.contains(&method) {
             return Err(RpcError::method_not_found(method));
         }
-        // Unit calls accept an omitted, null, or empty params object. Try the
-        // full decode first so a future all-optional struct call is not
-        // mistaken for a unit variant; only fall back to the unit spelling
-        // for null/empty params.
+        // Struct variants need a content field even when every field is
+        // optional, so null/omitted params becomes `{}` for the first try.
+        // Unit variants need the content omitted instead, so retry without it.
         let empty = params.is_null() || params.as_object().is_some_and(|o| o.is_empty());
         let encoded = if params.is_null() {
-            serde_json::json!({ "method": method })
+            serde_json::json!({ "method": method, "params": {} })
         } else {
             serde_json::json!({ "method": method, "params": params })
         };

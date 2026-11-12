@@ -672,6 +672,15 @@ fn unit_calls_and_unknown_fields_are_validated() {
         Call::Hello
     );
     assert_eq!(
+        Call::decode("timeline.edl", Value::Null).expect("omitted params"),
+        Call::TimelineEdl { track: None },
+        "every field is optional, so omitted params is an empty object"
+    );
+    assert_eq!(
+        Call::decode("timeline.edl", json!({})).expect("empty params"),
+        Call::TimelineEdl { track: None }
+    );
+    assert_eq!(
         Call::decode("maybe", json!({}))
             .expect_err("unknown method")
             .code,
@@ -689,6 +698,22 @@ fn unit_calls_and_unknown_fields_are_validated() {
             .code,
         INVALID_PARAMS
     );
+}
+
+#[test]
+fn a_call_without_params_uses_an_empty_object() {
+    let mut fake = Fake::new(0);
+    let responses = responses(
+        r#"{"jsonrpc":"2.0","id":7,"method":"timeline.edl"}"#,
+        &mut fake,
+    );
+    match &responses[0] {
+        Response::Result { id, result } => {
+            assert_eq!(id, &Id::from(7u64));
+            assert_eq!(result.as_str(), Some("TITLE: fake None"));
+        }
+        other => panic!("expected an EDL, got {other:?}"),
+    }
 }
 
 #[test]
