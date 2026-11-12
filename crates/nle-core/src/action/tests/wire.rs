@@ -152,3 +152,147 @@ fn an_unknown_action_name_is_refused() {
     let err = serde_json::from_value::<Action>(serde_json::json!({"action": "rewind"}));
     assert!(err.is_err(), "unknown actions must not deserialize");
 }
+
+/// One sample per [`Action::slot`], in slot order. A new catalog variant
+/// forces `SLOTS` up, and this list fails until the new shape is covered.
+fn all_actions() -> Vec<Action> {
+    let gap = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    vec![
+        Action::TrimIn {
+            track: 0,
+            at: 1.0,
+            ripple: false,
+        },
+        Action::TrimOut {
+            track: 0,
+            at: 1.0,
+            ripple: true,
+        },
+        Action::Split { track: 0, at: 1.5 },
+        Action::InsertGap {
+            track: 0,
+            at: 2.0,
+            len: GapLen::Frames(12),
+        },
+        Action::Delete {
+            track: 0,
+            target: Target::At(1.0),
+            ripple: false,
+        },
+        Action::Yank {
+            track: 0,
+            target: Target::Clip(1),
+        },
+        Action::Paste {
+            track: 0,
+            at: 3.0,
+            ripple: false,
+            segment: Some(gap),
+        },
+        Action::SetSpeed {
+            track: 0,
+            clip: 1,
+            rate: Seconds::new(30000, 1001),
+        },
+        Action::Extend {
+            track: 0,
+            target: Target::Segment(1),
+            edge: Edge::Out,
+            to: 4.0,
+            ripple: false,
+        },
+        Action::PurgeStumps { track: None },
+        Action::TrackAdd {
+            kind: TrackKind::Video,
+        },
+        Action::TrackMute { track: 0 },
+        Action::TrackRm { track: 1 },
+        Action::AssetRm { id: 1 },
+        Action::Undo,
+        Action::Redo,
+        Action::Transition {
+            track: 0,
+            at: 2.0,
+            kind: TransitionKind::Dissolve,
+            len: TransitionLen::Frames(12),
+        },
+        Action::AddEffect {
+            track: 0,
+            clip: 1,
+            effect: Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            },
+            index: None,
+        },
+        Action::RemoveEffect {
+            track: 0,
+            clip: 1,
+            index: Some(0),
+        },
+        Action::ClearEffects { track: 0, clip: 1 },
+        Action::DeleteRange {
+            track: 0,
+            start: 0,
+            end: 1,
+        },
+        Action::YankRange {
+            track: 0,
+            start: 0,
+            end: 1,
+        },
+        Action::PasteRange { track: 0, at: 3.0 },
+    ]
+}
+
+#[test]
+fn every_catalog_slot_has_a_wire_form() {
+    let actions = all_actions();
+    assert_eq!(
+        actions.len(),
+        crate::action::SLOTS,
+        "the sample list must cover every catalog slot"
+    );
+    for (slot, action) in actions.iter().enumerate() {
+        assert_eq!(action.slot(), slot, "sample order follows Action::slot");
+        let value = serde_json::to_value(action).expect("serialize an action");
+        assert!(
+            value.get("action").is_some_and(|tag| tag.is_string()),
+            "every action carries its catalog tag: {value}"
+        );
+        let back: Action = serde_json::from_value(value).expect("deserialize an action");
+        assert_eq!(&back, action);
+    }
+}
+
+#[test]
+fn omitted_optional_action_fields_default_to_none() {
+    let paste: Action = serde_json::from_value(serde_json::json!({
+        "action": "paste",
+        "track": 0,
+        "at": 1.0,
+        "ripple": false
+    }))
+    .expect("paste without a segment");
+    assert!(matches!(paste, Action::Paste { segment: None, .. }));
+
+    let add: Action = serde_json::from_value(serde_json::json!({
+        "action": "add_effect",
+        "track": 0,
+        "clip": 1,
+        "effect": {"Eq": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0}}
+    }))
+    .expect("add_effect without an index");
+    assert!(matches!(add, Action::AddEffect { index: None, .. }));
+
+    let remove: Action = serde_json::from_value(serde_json::json!({
+        "action": "remove_effect",
+        "track": 0,
+        "clip": 1
+    }))
+    .expect("remove_effect without an index");
+    assert!(matches!(remove, Action::RemoveEffect { index: None, .. }));
+}
