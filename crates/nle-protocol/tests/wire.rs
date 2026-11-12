@@ -652,6 +652,33 @@ fn a_handler_with_the_wrong_reply_kind_is_an_internal_error() {
 }
 
 #[test]
+fn failed_calls_do_not_ship_events() {
+    struct Failing;
+    impl Handler for Failing {
+        fn handle(&mut self, _: &Call) -> Result<Reply, RpcError> {
+            Err(RpcError::internal("boom"))
+        }
+
+        fn take_events(&mut self) -> Vec<Event> {
+            vec![Event::ProjectChanged { revision: 1 }]
+        }
+    }
+    let mut failing = Failing;
+    let responses = responses(
+        r#"{"jsonrpc":"2.0","id":8,"method":"project.show"}"#,
+        &mut failing,
+    );
+    assert_eq!(responses.len(), 1, "only the error line, not its events");
+    match &responses[0] {
+        Response::Error { id, error } => {
+            assert_eq!(id, &Some(Id::from(8u64)));
+            assert_eq!(error.code, INTERNAL_ERROR);
+        }
+        other => panic!("expected an internal error, got {other:?}"),
+    }
+}
+
+#[test]
 fn blank_lines_are_ignored() {
     let mut fake = Fake::new(0);
     let responses = responses(

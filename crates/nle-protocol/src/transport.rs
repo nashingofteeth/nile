@@ -34,9 +34,9 @@ pub const MAX_LINE: usize = 64 * 1024 * 1024;
 pub trait Handler {
     fn handle(&mut self, call: &Call) -> Result<Reply, RpcError>;
 
-    /// Events produced while handling the last call. The server writes them
-    /// after the response, so a request/response client sees its result
-    /// first. The default is none.
+    /// Events produced while handling the last **successful** call. The
+    /// server writes them after the response; an error reply discards them.
+    /// The default is none.
     fn take_events(&mut self) -> Vec<Event> {
         Vec::new()
     }
@@ -306,9 +306,10 @@ impl<R: BufRead, W: Write, H: Handler> Server<R, W, H> {
     /// Serve until EOF.
     ///
     /// A malformed line or a handler error becomes an error *response*; only
-    /// a broken read/write or an over-cap line ends the loop. A JSON-RPC
-    /// notification (no id) is ignored, as the spec requires; batches are
-    /// not supported.
+    /// a broken read/write or an over-cap line ends the loop. A successful
+    /// reply is written before its events; a failed call writes only its
+    /// error. A JSON-RPC notification (no id) is ignored, as the spec
+    /// requires; batches are not supported.
     pub fn serve(&mut self) -> Result<(), ServerError> {
         let mut line = String::new();
         loop {
@@ -322,15 +323,18 @@ impl<R: BufRead, W: Write, H: Handler> Server<R, W, H> {
                 continue;
             }
             let response = self.handle_line(&line);
-            // Drain even when the call failed, so stale events cannot leak
-            // into the next successful response. On a notification there is
-            // no response and the handler did not run.
+            let success = matches!(&response, Some(Response::Result { .. }));
+            // Drain on every path so stale events cannot leak into a later
+            // reply. Events belong to a successful call: an error response
+            // (or an ignored notification) drops them.
             let events = self.handler.take_events();
             if let Some(response) = response {
                 self.write_value(&response)?;
-                for event in events {
-                    let notification = event.notification().map_err(ServerError::Encode)?;
-                    self.write_value(&notification)?;
+                if success {
+                    for event in events {
+                        let notification = event.notification().map_err(ServerError::Encode)?;
+                        self.write_value(&notification)?;
+                    }
                 }
             }
         }
