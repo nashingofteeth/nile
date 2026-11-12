@@ -461,7 +461,7 @@ shared by the TUI and agents — with no clipgen code present.
   single-source `wire_catalog!` generation. `nile serve --stdio` (a
   `Handler` over `Document`) is next.
 - **Order within step 0:** revision + provenance and the `nle-protocol`
-  skeleton are done; next is `nile serve --stdio`, then fixtures. These are
+  wire are done; next is `nile serve --stdio`, then fixtures. These are
   breaking format changes: close any live TUI before testing and rebuild old
   projects.
 

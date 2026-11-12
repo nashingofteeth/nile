@@ -30,9 +30,10 @@ edit's own result, converted from `nle_core::Outcome` frames with
 The action is the catalog's serde form (`{"action":"split",...}`), not a
 parallel DTO. `crates/nle-core/src/action/tests/wire.rs` pins every slot.
 
-`undo`/`redo` and `action.apply` with `Action::Undo`/`Redo` reach the same
-history operation; route both through one handler function so the revision
-check and event emission cannot drift.
+`undo`/`redo` are aliases for `action.apply` with `Action::Undo`/`Redo`.
+Both go through one handler function so the revision check and event
+emission cannot drift. `from` is ignored for undo/redo: the history restores
+its own playhead.
 
 ## Time
 
@@ -78,8 +79,8 @@ handler queued.
 - `deny_unknown_fields` covers call params and nested action fields; a typo is
   invalid-params, not a silent default.
 - A null-id error is surfaced as `ClientError::Server`, preserving its code.
-- Invalid UTF-8 ends the serve loop; every other malformed line gets an error
-  response (parse-error or invalid-request). A peer can only deny itself.
+- Invalid UTF-8 gets a null-id parse-error response and the loop continues;
+  only an over-cap line ends the connection. A peer can only deny itself.
 
 ## Tests
 
