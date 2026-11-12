@@ -24,12 +24,6 @@ use super::clamp::clamp_project;
 use super::util::video_track_index;
 use super::{Batch, EditError, EditOp, HISTORY_VERSION, MAX_HISTORY};
 
-/// Undo/redo stack of project changes. `apply` (timeline) and the asset
-/// add/remove methods (pool) are the only ways in: each snapshots the
-/// affected state before mutating and stores the before/after pair as a
-/// `Change`. Undo and redo verify the live state against the recorded side
-/// (segment id/frame for tracks, exact pool equality for assets) and
-/// substitute the other.
 /// Who made a recorded change. The protocol will mark agent/analysis edits;
 /// the TUI and one-shot CLI default to a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -61,6 +55,12 @@ impl Provenance {
     }
 }
 
+/// Undo/redo stack of project changes. `apply` (timeline) and the asset
+/// add/remove methods (pool) are the only ways in: each snapshots the
+/// affected state before mutating and stores the before/after pair as a
+/// `Change`. Undo and redo verify the live state against the recorded side
+/// (segment id/frame for tracks, exact pool equality for assets) and
+/// substitute the other.
 #[derive(Debug, Default, Clone)]
 pub struct History {
     done: Vec<Change>,

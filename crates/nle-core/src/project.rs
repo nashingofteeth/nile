@@ -107,7 +107,8 @@ pub struct Project {
     /// project was the regenerable demo.)
     version: u32,
     /// Monotonic model revision. Edits, pool/track changes, undo/redo and
-    /// whole-project rebuilds bump it; playhead-only saves do not.
+    /// whole-project rebuilds bump it; playhead-only saves do not (a save
+    /// whose clamp repaired the model does).
     #[serde(default)]
     pub revision: u64,
     /// Output frame rate — None until the first clip sets it.
@@ -146,14 +147,15 @@ impl Project {
         }
     }
 
-    /// The last representable playhead position: a timeline of `dur` spans
-    /// `[0, dur)`, so its final frame is `dur - 1/fps` (0 on an empty one).
     /// Bump the monotonic model revision. Crate-private: the mutation paths
-    /// (`History`, `Document::rebuild`) own the rule.
+    /// (`History`, `Document::rebuild`, `Document::set_sequence` and
+    /// `Document::save`) own the rule.
     pub(crate) fn bump_revision(&mut self) {
         self.revision = self.revision.saturating_add(1);
     }
 
+    /// The last representable playhead position: a timeline of `dur` spans
+    /// `[0, dur)`, so its final frame is `dur - 1/fps` (0 on an empty one).
     pub fn last_frame(&self) -> Seconds {
         let end = self.timeline.end();
         match self.fps.as_ref() {
