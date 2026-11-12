@@ -344,7 +344,11 @@ fn deleting_a_transition_restores_the_neighbours() {
     let batch = delete_under(&p, 2.5).unwrap();
     assert!(batch.desc.contains("left and right"), "{}", batch.desc);
     h.apply(&mut p, batch, 0).unwrap();
-    assert_eq!(p, before, "x then dd is a round trip");
+    assert_eq!(
+        without_revision(&p),
+        without_revision(&before),
+        "x then dd is a round trip"
+    );
 }
 
 // The clip|gap case: only the clip side has a handle to give back; the
@@ -368,7 +372,8 @@ fn deleting_a_clip_gap_transition_restores_the_clip() {
     assert!(batch.desc.contains("restored the left"), "{}", batch.desc);
     h.apply(&mut p, batch, 0).unwrap();
     assert_eq!(
-        p, before,
+        without_revision(&p),
+        without_revision(&before),
         "the clip's tail comes back, the gap is untouched"
     );
 }

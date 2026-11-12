@@ -46,7 +46,14 @@ impl Document {
     pub fn rebuild(project: Project) -> (Self, Vec<String>) {
         let mut doc = Self::new(project);
         let notes = edit::clamp_project(&mut doc.project);
+        doc.project.bump_revision();
         (doc, notes)
+    }
+
+    /// The monotonic model revision. Compare-and-swap clients use it as the
+    /// `base_revision`; playhead-only saves leave it unchanged.
+    pub fn revision(&self) -> u64 {
+        self.project.revision
     }
 
     pub fn set_history(&mut self, history: History) {
@@ -250,6 +257,7 @@ mod tests {
         })];
         let (doc, notes) = Document::rebuild(p);
         assert_eq!(doc.depth(), 0);
+        assert_eq!(doc.revision(), 1, "a rebuild is one model revision");
         assert!(!notes.is_empty(), "the clamp reported the adjustment");
         let seg = &doc.timeline.video_track().unwrap().segments[0];
         assert!(seg.duration() <= Seconds::from_integer(4));
@@ -264,5 +272,42 @@ mod tests {
         assert_eq!(doc.timeline.video_track().unwrap().segments.len(), 2);
         doc.undo().unwrap();
         assert_eq!(doc.timeline.video_track().unwrap().segments.len(), 1);
+    }
+
+    #[test]
+    fn revision_bumps_on_model_changes_not_playhead_saves() {
+        let mut doc = document();
+        assert_eq!(doc.revision(), 0, "adopting a project does not bump");
+
+        let before = doc.revision();
+        doc.set_playhead(1.0);
+        assert_eq!(
+            doc.revision(),
+            before,
+            "playhead-only state is not a revision"
+        );
+
+        let batch = edit::split_on(&doc, 0, 1.0).unwrap();
+        doc.apply(batch, 0).unwrap();
+        assert_eq!(doc.revision(), before + 1);
+        doc.undo().unwrap();
+        assert_eq!(doc.revision(), before + 2);
+        doc.redo().unwrap();
+        assert_eq!(doc.revision(), before + 3);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nile.json");
+        doc.save(&path).unwrap();
+        assert_eq!(Project::load(&path).unwrap().revision, doc.revision());
+
+        let before_asset = doc.revision();
+        doc.add_asset("/media/extra.mp4".into(), probe("2"), 0);
+        assert_eq!(doc.revision(), before_asset + 1, "a pool add bumps");
+    }
+
+    #[test]
+    fn a_rebuild_bumps_the_revision_once() {
+        let (doc, _) = Document::rebuild(Project::new());
+        assert_eq!(doc.revision(), 1);
     }
 }

@@ -480,32 +480,44 @@ fn audio_track_mixes_in() {
     assert!(s.has_audio("a.mp4"), "audio stream present");
 }
 
+/// The model body without the monotonic revision, for byte-for-byte
+/// before/after comparisons: revision is deliberately allowed to advance.
+fn model_json(path: &std::path::Path) -> serde_json::Value {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("read the project")).expect("project JSON");
+    value
+        .as_object_mut()
+        .expect("project object")
+        .remove("revision");
+    value
+}
+
 #[test]
 fn undo_redo_round_trip() {
     let s = Sandbox::new();
     s.base();
-    let before = fs::read(s.file(P)).expect("read the project");
+    let before = model_json(&s.file(P));
     s.ok(&["split", "--at", "1"]);
     s.ok(&["trim-out", "--at", "5"]);
     s.ok(&["gap", "--at", "3", "--frames", "15"]);
     s.ok(&["delete", "--clip", "3", "--ripple"]);
     s.ok(&["speed", "1", "200"]);
-    let after = fs::read(s.file(P)).expect("read the project");
+    let after = model_json(&s.file(P));
     for _ in 0..5 {
         s.ok(&["undo"]);
     }
     assert_eq!(
-        fs::read(s.file(P)).expect("read the project"),
+        model_json(&s.file(P)),
         before,
-        "5 undos restore the start exactly"
+        "5 undos restore the model (revision is monotonic)"
     );
     for _ in 0..5 {
         s.ok(&["redo"]);
     }
     assert_eq!(
-        fs::read(s.file(P)).expect("read the project"),
+        model_json(&s.file(P)),
         after,
-        "5 redos restore the end exactly"
+        "5 redos restore the model (revision is monotonic)"
     );
 }
 
