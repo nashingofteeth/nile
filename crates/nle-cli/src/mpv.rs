@@ -22,6 +22,8 @@ pub enum MpvError {
     Spawn(#[from] std::io::Error),
     #[error("mpv's IPC socket never appeared at {0} — is another nile running?")]
     SocketTimeout(PathBuf),
+    #[error("no temp directory short enough for mpv's IPC socket (sun_path limit): {0}")]
+    SocketPath(PathBuf),
     #[error("mpv IPC failed: {0}")]
     Ipc(String),
 }
@@ -45,6 +47,40 @@ pub struct PlaybackState {
     pub last_error: Option<String>,
 }
 
+/// `sun_path` is 104 bytes on macOS and 108 on Linux, including the NUL.
+/// Stay a little below the smaller one.
+const SOCKET_PATH_MAX: usize = 100;
+
+fn socket_file(dir: &Path, pid: u32) -> PathBuf {
+    dir.join(format!("nle-mpv-{pid}.sock"))
+}
+
+fn socket_fits(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().len() < SOCKET_PATH_MAX
+}
+
+/// The IPC socket path, falling back to `/tmp` when `TMPDIR` is too deep.
+/// macOS's default `TMPDIR` is already ~70 bytes, so a deep subtree can push
+/// the socket past `sun_path`: mpv then fails with `AF_UNIX path too long`
+/// and nile waits for a socket that never appears.
+fn socket_path_in(dirs: &[PathBuf], pid: u32) -> Result<PathBuf, MpvError> {
+    for dir in dirs {
+        let path = socket_file(dir, pid);
+        if socket_fits(&path) {
+            return Ok(path);
+        }
+    }
+    let fallback = dirs.first().cloned().unwrap_or_else(std::env::temp_dir);
+    Err(MpvError::SocketPath(socket_file(&fallback, pid)))
+}
+
+fn socket_path(pid: u32) -> Result<PathBuf, MpvError> {
+    let mut dirs = vec![std::env::temp_dir(), PathBuf::from("/tmp")];
+    dirs.dedup();
+    socket_path_in(&dirs, pid)
+}
+
 /// A running mpv instance acting as the preview monitor.
 pub struct MpvPlayer {
     child: Child,
@@ -62,7 +98,7 @@ impl MpvPlayer {
     /// MPRIS ("Now playing") and shows in the OSC; without it, an `edl://`
     /// URL leaks into the desktop's media indicator.
     pub fn spawn(window_title: &str, media_title: &str) -> Result<Self, MpvError> {
-        let socket_path = std::env::temp_dir().join(format!("nle-mpv-{}.sock", std::process::id()));
+        let socket_path = socket_path(std::process::id())?;
         let _ = std::fs::remove_file(&socket_path); // stale socket from a crash
 
         let mut child = Command::new("mpv")
@@ -390,6 +426,26 @@ fn apply_property(st: &mut PlaybackState, name: Option<&str>, data: Option<serde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_path_falls_back_to_tmp_when_tmpdir_is_too_deep() {
+        let deep = PathBuf::from("/very/long").join("x".repeat(120));
+        let short = PathBuf::from("/tmp");
+        let path = socket_path_in(&[deep.clone(), short], 42).unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/nle-mpv-42.sock"));
+
+        let all_deep = PathBuf::from("/").join("y".repeat(200));
+        assert!(matches!(
+            socket_path_in(&[all_deep], 42),
+            Err(MpvError::SocketPath(_))
+        ));
+    }
+
+    #[test]
+    fn the_real_socket_path_fits_sun_path() {
+        let path = socket_path(std::process::id()).unwrap();
+        assert!(socket_fits(&path), "{}", path.display());
+    }
 
     #[test]
     fn a_loaded_file_adds_the_pending_audio_master() {

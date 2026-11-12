@@ -10,6 +10,7 @@
 mod common;
 
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
 
 use common::*;
@@ -812,13 +813,17 @@ fn a_truncated_cache_entry_is_rerendered() {
 fn output_plumbing() {
     let s = Sandbox::new();
     s.base();
-    // A failed stdout write (a full disk) must exit cleanly.
-    let sink = fs::File::create("/dev/full").expect("/dev/full");
-    let status = s.run_with_stdout(&["media", "ls"], Stdio::from(sink));
-    assert!(
-        status.success(),
-        "a failed stdout write crashed: {status:?}"
-    );
+    // A failed stdout write (a full disk) must exit cleanly. `/dev/full` is
+    // Linux-only; the closed-pipe half below covers EPIPE on every platform.
+    #[cfg(target_os = "linux")]
+    {
+        let sink = fs::File::create("/dev/full").expect("/dev/full");
+        let status = s.run_with_stdout(&["media", "ls"], Stdio::from(sink));
+        assert!(
+            status.success(),
+            "a failed stdout write crashed: {status:?}"
+        );
+    }
     // …and an early-closed pipe must not crash it either.
     let status = s.run_with_closed_pipe(&["media", "ls"]);
     assert!(

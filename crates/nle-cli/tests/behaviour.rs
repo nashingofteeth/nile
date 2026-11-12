@@ -1500,3 +1500,55 @@ fn the_default_project_can_be_configured_per_directory() {
     let out = run(&["default"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("nile.json (fallback)"));
 }
+
+#[test]
+fn edit_refuses_a_missing_terminal() {
+    // `Command::output()` gives nile pipes, not a TTY. ratatui would panic
+    // while taking the terminal, breaking the CLI's 0/1/2 exit contract.
+    let s = Sandbox::new();
+    s.base();
+    let out = s.run(&["edit"]);
+    let text = merged(&out);
+    assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        out.status.code().is_some_and(|code| code <= 2),
+        "edit exited {:?}: {text}",
+        out.status.code()
+    );
+    #[cfg(feature = "tui")]
+    assert!(text.contains("needs a terminal"), "{text}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_preview_preset_encodes_with_videotoolbox() {
+    // Linux has no VideoToolbox, so the macOS job is the only place this
+    // argv runs end to end: the platform engine, the yuv420p tail and the
+    // pixels. `hardware_encoder()` picking VAAPI here would fall back to CPU.
+    let s = Sandbox::new();
+    s.base();
+    let out = s.ok(&["export", "-o", "pv.mp4", "--preset", "preview"]);
+    assert!(
+        !out.contains("CPU fallback"),
+        "preview fell back to CPU: {out}"
+    );
+    assert_eq!(s.video_tag("pv.mp4"), "avc1", "not H.264: {out}");
+    s.assert_dur("pv.mp4", 6.0, "the preview keeps the sequence length");
+    s.assert_px("pv.mp4", 1.0, RED, "red under VideoToolbox");
+    s.assert_px("pv.mp4", 3.0, GREEN, "green under VideoToolbox");
+    s.assert_px("pv.mp4", 5.0, BLUE, "blue under VideoToolbox");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_missing_hardware_encoder_retries_on_cpu() {
+    // macOS has no /dev/dri, so VAAPI cannot initialize: the whole graph must
+    // be retried on libx264 and say so, not fail. No Linux CI can assert this
+    // because VAAPI may actually be there.
+    let s = Sandbox::new();
+    s.base();
+    let out = s.ok(&["export", "-o", "fallback.mp4", "--encoder", "vaapi"]);
+    assert!(out.contains("CPU fallback"), "no fallback notice: {out}");
+    s.assert_dur("fallback.mp4", 6.0, "the retry renders the same film");
+    s.assert_px("fallback.mp4", 3.0, GREEN, "the retry's pixels");
+}

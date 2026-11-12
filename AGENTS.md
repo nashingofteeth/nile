@@ -36,7 +36,7 @@ transitive tree for most needs).
   deliberately, then `cargo audit` (RustSec) before committing.
 - Release profile is deliberately light (`lto = false`, `codegen-units = 16`);
   the hot work is in ffmpeg/mpv subprocesses. `release-lto` is opt-in. Builds
-  require `clang` + `lld` (see `.cargo/config.toml`) for fast links.
+  require `clang`; Linux links through `lld` (see `.cargo/config.toml`).
 - ffmpeg/ffprobe/mpv are the real attack surface: no shell, `--` before
   positional paths, isolated mpv config and IPC socket.
 
