@@ -654,6 +654,20 @@ impl App {
         self.save_session_state();
     }
 
+    /// Toggle the two-row timeline strips, starting their worker when they
+    /// come back on. The same wording is used by the key and `:filmstrip`.
+    pub(crate) fn set_filmstrips(&mut self, on: bool) {
+        self.filmstrip_enabled = on;
+        if on {
+            start_filmstrips(self);
+        }
+        self.set_message(&format!("filmstrips {}", if on { "on" } else { "off" }));
+    }
+
+    pub(crate) fn toggle_filmstrips(&mut self) {
+        self.set_filmstrips(!self.filmstrip_enabled);
+    }
+
     pub(crate) fn pan_timeline(&mut self, fraction: f64) {
         self.timeline_view.pan_by(
             fraction,

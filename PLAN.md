@@ -573,7 +573,7 @@ prove parity with the existing renders in `fixtures/`.
 ## Timeline filmstrips (shipped)
 
 - Video tracks get a two-row truecolor strip under the clip row when
-  `:filmstrip` is on (the TUI default; `--dump` stays compact).
+  `Ctrl-t` / `:filmstrip` is on (the TUI default; `--dump` stays compact).
 - Strips are 64×4 RGB sprites sampled across each clip's source span, cached
   under `.nile/<stem>/cache/filmstrip/` and extracted on a worker. They show
   raw source frames; effects are not baked.

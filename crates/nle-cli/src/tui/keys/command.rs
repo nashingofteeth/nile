@@ -13,7 +13,7 @@ use nle_core::{History, frame_of, track_label};
 use crate::mpv::Mpv;
 
 use super::super::actions::{clip_under, run_action};
-use super::super::jobs::{start_filmstrips, start_import, start_job};
+use super::super::jobs::{start_import, start_job};
 use super::super::keys::pool::leave_pool_command;
 use super::super::motion::fmt_timecode;
 use super::super::{App, Mode, persist_playhead, secs};
@@ -616,11 +616,8 @@ pub(crate) fn filmstrip_command(app: &mut App, f: &mut action::Flags) -> Option<
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
-    app.filmstrip_enabled = on;
-    if on {
-        start_filmstrips(app);
-    }
-    Some(format!("filmstrips {}", if on { "on" } else { "off" }))
+    app.set_filmstrips(on);
+    None
 }
 
 /// `:cache prune [--days N] [--dry-run]` — delete old proxy renders. Not an

@@ -114,8 +114,8 @@ per-track sync-lock toggle yet: the first video track is always the master.
 
 Video tracks show a two-row filmstrip under the clip labels: raw source
 frames sampled across each clip's source span and cached under
-`.nile/<stem>/cache/filmstrip/`. `:filmstrip` toggles the rows for this
-session; effects are not baked into the preview strip.
+`.nile/<stem>/cache/filmstrip/`. `Ctrl-t` or `:filmstrip` toggles the rows
+for this session; effects are not baked into the preview strip.
 
 ### Transport and motion
 
@@ -132,6 +132,7 @@ session; effects are not baked into the preview strip.
 | `<` `>` (`,` `.`) | Clip start / clip end |
 | `+` / `=` / `-` | Zoom timeline in / in / out |
 | `z` | Toggle fit / closest zoom |
+| `Ctrl-t` | Toggle timeline filmstrips |
 | `Ctrl-b` / `Ctrl-f` | Pan timeline left / right |
 | `3l`, `5j`, … | Vim counts: seek 3 s, jump 5 cuts |
 
