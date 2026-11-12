@@ -11,6 +11,7 @@ build — see "Learning Rust along the way".
 |---|---|
 | `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops + undo history. No processes. |
 | `crates/nle-ffmpeg` | ffprobe/ffmpeg wrappers, filter-graph compiler. |
+| `crates/nle-protocol` | JSON-RPC 2.0 wire types + blocking client/server. Envelopes and typed calls only; no project I/O, process, or socket. |
 | `crates/nle-cli` | The `nile` binary (plus an `nle` symlink alias) + TUI + mpv IPC client. |
 
 | Before touching | Read |
@@ -197,7 +198,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   `--at`/`--track`/`--clip` default to the playhead/active track/clip-under in
   the TUI). A new action = an `Action` variant + a slot in `Action::slot`
   (exhaustive) + both parity tests. Session state (playhead, register
-  contents) is not an action.
+  contents) is not an action. The catalog is also the wire DTO (`Action`
+  serde): `nle-protocol` sends it, so don't add a parallel action request
+  type.
 - **Visual range ops are catalog actions.** `DeleteRange`, `YankRange`, and
   `PasteRange` back visual `d`/`y`/`p`; front-ends call `run_action`, never
   `edit::delete_range_on`/`insert_segments_on` directly. `DeleteRange`
