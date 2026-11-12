@@ -278,7 +278,10 @@ impl Sandbox {
 
     pub fn assert_px_ne(&self, file: &str, t: f64, rgb: [u8; 3], label: &str) {
         let got = self.px(file, t);
-        assert_ne!(got, rgb, "{label} ({file} @ {t} s)");
+        assert!(
+            !near(got, rgb),
+            "{label} ({file} @ {t} s): got {got:?}, want anything but {rgb:?}"
+        );
     }
 
     /// `Eq` is spatial: a desaturated frame has r≈g≈b (and must not be black,
