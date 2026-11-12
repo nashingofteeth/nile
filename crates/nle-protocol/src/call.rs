@@ -1,73 +1,71 @@
 //! The typed call catalog and its results.
 //!
 //! A [`Call`] is the `method` + `params` half of a request; the transport
-//! adds `jsonrpc` and `id`. Decoding is explicit so an unknown method is a
-//! *method-not-found* error and a known method with a bad field is
-//! *invalid-params* — the two failures a client needs to tell apart.
+//! adds `jsonrpc` and `id`. The enum, its wire names, and [`METHODS`] are
+//! generated from one list by the internal `wire_catalog!` macro, so a new
+//! method cannot leave a stale name table behind.
+//!
+//! Decoding is explicit so an unknown method is a *method-not-found* error
+//! and a known method with a bad field is *invalid-params* — the two
+//! failures a client needs to tell apart.
 
-use nle_core::{Action, Project};
+use nle_core::{Action, Project, Seconds};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::rpc::RpcError;
 
-/// Every method this build serves. Keep in sync with [`Call::method`] and
-/// the variants below; `every_call_has_a_known_method` guards the list.
-pub const METHODS: [&str; 6] = [
-    "project.show",
-    "timeline.edl",
-    "action.preview",
-    "action.apply",
-    "undo",
-    "redo",
-];
+/// The wire schema version, independent of the `nile.json` project version
+/// and the crate version. Bump it for any breaking method, field, or unit
+/// change; `hello` lets a client fail clearly instead of guessing.
+pub const PROTOCOL_VERSION: u32 = 1;
 
-/// A typed request. `base_revision` is the compare-and-swap token: the
-/// handler refuses a mutation if the live document has moved on.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "method", content = "params")]
-pub enum Call {
-    /// The whole project document (the same JSON `nile show --json` prints).
-    #[serde(rename = "project.show")]
-    ProjectShow,
-    /// The composite monitor EDL, or one track's when `track` is set.
-    #[serde(rename = "timeline.edl")]
-    TimelineEdl {
-        #[serde(default)]
-        track: Option<usize>,
-    },
-    /// Run actions against a copy and report what would change.
-    #[serde(rename = "action.preview")]
-    ActionPreview {
-        base_revision: u64,
-        actions: Vec<Action>,
-    },
-    /// Run actions as one undo step.
-    #[serde(rename = "action.apply")]
-    ActionApply {
-        base_revision: u64,
-        actions: Vec<Action>,
-    },
-    #[serde(rename = "undo")]
-    Undo { base_revision: u64 },
-    #[serde(rename = "redo")]
-    Redo { base_revision: u64 },
+wire_catalog! {
+    /// A typed request. `base_revision` is the compare-and-swap token: the
+    /// handler refuses a mutation if the live document has moved on.
+    pub enum Call, methods: METHODS {
+        /// The whole project document (the same JSON `nile show --json` prints).
+        ProjectShow = "project.show";
+        /// Protocol and project metadata, plus the served method names.
+        Hello = "hello";
+        /// The composite monitor EDL, or one track's (0-based) when `track` is set.
+        TimelineEdl {
+            #[serde(default)]
+            track: Option<usize>,
+        } = "timeline.edl";
+        /// Run one action against a copy and report what would change.
+        ActionPreview {
+            base_revision: u64,
+            action: Action,
+            /// The undo anchor for the hypothetical edit; absent means the
+            /// document's shared playhead.
+            #[serde(
+                default,
+                with = "nle_core::time::rational_ser::opt",
+                skip_serializing_if = "Option::is_none"
+            )]
+            from: Option<Seconds>,
+        } = "action.preview";
+        /// Run one catalog action as one undo step.
+        ActionApply {
+            base_revision: u64,
+            action: Action,
+            /// The undo anchor; absent means the document's shared playhead.
+            #[serde(
+                default,
+                with = "nle_core::time::rational_ser::opt",
+                skip_serializing_if = "Option::is_none"
+            )]
+            from: Option<Seconds>,
+        } = "action.apply";
+        Undo { base_revision: u64 } = "undo";
+        Redo { base_revision: u64 } = "redo";
+    }
 }
 
 impl Call {
-    pub fn method(&self) -> &'static str {
-        match self {
-            Call::ProjectShow => "project.show",
-            Call::TimelineEdl { .. } => "timeline.edl",
-            Call::ActionPreview { .. } => "action.preview",
-            Call::ActionApply { .. } => "action.apply",
-            Call::Undo { .. } => "undo",
-            Call::Redo { .. } => "redo",
-        }
-    }
-
     /// The `params` half of the request. A null result means a unit call
-    /// (`project.show`), whose params are omitted on the wire.
+    /// (`project.show`, `hello`), whose params are omitted on the wire.
     ///
     /// Fails only if an action carries a non-finite float, which
     /// `serde_json` cannot represent — the same boundary the project file
@@ -80,23 +78,59 @@ impl Call {
         })
     }
 
-    /// Decode a wire method + params into the typed call. This is the one
-    /// place that knows the method catalog, so a rename is deliberate.
+    /// Decode a wire method + params into the typed call. [`METHODS`] is
+    /// generated from the same list as the enum, so this is the one place
+    /// that knows the catalog's string names.
     pub fn decode(method: &str, params: Value) -> Result<Self, RpcError> {
         if !METHODS.contains(&method) {
             return Err(RpcError::method_not_found(method));
         }
-        // A unit method tolerates an omitted, null, or empty params object;
-        // anything else is passed through so serde can reject it as
-        // invalid params rather than silently ignoring a typo.
-        let omit = params.is_null()
-            || (method == "project.show" && params.as_object().is_some_and(|o| o.is_empty()));
-        let encoded = if omit {
+        // Unit calls accept an omitted, null, or empty params object. Try the
+        // full decode first so a future all-optional struct call is not
+        // mistaken for a unit variant; only fall back to the unit spelling
+        // for null/empty params.
+        let empty = params.is_null() || params.as_object().is_some_and(|o| o.is_empty());
+        let encoded = if params.is_null() {
             serde_json::json!({ "method": method })
         } else {
             serde_json::json!({ "method": method, "params": params })
         };
-        serde_json::from_value(encoded).map_err(|e| RpcError::invalid_params(e.to_string()))
+        match serde_json::from_value(encoded) {
+            Ok(call) => Ok(call),
+            Err(first) => {
+                if empty
+                    && let Ok(call) =
+                        serde_json::from_value(serde_json::json!({ "method": method }))
+                {
+                    return Ok(call);
+                }
+                Err(RpcError::invalid_params(first.to_string()))
+            }
+        }
+    }
+}
+
+/// Protocol and build metadata returned by `hello`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Hello {
+    /// [`PROTOCOL_VERSION`] of the server.
+    pub protocol: u32,
+    /// The `nile.json` version this build reads.
+    pub project_version: u32,
+    /// The document's current model revision.
+    pub revision: u64,
+    /// Every method this server serves, from the generated [`METHODS`].
+    pub methods: Vec<String>,
+}
+
+impl Hello {
+    pub fn new(revision: u64) -> Self {
+        Self {
+            protocol: PROTOCOL_VERSION,
+            project_version: nle_core::project::PROJECT_VERSION,
+            revision,
+            methods: METHODS.iter().map(|m| (*m).to_string()).collect(),
+        }
     }
 }
 
@@ -108,6 +142,7 @@ impl Call {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     Project(Project),
+    Hello(Hello),
     Edl(String),
     Outcome(Outcome),
 }
@@ -116,6 +151,7 @@ impl Reply {
     pub fn kind(&self) -> &'static str {
         match self {
             Reply::Project(_) => "project",
+            Reply::Hello(_) => "hello",
             Reply::Edl(_) => "edl",
             Reply::Outcome(_) => "outcome",
         }
@@ -127,6 +163,8 @@ impl Reply {
         match (self, call) {
             (Reply::Project(project), Call::ProjectShow) => serde_json::to_value(project)
                 .map_err(|e| RpcError::internal(format!("project is not serializable: {e}"))),
+            (Reply::Hello(hello), Call::Hello) => serde_json::to_value(hello)
+                .map_err(|e| RpcError::internal(format!("hello is not serializable: {e}"))),
             (Reply::Edl(text), Call::TimelineEdl { .. }) => Ok(Value::String(text)),
             (
                 Reply::Outcome(outcome),
@@ -149,6 +187,7 @@ impl Reply {
     pub fn decode(call: &Call, result: Value) -> Result<Self, serde_json::Error> {
         match call {
             Call::ProjectShow => serde_json::from_value(result).map(Reply::Project),
+            Call::Hello => serde_json::from_value(result).map(Reply::Hello),
             Call::TimelineEdl { .. } => serde_json::from_value(result).map(Reply::Edl),
             Call::ActionPreview { .. }
             | Call::ActionApply { .. }
@@ -168,7 +207,13 @@ pub struct Outcome {
     pub desc: String,
     /// Whether the model changed. `false` for a yank or a refused no-op.
     pub changed: bool,
-    /// Frame the playhead should land on, when the action specified one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub playhead: Option<i64>,
+    /// Exact timeline position the playhead should land on, when the action
+    /// specified one. Rational seconds, like `playhead` events — one unit on
+    /// the wire.
+    #[serde(
+        default,
+        with = "nle_core::time::rational_ser::opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub playhead: Option<Seconds>,
 }
