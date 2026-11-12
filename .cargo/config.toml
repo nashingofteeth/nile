@@ -3,10 +3,18 @@
 # config.toml is where those live.
 # Local-only app, so targeting one CPU is pure free performance.
 #
-# Link with lld through clang: much faster than bfd on every rebuild.
-# Swap `lld` for `mold` if it is installed.
-[build]
-rustflags = ["-C", "target-cpu=native", "-C", "link-arg=-fuse-ld=lld"]
-
+# Flags live under each target, not under [build]: Cargo concatenates
+# rustflags from merged config sources, so a platform cannot trim a [build]
+# entry later. Linux links with lld through clang: much faster than bfd on
+# every rebuild (swap `lld` for `mold` if it is installed). macOS keeps
+# Apple's ld64 — Apple clang rejects `-fuse-ld=lld`, and lld is not shipped
+# with the Command Line Tools.
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
+rustflags = ["-C", "target-cpu=native", "-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
