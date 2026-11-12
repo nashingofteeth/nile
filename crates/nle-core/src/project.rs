@@ -21,8 +21,9 @@ use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 /// v4 added the per-clip `speed` rate; v5 added the stored playhead;
 /// v7 stores `crop` as percentages (scale/x/y) instead of pixel w/h/x/y;
 /// v8 stores `crop` as per-edge percentage insets and `scale` as percentages;
-/// v9 stores each transition side's effects (they render the neighbour).
-pub const PROJECT_VERSION: u32 = 9;
+/// v9 stores each transition side's effects (they render the neighbour);
+/// v10 stores the monotonic model `revision`.
+pub const PROJECT_VERSION: u32 = 10;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -105,6 +106,10 @@ pub struct Project {
     /// (`Track.muted`). (v1/v2 files are not readable; the only v1/v2
     /// project was the regenerable demo.)
     version: u32,
+    /// Monotonic model revision. Edits, pool/track changes, undo/redo and
+    /// whole-project rebuilds bump it; playhead-only saves do not.
+    #[serde(default)]
+    pub revision: u64,
     /// Output frame rate — None until the first clip sets it.
     #[serde(default, with = "rational_ser::opt")]
     pub fps: Option<Seconds>,
@@ -132,6 +137,7 @@ impl Project {
     pub fn new() -> Self {
         Self {
             version: PROJECT_VERSION,
+            revision: 0,
             fps: None,
             video: None,
             media: Vec::new(),
@@ -142,6 +148,12 @@ impl Project {
 
     /// The last representable playhead position: a timeline of `dur` spans
     /// `[0, dur)`, so its final frame is `dur - 1/fps` (0 on an empty one).
+    /// Bump the monotonic model revision. Crate-private: the mutation paths
+    /// (`History`, `Document::rebuild`) own the rule.
+    pub(crate) fn bump_revision(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+    }
+
     pub fn last_frame(&self) -> Seconds {
         let end = self.timeline.end();
         match self.fps.as_ref() {
@@ -596,6 +608,15 @@ mod tests {
         let back: Project = serde_json::from_str(&first).unwrap();
         let second = serde_json::to_string_pretty(&back).unwrap();
         assert_eq!(first, second, "a round trip must not reorder the file");
+    }
+
+    #[test]
+    fn a_new_project_starts_at_revision_zero() {
+        let p = Project::new();
+        assert_eq!(p.revision, 0);
+        let text = serde_json::to_string(&p).unwrap();
+        let back: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.revision, 0);
     }
 
     #[test]

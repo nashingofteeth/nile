@@ -70,6 +70,7 @@ impl History {
                 desc: batch.desc,
                 playhead,
             }));
+            project.bump_revision();
             return Ok(());
         }
         let track = batch_track(&batch, project)?;
@@ -97,6 +98,7 @@ impl History {
             desc: batch.desc,
             playhead,
         }));
+        project.bump_revision();
         Ok(())
     }
 
@@ -119,6 +121,7 @@ impl History {
             desc: desc.clone(),
             playhead,
         }));
+        project.bump_revision();
         Ok(desc)
     }
 
@@ -153,6 +156,7 @@ impl History {
             desc: desc.clone(),
             playhead,
         }));
+        project.bump_revision();
         Ok(desc)
     }
 
@@ -170,12 +174,16 @@ impl History {
         let (id, _) = project.add_asset(path, probe);
         let after = project.media.clone();
         let desc = format!("import asset #{id}");
+        let changed = before != after;
         self.push_change(Change::Assets(AssetChange {
             before,
             after,
             desc: desc.clone(),
             playhead,
         }));
+        if changed {
+            project.bump_revision();
+        }
         (id, desc)
     }
 
@@ -209,6 +217,7 @@ impl History {
             desc,
             playhead,
         }));
+        project.bump_revision();
         ids
     }
 
@@ -237,6 +246,7 @@ impl History {
         }
         self.done.pop();
         self.undone.push(change);
+        project.bump_revision();
         Ok(outcome)
     }
 
@@ -253,6 +263,7 @@ impl History {
         }
         self.undone.pop();
         self.done.push(change);
+        project.bump_revision();
         Ok(outcome)
     }
 

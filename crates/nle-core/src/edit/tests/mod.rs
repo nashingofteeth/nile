@@ -22,6 +22,14 @@ mod tracks;
 mod transitions;
 mod trim;
 
+/// Compare the model, not the monotonic revision. Undo/redo deliberately
+/// advances the revision, so whole-project equality has to zero it first.
+fn without_revision(p: &Project) -> Project {
+    let mut p = p.clone();
+    p.revision = 0;
+    p
+}
+
 /// A file with both streams (like the demo's red.mp4) — clips can go
 /// on a video *or* an audio track, which is what most fixtures need.
 fn probe_report(duration: &str) -> RawProbe {
