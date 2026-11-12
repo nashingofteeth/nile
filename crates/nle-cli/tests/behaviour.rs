@@ -1500,3 +1500,21 @@ fn the_default_project_can_be_configured_per_directory() {
     let out = run(&["default"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("nile.json (fallback)"));
 }
+
+#[test]
+fn edit_refuses_a_missing_terminal() {
+    // `Command::output()` gives nile pipes, not a TTY. ratatui would panic
+    // while taking the terminal, breaking the CLI's 0/1/2 exit contract.
+    let s = Sandbox::new();
+    s.base();
+    let out = s.run(&["edit"]);
+    let text = merged(&out);
+    assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        out.status.code().is_some_and(|code| code <= 2),
+        "edit exited {:?}: {text}",
+        out.status.code()
+    );
+    #[cfg(feature = "tui")]
+    assert!(text.contains("needs a terminal"), "{text}");
+}
