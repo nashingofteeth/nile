@@ -480,16 +480,27 @@ fn audio_track_mixes_in() {
     assert!(s.has_audio("a.mp4"), "audio stream present");
 }
 
+/// The project file as JSON.
+fn project_json(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).expect("read the project")).expect("project JSON")
+}
+
 /// The model body without the monotonic revision, for byte-for-byte
 /// before/after comparisons: revision is deliberately allowed to advance.
 fn model_json(path: &std::path::Path) -> serde_json::Value {
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(path).expect("read the project")).expect("project JSON");
+    let mut value = project_json(path);
     value
         .as_object_mut()
         .expect("project object")
         .remove("revision");
     value
+}
+
+/// The persisted model revision.
+fn revision(path: &std::path::Path) -> u64 {
+    project_json(path)["revision"]
+        .as_u64()
+        .expect("the project carries a revision")
 }
 
 #[test]
@@ -503,6 +514,7 @@ fn undo_redo_round_trip() {
     s.ok(&["delete", "--clip", "3", "--ripple"]);
     s.ok(&["speed", "1", "200"]);
     let after = model_json(&s.file(P));
+    let edited_revision = revision(&s.file(P));
     for _ in 0..5 {
         s.ok(&["undo"]);
     }
@@ -511,6 +523,12 @@ fn undo_redo_round_trip() {
         before,
         "5 undos restore the model (revision is monotonic)"
     );
+    let undone_revision = revision(&s.file(P));
+    assert!(
+        undone_revision > edited_revision,
+        "undo advances the revision ({edited_revision} → {undone_revision})"
+    );
+
     for _ in 0..5 {
         s.ok(&["redo"]);
     }
@@ -518,6 +536,37 @@ fn undo_redo_round_trip() {
         model_json(&s.file(P)),
         after,
         "5 redos restore the model (revision is monotonic)"
+    );
+    let redone_revision = revision(&s.file(P));
+    assert!(
+        redone_revision > undone_revision,
+        "redo advances the revision"
+    );
+
+    // A playhead-only save is not a model write.
+    s.ok(&["seek", "2"]);
+    assert_eq!(
+        revision(&s.file(P)),
+        redone_revision,
+        "a playhead-only save leaves the revision alone"
+    );
+}
+
+#[test]
+fn a_forced_rebuild_keeps_the_revision_advancing() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["split", "--at", "1"]);
+    let before = revision(&s.file(P));
+    assert!(before > 0, "edits bump the revision");
+    // `init --force` rebuilds the file from scratch. A rebuild must not
+    // rewind the revision, or a stale compare-and-swap client would match
+    // the replaced model and its write would be accepted.
+    s.ok(&["init", "--force"]);
+    let after = revision(&s.file(P));
+    assert!(
+        after > before,
+        "the rebuild advanced from {before}, got {after}"
     );
 }
 
