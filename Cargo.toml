@@ -2,7 +2,7 @@
 # Each crate is a separate package, but they build together and share config.
 [workspace]
 resolver = "2"
-members = ["crates/nle-core", "crates/nle-ffmpeg", "crates/nle-cli"]
+members = ["crates/nle-core", "crates/nle-ffmpeg", "crates/nle-protocol", "crates/nle-cli"]
 
 [workspace.package]
 version = "0.1.0"

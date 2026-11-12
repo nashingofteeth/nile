@@ -11,6 +11,8 @@
 //! processes (probe, export, detect, EDL/OTIO import) stay in the CLI crate
 //! and speak to this module only through the values they construct.
 
+use serde::{Deserialize, Serialize};
+
 use crate::edit::{self, EditError, EditOp, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
@@ -23,7 +25,8 @@ pub const DEFAULT_TRANSITION_FRAMES: i64 = 12;
 /// What an action addresses: the segment under a timeline position, a
 /// clip by id (stable across edits), or a segment by index (as printed
 /// by `nile show`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Target {
     At(f64),
     Clip(u32),
@@ -32,7 +35,8 @@ pub enum Target {
 
 /// Which edge of a segment an extend works on. `In` is the left edge
 /// (a clip's head, a gap's head), `Out` the right.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Edge {
     In,
     Out,
@@ -41,7 +45,8 @@ pub enum Edge {
 /// How long an inserted gap is. `Seconds` resolves against the project's
 /// frame rate at run time (the `:cmd`/CLI spelling `--dur` can't know it
 /// at parse time).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GapLen {
     Frames(i64),
     Seconds(f64),
@@ -49,7 +54,8 @@ pub enum GapLen {
 
 /// How long a transition is or will be. `Percent` is a rate on an existing
 /// blend: 50 = twice as long, 200 = half as long (100 = unchanged).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransitionLen {
     Frames(i64),
     Seconds(f64),
@@ -58,7 +64,12 @@ pub enum TransitionLen {
 
 /// Every project-mutating action, addressed explicitly (no hidden
 /// playhead): the shell gets the same handle on the timeline the TUI has.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// The tagged form (`{"action": "split", …}`) is the wire spelling too:
+/// `nle-protocol` sends catalog actions, not a parallel DTO, so a new
+/// variant is immediately addressable over the protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     /// Move the in-edge of the segment under `at` (`i`; `ripple` = `I`).
     TrimIn {
@@ -127,6 +138,7 @@ pub enum Action {
     SetSpeed {
         track: usize,
         clip: u32,
+        #[serde(with = "crate::time::rational_ser")]
         rate: Seconds,
     },
     /// Move one edge to `to` — the extend-mode commit (`e`/`E`).
