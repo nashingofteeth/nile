@@ -408,3 +408,24 @@ fn filmstrip_command_toggles_the_timeline_rows() {
     assert!(!app.filmstrip_enabled);
     assert!(cmd(&mut app, "filmstrip maybe").contains("on|off"));
 }
+
+#[test]
+fn ctrl_t_toggles_the_filmstrip_rows() {
+    let mut app = App::new(asset_project(), temp_project_path("filmstrip-key"));
+    let fake = FakeMpv::new();
+    assert!(!app.filmstrip_enabled);
+    handle_key(
+        &mut app,
+        &fake,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+    );
+    assert!(app.filmstrip_enabled);
+    assert_eq!(app.message, "filmstrips on");
+    handle_key(
+        &mut app,
+        &fake,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+    );
+    assert!(!app.filmstrip_enabled);
+    assert_eq!(app.message, "filmstrips off");
+}

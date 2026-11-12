@@ -202,6 +202,6 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
         "edit       i/o trim · I/O ripple · s/S split · _ gap · dd/D del · yy/p/P",
         "           r speed · X transition · e/E extend · [ ] side · m pool",
         "effects    x panel · c/s/e/o add/edit · d/D drop · u undo · Ctrl-r redo",
-        "tracks     t/T cycle · <N>t jump · :track add · : cmd · Esc · q quit",
+        "tracks     t/T cycle · <N>t jump · Ctrl-t strips · : cmd · q quit",
     ]
 }

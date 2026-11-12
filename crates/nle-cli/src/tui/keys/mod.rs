@@ -108,6 +108,11 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 app.pan_timeline(0.5);
                 return;
             }
+            // Ctrl-t: toggle thumbnails/strips without stealing t/T tracks.
+            KeyCode::Char('t') => {
+                app.toggle_filmstrips();
+                return;
+            }
             _ => {}
         }
     }
