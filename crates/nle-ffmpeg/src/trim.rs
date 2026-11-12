@@ -13,8 +13,7 @@ use std::process::Command;
 use nle_core::{Seconds, format_seconds};
 use thiserror::Error;
 
-/// This machine's encode engines. Intel UHD 630 supports both hardware
-/// APIs (VAAPI + QSV); the CPU path is libx264.
+/// The default VAAPI render node when `/dev/dri` cannot be read.
 const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
 /// The VAAPI render node. Picks the first `/dev/dri/renderD*` at runtime —
@@ -45,6 +44,8 @@ fn read_render_nodes() -> Vec<String> {
         .collect()
 }
 
+/// The encode engines: Intel UHD 630 for VAAPI + QSV on Linux, VideoToolbox
+/// on macOS, libx264/x265/SVT-AV1 in software.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoder {
     /// libx264 — software, best quality per bit, many CPU cores.

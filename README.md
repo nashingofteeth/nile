@@ -390,7 +390,7 @@ nile bench [--runs N] [--preset preview|balanced|max] [--parallel N]
 
 ```sh
 nile probe clip.mp4 [--json]
-nile trim clip.mp4 --in 2.5 --out 7 -o cut.mp4 [--encoder vaapi] [--copy]
+nile trim clip.mp4 --in 2.5 --out 7 -o cut.mp4 [--encoder cpu|vaapi|qsv|videotoolbox] [--copy]
 nile edl                                  # composite URL the monitor plays
 nile edl --track N                        # one track (debugging)
 

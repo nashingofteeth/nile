@@ -11,8 +11,9 @@ use nle_ffmpeg::{AudioCodec, Encoder, ExportSpec, hardware_encoder};
 use crate::cmd::media::parse_f64;
 use crate::{log, say};
 
-/// Quality tiers. These are deliberately tuned for this machine's UHD 630 +
-/// 8-core CPU, not a portable quality matrix.
+/// Quality tiers. `preview` resolves its engine per platform (VAAPI on Linux,
+/// VideoToolbox on macOS); the numbers are tuned for a UHD 630 + 8-core CPU,
+/// not a portable quality matrix.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum QualityPreset {
     /// Hardware H.264 (VideoToolbox on macOS, VAAPI on Linux); falls back to
