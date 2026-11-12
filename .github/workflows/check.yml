@@ -4,6 +4,7 @@ name: check
 # the developer's machine (`scripts/install.sh`, which rewrites ~/.cargo/bin),
 # except for one smoke check that the alias it creates still runs.
 # demo.sh is included: its pixel assertions are the end-to-end contract.
+# The macOS job runs the portable part (no install/alias, no demo.sh).
 
 on:
   push:
@@ -105,7 +106,9 @@ jobs:
     # The documented macOS path: Apple's linker (the config asks for lld on
     # Linux only) and VideoToolbox as the preview engine. The pixel demo
     # stays Linux-only so the end-to-end contract has one reference renderer.
-    runs-on: macos-latest
+    # Pinned, not `-latest` (arm64): the image picks the toolchain and the
+    # exact frames the batteries assert, so move it deliberately.
+    runs-on: macos-26
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
@@ -117,8 +120,12 @@ jobs:
 
       # ffmpeg 9 for `-/filter_complex` and the behaviour tests; shellcheck
       # for the script gate. mpv/yazi are runtime-only (tests use FakeMpv).
+      # `ffmpeg@9` is an alias today and a keg-only formula once 10 ships;
+      # prepend its bin either way so no older image ffmpeg wins.
       - name: Install system tools
-        run: brew install ffmpeg shellcheck
+        run: |
+          brew install ffmpeg@9 shellcheck
+          echo "$(brew --prefix ffmpeg@9)/bin" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
