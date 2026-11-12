@@ -193,15 +193,16 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 
 ## Editing and TUI conventions
 
-- **One action catalog, three front-ends.** Every timeline edit is an `Action`
-  (`nle-core/src/action/mod.rs`) run by `run_action`; keys, the `:cmd` line and
-  the CLI all use it, and the `:cmd` grammar *is* the CLI grammar (same flags;
-  `--at`/`--track`/`--clip` default to the playhead/active track/clip-under in
-  the TUI). A new action = an `Action` variant + a slot in `Action::slot`
-  (exhaustive) + both parity tests. Session state (playhead, register
-  contents) is not an action. The catalog is also the wire DTO (`Action`
-  serde): `nle-protocol` sends it, so don't add a parallel action request
-  type.
+- **One action catalog, four front-ends.** Every timeline edit is an `Action`
+  (`nle-core/src/action/mod.rs`) run by `run_action`; keys, the `:cmd` line,
+  the CLI and the protocol server all use it, and the `:cmd` grammar *is* the
+  CLI grammar (same flags; `--at`/`--track`/`--clip` default to the
+  playhead/active track/clip-under in the TUI). A new action = an `Action`
+  variant + a slot in `Action::slot` (exhaustive) + both parity tests + a wire
+  sample in `action/tests/wire.rs` (the `SLOTS` guard). Session state
+  (playhead, register contents) is not an action. The catalog is also the
+  wire DTO (`Action` serde): `nle-protocol` sends it, so don't add a parallel
+  action request type.
 - **Visual range ops are catalog actions.** `DeleteRange`, `YankRange`, and
   `PasteRange` back visual `d`/`y`/`p`; front-ends call `run_action`, never
   `edit::delete_range_on`/`insert_segments_on` directly. `DeleteRange`
