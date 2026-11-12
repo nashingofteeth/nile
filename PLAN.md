@@ -43,7 +43,7 @@ nile (process)                       mpv window (child)
 
 | Piece | Decision |
 |---|---|
-| Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
+| Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
 | Project file | `nile.json` (v10, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
@@ -455,9 +455,15 @@ shared by the TUI and agents — with no clipgen code present.
 - `fixtures/` + a golden harness: a synthetic 2-cam show (program, mic, ATEM
   switcher log, tiny Resolve project/EDL) with expected project JSON, EDL,
   frame counts and sampled-frame PSNR, wired into `scripts/check.sh`.
-- **Order within step 0:** revision + provenance first, then the
-  `nle-protocol` skeleton, then fixtures. These are breaking format changes:
-  close any live TUI before testing and rebuild old projects.
+- `nle-protocol` skeleton landed: JSON-RPC 2.0 over NDJSON, typed
+  `project.show` / `timeline.edl` / `action.preview` / `action.apply` /
+  `undo` / `redo` calls with a `base_revision` compare-and-swap token, and
+  `project.changed` + `playhead` events. The blocking client/server is in
+  place; `nile serve --stdio` (a `Handler` over `Document`) is next.
+- **Order within step 0:** revision + provenance and the `nle-protocol`
+  skeleton are done; next is `nile serve --stdio`, then fixtures. These are
+  breaking format changes: close any live TUI before testing and rebuild old
+  projects.
 
 ### 1. Sequences (blocking)
 
