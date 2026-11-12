@@ -235,3 +235,87 @@ fn action_apply_accepts_undo_as_an_alias() {
 
     assert!(serve.finish().success(), "serve exits cleanly");
 }
+
+#[test]
+fn yank_and_paste_share_the_register_across_the_server() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    let yanked = call(
+        &mut serve,
+        2,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "action": {"action": "yank", "track": 0, "target": {"clip": 1}}
+        })),
+    );
+    assert_eq!(
+        yanked["result"]["revision"], revision,
+        "a yank is not a model change"
+    );
+    assert_eq!(yanked["result"]["changed"], false);
+
+    let pasted = call(
+        &mut serve,
+        3,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "action": {"action": "paste", "track": 0, "at": 6.0, "ripple": false}
+        })),
+    );
+    assert_eq!(pasted["result"]["revision"], revision + 1);
+    assert_eq!(pasted["result"]["changed"], true);
+    let event = serve.read();
+    assert_eq!(event["method"], "project.changed");
+
+    let show = call(&mut serve, 4, "project.show", None);
+    assert_eq!(
+        show["result"]["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .expect("segments")
+            .len(),
+        4
+    );
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+
+    // The server saved the register; the CLI can paste another copy.
+    sandbox.ok(&["paste", "--at", "8"]);
+    let project: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(
+        project["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .expect("segments")
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn nothing_to_undo_is_an_invalid_request_and_serving_continues() {
+    let sandbox = Sandbox::new();
+    sandbox.ok(&["init"]);
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let undone = call(
+        &mut serve,
+        2,
+        "undo",
+        Some(json!({"base_revision": revision})),
+    );
+    assert_eq!(undone["error"]["code"], -32600);
+
+    let after = call(&mut serve, 3, "hello", None);
+    assert_eq!(after["result"]["revision"], revision);
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}

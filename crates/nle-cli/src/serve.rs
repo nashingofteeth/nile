@@ -262,6 +262,48 @@ mod tests {
     }
 
     #[test]
+    fn a_save_failure_poisons_mutations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut handler = ServeHandler {
+            document: Document::new(Project::new()),
+            register: None,
+            // The parent does not exist, so the first save fails.
+            path: dir.path().join("missing").join("p.json"),
+            events: Vec::new(),
+            poisoned: None,
+        };
+
+        let error = handler
+            .apply(
+                0,
+                &Action::TrackAdd {
+                    kind: nle_core::TrackKind::Audio,
+                },
+                None,
+            )
+            .expect_err("the save must fail");
+        assert_eq!(error.code, nle_protocol::INTERNAL_ERROR);
+        assert!(handler.poisoned.is_some(), "mutations are poisoned");
+
+        let error = handler
+            .apply(
+                1,
+                &Action::TrackAdd {
+                    kind: nle_core::TrackKind::Audio,
+                },
+                None,
+            )
+            .expect_err("poisoned");
+        assert_eq!(error.code, nle_protocol::INTERNAL_ERROR);
+        assert!(error.message.contains("read-only"), "{}", error.message);
+
+        assert!(matches!(
+            handler.handle(&Call::ProjectShow),
+            Ok(Reply::Project(_))
+        ));
+    }
+
+    #[test]
     fn nothing_to_undo_is_an_invalid_request() {
         assert_eq!(
             edit_rpc(EditError::NothingToUndo).code,
