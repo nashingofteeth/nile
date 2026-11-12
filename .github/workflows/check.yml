@@ -105,9 +105,11 @@ jobs:
   macos:
     # The documented macOS path: Apple's linker (the config asks for lld on
     # Linux only) and VideoToolbox as the preview engine. The pixel demo
-    # stays Linux-only so the end-to-end contract has one reference renderer.
-    # Pinned, not `-latest` (arm64): the image picks the toolchain and the
-    # exact frames the batteries assert, so move it deliberately.
+    # stays Linux-only so the end-to-end contract has one reference renderer;
+    # the macOS-gated behaviour tests carry the export coverage here
+    # (VideoToolbox and the CPU retry). Pinned, not `-latest` (arm64): the
+    # image picks the toolchain and the exact frames the batteries assert, so
+    # move it deliberately.
     runs-on: macos-26
     timeout-minutes: 30
     env:
