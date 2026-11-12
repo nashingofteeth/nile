@@ -23,7 +23,7 @@ use crate::error::{ClientError, ServerError};
 use crate::event::Event;
 use crate::rpc::{Id, Notification, Request, Response, RpcError};
 
-/// The largest accepted NDJSON line, including the trailing newline.
+/// The largest accepted NDJSON payload, excluding the trailing newline.
 ///
 /// `project.show` is the largest message; 64 MiB leaves room for a big media
 /// pool while still bounding a hostile peer's allocation.
