@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-N=$(readlink -f ./target/release/nile)
+N="$PWD/target/release/nile"
 DIR=demo-sandbox
 mkdir -p "$DIR"
 cd "$DIR"
@@ -448,11 +448,16 @@ echo "    ./target/release/nile --project demo-sandbox/nile.json split --at 5"
 
 echo "== robustness: a closed or unwritable stdout must not panic =="
 # Rust ignores SIGPIPE, so a plain println! panics on `nile … | head` — and a
-# full disk made every command crash. Both must exit cleanly.
-if $N --project checks/live.json media ls > /dev/full 2>/dev/null; then
-  echo "  ✓ failed stdout write exits cleanly (no panic)"
+# full disk made every command crash. Both must exit cleanly. `/dev/full` is
+# Linux-only, so the full-disk half is skipped elsewhere.
+if [ -e /dev/full ]; then
+  if $N --project checks/live.json media ls > /dev/full 2>/dev/null; then
+    echo "  ✓ failed stdout write exits cleanly (no panic)"
+  else
+    echo "  ✗ stdout write failure crashed the CLI"; exit 1
+  fi
 else
-  echo "  ✗ stdout write failure crashed the CLI"; exit 1
+  echo "  · skipping the full-disk write check (no /dev/full)"
 fi
 if $N --project checks/live.json media ls | head -1 >/dev/null; then
   echo "  ✓ early-closed pipe (| head) exits cleanly"
