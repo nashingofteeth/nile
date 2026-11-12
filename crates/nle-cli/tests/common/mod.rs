@@ -29,6 +29,18 @@ pub const GREEN: [u8; 3] = [0x00, 0x7f, 0x00];
 pub const BLUE: [u8; 3] = [0x00, 0x00, 0xfe];
 pub const BLACK: [u8; 3] = [0x00, 0x00, 0x00];
 
+/// Round-tripping a flat colour through yuv420p is ffmpeg/swscale rounding,
+/// not an invariant: x86 and arm decode red as 253 or 254. Compare within
+/// this tolerance (demo.sh's `near` does the same) so the suite pins which
+/// colour a pixel is, not the last LSB.
+const PIXEL_TOL: u8 = 2;
+
+fn near(got: [u8; 3], want: [u8; 3]) -> bool {
+    got.iter()
+        .zip(want)
+        .all(|(g, w)| g.abs_diff(w) <= PIXEL_TOL)
+}
+
 /// What `eq` did to a frame.
 pub enum Look {
     Grey,
@@ -215,7 +227,10 @@ impl Sandbox {
 
     pub fn assert_px(&self, file: &str, t: f64, rgb: [u8; 3], label: &str) {
         let got = self.px(file, t);
-        assert_eq!(got, rgb, "{label} ({file} @ {t} s)");
+        assert!(
+            near(got, rgb),
+            "{label} ({file} @ {t} s): got {got:?}, want {rgb:?}"
+        );
     }
 
     /// One pixel at `(x, y)` — for geometry (crop/scale) where the corner or
@@ -255,12 +270,18 @@ impl Sandbox {
 
     pub fn assert_px_at(&self, file: &str, t: f64, x: u32, y: u32, rgb: [u8; 3], label: &str) {
         let got = self.px_at(file, t, x, y);
-        assert_eq!(got, rgb, "{label} ({file} @ {t} s, {x},{y})");
+        assert!(
+            near(got, rgb),
+            "{label} ({file} @ {t} s, {x},{y}): got {got:?}, want {rgb:?}"
+        );
     }
 
     pub fn assert_px_ne(&self, file: &str, t: f64, rgb: [u8; 3], label: &str) {
         let got = self.px(file, t);
-        assert_ne!(got, rgb, "{label} ({file} @ {t} s)");
+        assert!(
+            !near(got, rgb),
+            "{label} ({file} @ {t} s): got {got:?}, want anything but {rgb:?}"
+        );
     }
 
     /// `Eq` is spatial: a desaturated frame has r≈g≈b (and must not be black,

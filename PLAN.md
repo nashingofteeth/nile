@@ -33,7 +33,7 @@ suffice).
 
 ```
 nile (process)                       mpv window (child)
-├── engine lib (EDL, undo, cache)   ├── hw decode (VAAPI)
+├── engine lib (EDL, undo, cache)   ├── hw decode (VAAPI / VideoToolbox)
 ├── TUI (ratatui) ◄─ JSON IPC ─►    ├── edl:// instant preview
 └── spawns ffmpeg (export/preview)  └── observed time-pos → playhead
 ```
@@ -44,7 +44,7 @@ nile (process)                       mpv window (child)
 | Project file | `nile.json` (v9, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
-| Encoders | `cpu` (libx264), `vaapi` (UHD 630), `qsv` (Quick Sync) |
+| Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
 | Undo | frame-topology history (segment before/after), sidecar v15 |
 
@@ -340,7 +340,8 @@ trimming of a transition's own span (retime it with `x`/`X`,
 
 ## M6 — export scheduler, presets, bench (shipped; scheduler opt-in)
 
-- **Presets (shipped):** `preview` = VAAPI H.264 6M with CPU fallback;
+- **Presets (shipped):** `preview` = hardware H.264 6M (VideoToolbox on
+  macOS, VAAPI on Linux) with CPU fallback;
   `balanced` = libx264 fast CRF 22; `max` = libx265 medium CRF 20.
   `--encoder`/`--crf`/`--encoder-preset`/`--bitrate` override.
 - **Bench (shipped):** `nile bench [--runs N] [--preset T] [--parallel N]`

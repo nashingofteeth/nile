@@ -4,6 +4,7 @@ name: check
 # the developer's machine (`scripts/install.sh`, which rewrites ~/.cargo/bin),
 # except for one smoke check that the alias it creates still runs.
 # demo.sh is included: its pixel assertions are the end-to-end contract.
+# The macOS job runs the portable part (no install/alias, no demo.sh).
 
 on:
   push:
@@ -17,20 +18,20 @@ concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  # Keep CI builds portable. `.cargo/config.toml` targets the local CPU for
-  # speed, but the shared rust-cache can restore a proc-macro built for a
-  # different runner CPU; loading it makes clippy SIGILL. Setting RUSTFLAGS
-  # overrides the config flags, so ask only for the local lld link.
-  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
-
 jobs:
   check:
     # Pinned, not `-latest`: ubuntu-latest moves to 26.04 in November 2026,
     # which changes ffmpeg and the linker under a pixel-asserting demo.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      # Keep CI builds portable. `.cargo/config.toml` targets the local CPU
+      # for speed, but the shared rust-cache can restore a proc-macro built
+      # for a different runner CPU; loading it makes clippy SIGILL. Setting
+      # RUSTFLAGS overrides the config flags, so ask only for the local lld
+      # link.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@v4
 
@@ -100,3 +101,59 @@ jobs:
 
       - name: Demo (pixel checks)
         run: ./demo.sh
+
+  macos:
+    # The documented macOS path: Apple's linker (the config asks for lld on
+    # Linux only) and VideoToolbox as the preview engine. The pixel demo
+    # stays Linux-only so the end-to-end contract has one reference renderer;
+    # the macOS-gated behaviour tests carry the export coverage here
+    # (VideoToolbox and the CPU retry). Pinned, not `-latest` (arm64): the
+    # image picks the toolchain and the exact frames the batteries assert, so
+    # move it deliberately.
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      # Portable flags for the shared cache: the config's `target-cpu=native`
+      # is overridden for the same SIGILL reason as the Linux job.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      # ffmpeg 9 for `-/filter_complex` and the behaviour tests; shellcheck
+      # for the script gate. mpv/yazi are runtime-only (tests use FakeMpv).
+      # `ffmpeg@9` is an alias today and a keg-only formula once 10 ships;
+      # prepend its bin either way so no older image ffmpeg wins.
+      - name: Install system tools
+        run: |
+          brew install ffmpeg@9 shellcheck
+          echo "$(brew --prefix ffmpeg@9)/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Shell scripts
+        run: shellcheck scripts/check.sh scripts/install.sh demo.sh
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Docs
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Test headless
+        run: cargo test --locked -p nile --no-default-features
+
+      - name: Build release
+        run: cargo build --locked --release

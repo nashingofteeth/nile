@@ -1,6 +1,8 @@
 //! Commands that read or write the project itself: init, add, show, seek,
 //! the listings, the cache controls and the TUI launcher.
 
+#[cfg(feature = "tui")]
+use std::io::IsTerminal;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -49,6 +51,14 @@ pub(crate) fn cmd_edit(
             tui::dump(project, project_path.to_path_buf(), (w, h), dump_keys)
         );
         return Ok(());
+    }
+    // ratatui panics when it cannot take the terminal (`nile edit > log`,
+    // ssh without -t); refuse first so the CLI keeps its 0/1/2 exit contract.
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!(
+            "nile edit needs a terminal (stdin/stdout is not a TTY); \
+             `nile edit --dump` works without one"
+        );
     }
     // The monitor plays the composite, so any video track with a clip counts.
     let has_clip = project

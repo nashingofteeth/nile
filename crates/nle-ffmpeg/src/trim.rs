@@ -13,8 +13,7 @@ use std::process::Command;
 use nle_core::{Seconds, format_seconds};
 use thiserror::Error;
 
-/// This machine's encode engines. Intel UHD 630 supports both hardware
-/// APIs (VAAPI + QSV); the CPU path is libx264.
+/// The default VAAPI render node when `/dev/dri` cannot be read.
 const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
 /// The VAAPI render node. Picks the first `/dev/dri/renderD*` at runtime —
@@ -45,6 +44,8 @@ fn read_render_nodes() -> Vec<String> {
         .collect()
 }
 
+/// The encode engines: Intel UHD 630 for VAAPI + QSV on Linux, VideoToolbox
+/// on macOS, libx264/x265/SVT-AV1 in software.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoder {
     /// libx264 — software, best quality per bit, many CPU cores.
@@ -53,10 +54,43 @@ pub enum Encoder {
     Vaapi,
     /// Intel Quick Sync (same GPU, different API).
     Qsv,
+    /// macOS VideoToolbox H.264 — the media engine, near-zero CPU cost.
+    VideoToolbox,
     /// libx265 — software HEVC, archival.
     X265,
     /// libsvtav1 — software AV1, archival.
     SvtAv1,
+}
+
+impl Encoder {
+    /// Encoders that need hardware and can therefore fail at runtime; the
+    /// export paths retry those on [`Encoder::Cpu`].
+    pub fn is_hardware(self) -> bool {
+        matches!(self, Encoder::Vaapi | Encoder::Qsv | Encoder::VideoToolbox)
+    }
+
+    /// Human name for notices ("VAAPI export failed, retrying on CPU").
+    pub fn label(self) -> &'static str {
+        match self {
+            Encoder::Cpu => "CPU",
+            Encoder::Vaapi => "VAAPI",
+            Encoder::Qsv => "QSV",
+            Encoder::VideoToolbox => "VideoToolbox",
+            Encoder::X265 => "x265",
+            Encoder::SvtAv1 => "SVT-AV1",
+        }
+    }
+}
+
+/// The hardware engine this platform should try first: VideoToolbox on
+/// macOS, VAAPI elsewhere (QSV stays an explicit choice). One branch so the
+/// preview preset and its fallback cannot drift apart.
+pub fn hardware_encoder() -> Encoder {
+    if cfg!(target_os = "macos") {
+        Encoder::VideoToolbox
+    } else {
+        Encoder::Vaapi
+    }
 }
 
 #[derive(Debug, Error)]
@@ -121,7 +155,9 @@ pub fn device_args(encoder: Encoder, hw_decode: bool) -> Vec<String> {
                 a.push("qsv".into());
             }
         }
-        Encoder::X265 | Encoder::SvtAv1 => {}
+        // VideoToolbox takes software frames and uploads them itself; it has
+        // no `-init_hw_device` equivalent.
+        Encoder::VideoToolbox | Encoder::X265 | Encoder::SvtAv1 => {}
     }
     a
 }
@@ -147,6 +183,17 @@ pub fn video_encode_args(encoder: Encoder, crf: u8, preset: &str, bitrate: &str)
         Encoder::Qsv => {
             a.push("-c:v".into());
             a.push("h264_qsv".into());
+            a.push("-b:v".into());
+            a.push(bitrate.into());
+        }
+        Encoder::VideoToolbox => {
+            a.push("-c:v".into());
+            a.push("h264_videotoolbox".into());
+            // Hardware is preferred; this only permits Apple's software
+            // encoder when the media engine is busy or absent (a VM), where
+            // the alternative is discarding the render and retrying on CPU.
+            a.push("-allow_sw".into());
+            a.push("1".into());
             a.push("-b:v".into());
             a.push(bitrate.into());
         }
@@ -464,6 +511,34 @@ mod tests {
         assert!(line.contains("-hwaccel qsv"), "{line}");
         assert!(line.contains("-c:v h264_qsv"), "{line}");
         // trim decodes on the GPU; the export graph does NOT (see graph.rs)
+    }
+
+    #[test]
+    fn videotoolbox_takes_software_frames() {
+        let mut s = spec();
+        s.encoder = Encoder::VideoToolbox;
+        let args = build_args(&s).unwrap();
+        let line = args.join(" ");
+        assert!(line.contains("-c:v h264_videotoolbox"), "{line}");
+        assert!(line.contains("-b:v 8M"), "{line}");
+        // VT's own software encoder is the last resort before libx264.
+        assert!(line.contains("-allow_sw 1"), "{line}");
+        // No device init: VT accepts software nv12/yuv420p and uploads itself.
+        assert!(!line.contains("-init_hw_device"), "{line}");
+        assert!(!line.contains("hwupload"), "{line}");
+    }
+
+    #[test]
+    fn hardware_encoder_tracks_the_platform() {
+        assert_eq!(
+            hardware_encoder(),
+            if cfg!(target_os = "macos") {
+                Encoder::VideoToolbox
+            } else {
+                Encoder::Vaapi
+            }
+        );
+        assert!(hardware_encoder().is_hardware());
     }
 
     #[test]
