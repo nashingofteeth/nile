@@ -575,6 +575,30 @@ fn a_malformed_line_is_a_parse_error_and_serving_continues() {
 }
 
 #[test]
+fn invalid_utf8_is_a_parse_error_and_serving_continues() {
+    let mut fake = Fake::new(0);
+    let mut input = Vec::new();
+    input.extend_from_slice(&[0xff, b'\n']);
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","id":9,"method":"project.show"}"#);
+    input.push(b'\n');
+    let mut server = Server::new(Cursor::new(input), Vec::new(), &mut fake);
+    server.serve().expect("serve");
+    let (_, output, _) = server.into_inner();
+    let lines: Vec<&str> = std::str::from_utf8(&output)
+        .expect("utf-8")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 2, "parse error, then the valid result");
+    let first: Response = serde_json::from_str(lines[0]).expect("parse error");
+    match first {
+        Response::Error { id: None, error } => assert_eq!(error.code, PARSE_ERROR),
+        other => panic!("expected a null-id parse error, got {other:?}"),
+    }
+    let second: Response = serde_json::from_str(lines[1]).expect("result");
+    assert_eq!(second.id(), Some(&Id::from(9u64)));
+}
+
+#[test]
 fn a_response_must_be_exactly_one_of_result_or_error() {
     assert!(
         serde_json::from_str::<Response>(
@@ -637,6 +661,13 @@ fn a_client_rejects_a_wrong_response_id() {
         }
         other => panic!("expected an id mismatch, got {other:?}"),
     }
+}
+
+#[test]
+fn a_client_rejects_invalid_utf8_from_the_server() {
+    let mut client = Client::new(Cursor::new(vec![0xff, b'\n']), Vec::new());
+    let error = client.show().expect_err("invalid utf-8");
+    assert!(matches!(error, ClientError::Decode(_)), "got {error:?}");
 }
 
 #[test]

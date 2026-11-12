@@ -186,6 +186,9 @@ impl<R: BufRead, W: Write> Client<R, W> {
                 Ok(0) => return Ok(None),
                 Ok(_) => {}
                 Err(LineError::TooLong) => return Err(ClientError::LineTooLong),
+                Err(LineError::InvalidUtf8) => {
+                    return Err(ClientError::Decode("line is not valid UTF-8".to_string()));
+                }
                 Err(LineError::Io(e)) => return Err(ClientError::Io(e)),
             }
             if line.trim().is_empty() {
@@ -317,6 +320,14 @@ impl<R: BufRead, W: Write, H: Handler> Server<R, W, H> {
                 Ok(0) => return Ok(()),
                 Ok(_) => {}
                 Err(LineError::TooLong) => return Err(ServerError::LineTooLong),
+                Err(LineError::InvalidUtf8) => {
+                    let response = Response::Error {
+                        id: None,
+                        error: RpcError::parse_error("line is not valid UTF-8"),
+                    };
+                    self.write_value(&response)?;
+                    continue;
+                }
                 Err(LineError::Io(e)) => return Err(ServerError::Io(e)),
             }
             if line.trim().is_empty() {
@@ -410,6 +421,7 @@ impl<R: BufRead, W: Write, H: Handler> Server<R, W, H> {
 enum LineError {
     Io(std::io::Error),
     TooLong,
+    InvalidUtf8,
 }
 
 /// Read one line with a bounded allocation. `cap` counts the payload, not
@@ -457,8 +469,7 @@ fn read_capped<R: BufRead>(
     if payload > cap {
         return Err(LineError::TooLong);
     }
-    *line = String::from_utf8(bytes)
-        .map_err(|e| LineError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+    *line = String::from_utf8(bytes).map_err(|_| LineError::InvalidUtf8)?;
     Ok(line.len())
 }
 
@@ -482,6 +493,16 @@ mod tests {
 
         let mut exact_no_newline = Cursor::new(b"12345678".to_vec());
         assert!(read_capped(&mut exact_no_newline, &mut line, 8).is_ok());
+    }
+
+    #[test]
+    fn invalid_utf8_is_a_line_error_not_an_io_error() {
+        let mut line = String::new();
+        let mut bad = Cursor::new(vec![0xff, b'\n']);
+        assert!(matches!(
+            read_capped(&mut bad, &mut line, 8),
+            Err(LineError::InvalidUtf8)
+        ));
     }
 
     #[test]
