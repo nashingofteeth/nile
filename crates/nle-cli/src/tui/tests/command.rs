@@ -397,3 +397,14 @@ fn effect_command_adds_an_effect() {
         }]
     );
 }
+
+#[test]
+fn filmstrip_command_toggles_the_timeline_rows() {
+    let mut app = App::new(asset_project(), temp_project_path("filmstrip-cmd"));
+    assert!(!app.filmstrip_enabled);
+    assert_eq!(cmd(&mut app, "filmstrip"), "filmstrips on");
+    assert!(app.filmstrip_enabled);
+    assert_eq!(cmd(&mut app, "filmstrip off"), "filmstrips off");
+    assert!(!app.filmstrip_enabled);
+    assert!(cmd(&mut app, "filmstrip maybe").contains("on|off"));
+}

@@ -224,8 +224,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   `yazi --chooser-file`; without yazi it opens `:import`. Never shell out.
   `:import` quotes paths, expands `~`/directories, and probes on a worker.
 - **The timeline panel sizes to show every track** (`panel_heights`): one row
-  per track + marker row + borders; keys/message drop first on a short
-  terminal. Keep hint lines ≲76 columns.
+  per track, two filmstrip rows per video track when enabled, waveform rows,
+  marker row and borders; keys/message drop first on a short terminal. Keep
+  hint lines ≲76 columns.
 
 ## Playhead
 

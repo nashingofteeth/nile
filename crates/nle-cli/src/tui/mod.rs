@@ -19,6 +19,7 @@ use nle_core::{
     load_register_without_migration, track_label,
 };
 
+use crate::filmstrip::{Filmstrip, FilmstripKey};
 use crate::mpv::{Mpv, PlaybackState};
 use crate::thumbnails::Thumbnail;
 use crate::waveform::Waveform;
@@ -39,9 +40,9 @@ mod jobs;
 
 use croc::{CrocAct, CrocState};
 use jobs::{
-    ImportJob, Job, KeyframeJob, PreviewJob, PreviewProgress, ThumbnailJob, WaveJob, poll_import,
-    poll_job, poll_keyframes, poll_preview, poll_thumbnails, poll_waveforms, start_import,
-    start_preview,
+    FilmstripJob, ImportJob, Job, KeyframeJob, PreviewJob, PreviewProgress, ThumbnailJob, WaveJob,
+    poll_filmstrips, poll_import, poll_job, poll_keyframes, poll_preview, poll_thumbnails,
+    poll_waveforms, start_filmstrips, start_import, start_preview,
 };
 
 // ------------------------------------------------------------ app state
@@ -310,6 +311,14 @@ pub struct App {
     pub(crate) thumbnails: HashMap<u32, Thumbnail>,
     /// The thumbnail extractor, if one is running.
     thumb_job: Option<ThumbnailJob>,
+    /// Cached timeline filmstrips, keyed by asset id + source span.
+    pub(crate) filmstrips: HashMap<FilmstripKey, Filmstrip>,
+    /// Source spans whose filmstrip extraction already failed.
+    pub(crate) filmstrip_failed: std::collections::HashSet<FilmstripKey>,
+    /// The filmstrip extractor, if one is running.
+    filmstrip_job: Option<FilmstripJob>,
+    /// Two-row timeline strips; on in the real TUI, off in tests/`--dump`.
+    pub(crate) filmstrip_enabled: bool,
     /// The monitor's EDL being built off-thread (proxy renders); `None` when
     /// idle.
     preview: Option<PreviewJob>,
@@ -371,6 +380,10 @@ impl App {
             keyframe_job: None,
             thumbnails: HashMap::new(),
             thumb_job: None,
+            filmstrips: HashMap::new(),
+            filmstrip_failed: std::collections::HashSet::new(),
+            filmstrip_job: None,
+            filmstrip_enabled: false,
             preview: None,
             preview_dirty: false,
             preview_enabled: false,
@@ -913,6 +926,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     // Build the monitor off-thread before the first frame: a cold proxy can
     // take seconds and the status row will show it.
     app.preview_enabled = true;
+    app.filmstrip_enabled = true;
     start_preview(&mut app);
     // Media title (MPRIS "Now playing") follows the clip under the playhead.
     let mut last_media_title: Option<String> = None;
@@ -953,6 +967,8 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         poll_waveforms(&mut app);
         poll_keyframes(&mut app);
         poll_thumbnails(&mut app);
+        poll_filmstrips(&mut app);
+        start_filmstrips(&mut app);
 
         // The stored playhead follows the transport: after a moment of
         // stillness, write where the cursor landed (`nile seek` reads it).
@@ -1096,6 +1112,8 @@ fn forget_missing_assets(app: &mut App) {
     app.waveform_failed.retain(|id| ids.contains(id));
     app.keyframes.retain(|id, _| ids.contains(id));
     app.thumbnails.retain(|id, _| ids.contains(id));
+    app.filmstrips.retain(|key, _| ids.contains(&key.asset));
+    app.filmstrip_failed.retain(|key| ids.contains(&key.asset));
     app.pool_marks.retain(|id, _| ids.contains(id));
 }
 
@@ -1150,6 +1168,9 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     app.keyframe_job = None;
     app.thumbnails.clear();
     app.thumb_job = None;
+    app.filmstrips.clear();
+    app.filmstrip_failed.clear();
+    app.filmstrip_job = None;
     let ids: std::collections::BTreeSet<u32> = app.project.media.iter().map(|a| a.id).collect();
     app.pool_marks.retain(|id, _| ids.contains(id));
     // The monitor rebuilds off-thread (a cold proxy could take seconds).

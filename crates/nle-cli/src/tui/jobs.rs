@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
 use nle_core::media::RawProbe;
+use nle_core::timeline::{Segment as TimelineSegment, TrackKind};
 
+use crate::filmstrip::{self, Filmstrip, FilmstripKey};
 use crate::keyframes::{self, Keyframes};
 use crate::mpv::Mpv;
 use crate::preview;
@@ -43,6 +45,12 @@ pub(crate) struct KeyframeJob {
 pub(crate) struct ThumbnailJob {
     pub(crate) asset: u32,
     pub(crate) rx: std::sync::mpsc::Receiver<(u32, Result<Thumbnail, String>)>,
+}
+
+/// A timeline filmstrip extraction for one clip source span.
+pub(crate) struct FilmstripJob {
+    pub(crate) key: FilmstripKey,
+    pub(crate) rx: Receiver<(FilmstripKey, Result<Filmstrip, String>)>,
 }
 
 pub(crate) struct PreviewJob {
@@ -450,6 +458,80 @@ pub(crate) fn poll_thumbnails(app: &mut App) {
     }
     app.thumb_job = None;
     start_thumbnail(app);
+}
+
+/// Start extracting the next missing timeline filmstrip. Only video tracks
+/// contribute strips; one worker runs at a time and failed spans are not
+/// retried until a project reload.
+pub(crate) fn start_filmstrips(app: &mut App) {
+    if !app.preview_enabled || !app.filmstrip_enabled || app.filmstrip_job.is_some() {
+        return;
+    }
+    let mut next = None;
+    for track in &app.project.timeline.tracks {
+        if track.kind != TrackKind::Video {
+            continue;
+        }
+        for seg in &track.segments {
+            let TimelineSegment::Clip(c) = seg else {
+                continue;
+            };
+            if c.asset_out <= c.asset_in {
+                continue;
+            }
+            let Some(asset) = app.project.asset(c.asset) else {
+                continue;
+            };
+            if !asset.probe.has_video() {
+                continue;
+            }
+            let key = FilmstripKey::new(c.asset, &c.asset_in, &c.asset_out);
+            if app.filmstrips.contains_key(&key)
+                || app.filmstrip_failed.contains(&key)
+                || app.filmstrip_job.as_ref().is_some_and(|job| job.key == key)
+            {
+                continue;
+            }
+            next = Some((key, asset.clone(), c.asset_in, c.asset_out));
+            break;
+        }
+        if next.is_some() {
+            break;
+        }
+    }
+    let Some((key, asset, src_in, src_out)) = next else {
+        return;
+    };
+    let project_path = app.path.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.filmstrip_job = Some(FilmstripJob { key, rx });
+    std::thread::spawn(move || {
+        let result =
+            filmstrip::load(&project_path, &asset, src_in, src_out).map_err(|e| e.to_string());
+        let _ = tx.send((key, result));
+    });
+}
+
+pub(crate) fn poll_filmstrips(app: &mut App) {
+    let Some(job) = app.filmstrip_job.as_ref() else {
+        return;
+    };
+    match job.rx.try_recv() {
+        Ok((key, Ok(strip))) => {
+            app.filmstrips.insert(key, strip);
+        }
+        Ok((key, Err(e))) => {
+            crate::log::line(&format!("filmstrip load failed: {e}"));
+            app.filmstrip_failed.insert(key);
+        }
+        Err(TryRecvError::Empty) => return,
+        Err(TryRecvError::Disconnected) => {
+            app.filmstrip_job = None;
+            return;
+        }
+    }
+    app.filmstrip_job = None;
+    start_filmstrips(app);
 }
 
 pub(crate) fn poll_keyframes(app: &mut App) {

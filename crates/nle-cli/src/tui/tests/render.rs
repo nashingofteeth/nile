@@ -7,6 +7,7 @@ use super::super::panels::pool::{asset_metadata, render_pool, render_pool_strip}
 use super::super::panels::timeline::{render_timeline, track_parts, track_window_rows};
 use super::super::panels::{hints_for, panel_heights, render};
 use super::*;
+use crate::filmstrip::{FILMSTRIP_COLS, FILMSTRIP_ROWS, Filmstrip, FilmstripKey};
 use crate::thumbnails::Thumbnail;
 use crate::waveform::Waveform;
 use nle_core::edit;
@@ -299,16 +300,76 @@ fn a_clip_with_effects_is_marked_in_the_track_row() {
 // before a track is hidden.
 #[test]
 fn panel_heights_show_every_track_when_they_fit() {
-    let (tl, keys, msg) = panel_heights(3, 0, 24);
+    let (tl, keys, msg) = panel_heights(3, 0, 0, 24);
     assert!(tl >= 3 + 3, "3 tracks + marker + borders: {tl}");
     assert_eq!((keys, msg), (8, 3), "bottom panels still fit");
     // It grows with the track count instead of windowing.
-    assert!(panel_heights(6, 0, 24).0 > panel_heights(2, 0, 24).0);
+    assert!(panel_heights(6, 0, 0, 24).0 > panel_heights(2, 0, 0, 24).0);
     // Too short: the bottom panels go first.
-    assert_eq!(panel_heights(6, 0, 14).1, 0);
-    assert_eq!(panel_heights(6, 0, 14).2, 0);
+    assert_eq!(panel_heights(6, 0, 0, 14).1, 0);
+    assert_eq!(panel_heights(6, 0, 0, 14).2, 0);
     // An active audio track reserves one more row for its waveform.
-    assert_eq!(panel_heights(2, 1, 24).0, panel_heights(2, 0, 24).0 + 1);
+    assert_eq!(
+        panel_heights(2, 0, 1, 24).0,
+        panel_heights(2, 0, 0, 24).0 + 1
+    );
+    // Filmstrips reserve two rows per video track.
+    assert_eq!(
+        panel_heights(2, 2, 0, 24).0,
+        panel_heights(2, 0, 0, 24).0 + 2
+    );
+}
+
+// Video tracks get two truecolor half-block rows; the toggle removes them.
+#[test]
+fn video_tracks_get_filmstrip_rows() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut app = App::new(asset_project(), temp_project_path("filmstrip-render"));
+    let mut rgb = Vec::with_capacity((FILMSTRIP_COLS * FILMSTRIP_ROWS * 3) as usize);
+    for row in 0..FILMSTRIP_ROWS {
+        let color = if row % 2 == 0 {
+            (255, 0, 0)
+        } else {
+            (0, 0, 255)
+        };
+        for _ in 0..FILMSTRIP_COLS {
+            rgb.extend_from_slice(&[color.0, color.1, color.2]);
+        }
+    }
+    let key = FilmstripKey::new(1, &Seconds::from_integer(1), &Seconds::from_integer(4));
+    app.filmstrips.insert(key, Filmstrip::new(rgb).unwrap());
+    app.filmstrip_enabled = true;
+
+    let draw = |app: &App| {
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| render(f, app)).unwrap();
+        term.backend().buffer().clone()
+    };
+    let buf = draw(&app);
+    let mut found = None;
+    for y in 0..24u16 {
+        for x in 0..80u16 {
+            let cell = &buf[(x, y)];
+            if cell.symbol() == "▀" {
+                found = Some((x, y, cell.fg, cell.bg));
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let (x, y, fg, bg) = found.expect("a filmstrip half-block");
+    assert_eq!(fg, Color::Rgb(255, 0, 0), "top pixel at ({x},{y})");
+    assert_eq!(bg, Color::Rgb(0, 0, 255), "bottom pixel at ({x},{y})");
+
+    app.filmstrip_enabled = false;
+    let plain = draw(&app);
+    assert!(
+        (0..24u16).all(|y| (0..80u16).all(|x| plain[(x, y)].symbol() != "▀")),
+        "the toggle removes the strip rows"
+    );
 }
 
 // The active audio track gets a waveform row; cached peaks render as blocks.
@@ -706,7 +767,7 @@ fn every_mode_hints_fit_the_keys_panel() {
     }
     // At the default 24-row terminal the panel really is six inner rows:
     // if this changes, the ceiling above must follow.
-    let (_, keys_h, _) = panel_heights(3, 0, 24);
+    let (_, keys_h, _) = panel_heights(3, 0, 0, 24);
     assert_eq!(keys_h, 8, "six inner rows for the hint sheet");
 }
 

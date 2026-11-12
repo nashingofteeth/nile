@@ -11,7 +11,7 @@ use self::fx::{form_hint, render_fx, render_transition_form};
 use self::info::render_info;
 use self::pool::render_pool;
 use self::status::render_status;
-use self::timeline::{render_timeline, track_has_audio};
+use self::timeline::{filmstrip_rows, render_timeline, track_has_audio};
 use super::{App, Mode, fx_state, is_fx, is_pool, pool_strip_active};
 
 pub(super) mod fx;
@@ -40,7 +40,18 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
             .filter(|t| track_has_audio(&app.project, t))
             .count()
     };
-    let (timeline_h, keys, msg_h) = panel_heights(track_count, wave_rows, f.area().height);
+    let film_rows = if pool_strip_active(app) {
+        0
+    } else {
+        app.project
+            .timeline
+            .tracks
+            .iter()
+            .map(|t| filmstrip_rows(app, t))
+            .sum()
+    };
+    let (timeline_h, keys, msg_h) =
+        panel_heights(track_count, film_rows, wave_rows, f.area().height);
     // The add form carries its own key hints and needs the rows for its
     // fields; drop the bottom cheat-sheet while it is open.
     let keys = if is_fx(app) && fx_state(app).is_some_and(|st| st.form.is_some()) {
@@ -77,13 +88,19 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
 }
 
 /// Rows for the timeline panel and the two bottom panels: the timeline gets
-/// one row per track plus the marker row and two borders, and the keys/message
-/// panels are dropped before a track has to be hidden. Returns
-/// `(timeline_h, keys_h, msg_h)`. Pure so the sizing is testable.
-pub(crate) fn panel_heights(track_count: usize, wave_rows: usize, height: u16) -> (u16, u16, u16) {
+/// one row per track, optional filmstrip/waveform rows, the marker row and two
+/// borders; the keys/message panels are dropped before a track has to be
+/// hidden. Returns `(timeline_h, keys_h, msg_h)`. Pure so sizing is testable.
+pub(crate) fn panel_heights(
+    track_count: usize,
+    film_rows: usize,
+    wave_rows: usize,
+    height: u16,
+) -> (u16, u16, u16) {
     let track_rows = track_count.max(1) as u16;
-    // Two borders + one row per track + the optional waveform row + marker.
+    // Two borders + one row per track + filmstrip/waveform rows + marker.
     let want_tl = track_rows
+        .saturating_add(film_rows as u16)
         .saturating_add(wave_rows as u16)
         .saturating_add(3);
     // The status row is always present; keep a few rows for the info panel.

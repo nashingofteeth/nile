@@ -402,15 +402,17 @@ pub(crate) fn cmd_cache(project_path: &Path, action: &CacheCmd) -> Result<()> {
             let wave = crate::waveform::prune(project_path, max_age, *dry_run)?;
             let keyframes = crate::keyframes::prune(project_path, max_age, *dry_run)?;
             let thumbs = crate::thumbnails::prune(project_path, max_age, *dry_run)?;
+            let filmstrip = crate::filmstrip::prune(project_path, max_age, *dry_run)?;
             let export = super::schedule::prune_export(project_path, max_age, *dry_run)?;
             let prefix = if *dry_run { "prune --dry-run" } else { "prune" };
             say!(
-                "{prefix}: {}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; export: {}",
+                "{prefix}: {}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; filmstrip: {}; export: {}",
                 report.summary_named(*dry_run, "proxy render"),
                 audio.summary_named(*dry_run, "preview audio"),
                 wave.summary_named(*dry_run, "waveform"),
                 keyframes.summary_named(*dry_run, "keyframe list"),
                 thumbs.summary_named(*dry_run, "thumbnail"),
+                filmstrip.summary_named(*dry_run, "filmstrip"),
                 export.summary_named(*dry_run, "export chunk")
             );
             Ok(())
