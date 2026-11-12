@@ -7,6 +7,7 @@
 use thiserror::Error;
 
 use crate::rpc::RpcError;
+use crate::transport::MAX_LINE;
 
 /// What a client call can fail with. A server-sent error keeps its typed
 /// [`RpcError`] (and thus its code/data) instead of flattening to a string.
@@ -24,6 +25,8 @@ pub enum ClientError {
     IdMismatch { expected: String, got: String },
     #[error("the server returned an unexpected {0} reply")]
     UnexpectedReply(&'static str),
+    #[error("a wire line exceeds {MAX_LINE} bytes")]
+    LineTooLong,
     #[error("server error: {0}")]
     Server(#[from] RpcError),
 }
@@ -35,4 +38,6 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("could not encode a response: {0}")]
     Encode(#[source] serde_json::Error),
+    #[error("a wire line exceeds {MAX_LINE} bytes")]
+    LineTooLong,
 }
