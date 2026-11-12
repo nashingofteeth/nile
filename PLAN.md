@@ -49,7 +49,7 @@ nile (process)                       mpv window (child)
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | frame-topology history (segment before/after), sidecar v15 |
+| Undo | frame-topology history (segment before/after), provenance, sidecar v16 |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
