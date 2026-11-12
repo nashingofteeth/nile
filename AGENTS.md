@@ -22,6 +22,7 @@ build — see "Learning Rust along the way".
 | `graph.rs`, `preview.rs`, `proxy.rs`, mpv | `docs/pitfalls/mpv-ffmpeg.md` |
 | actions, trims, playhead | `docs/pitfalls/playhead.md` |
 | transitions, blends | `docs/pitfalls/transitions.md` |
+| `nle-protocol`, `serve`, wire methods | `docs/pitfalls/protocol.md` |
 | the borrow checker or clippy | `docs/rust-notes.md` |
 
 Low-dependency stance: **the current set is frozen.** No new runtime
