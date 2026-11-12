@@ -28,10 +28,21 @@ Roadmap and milestone history: [PLAN.md](PLAN.md).
 ## Requirements
 
 - Rust with edition 2024 support
-- `clang` and `lld` for linking (see `.cargo/config.toml`)
+- `clang` — Xcode Command Line Tools on macOS; Linux links through `lld`
+  (see `.cargo/config.toml`)
 - **ffmpeg/ffprobe 9+** — the export passes its filter graph through
   `-/filter_complex`, which older ffmpeg (including Ubuntu 24.04's 6.x) lacks
 - `mpv` for the interactive monitor
+
+macOS:
+
+```sh
+xcode-select --install                 # clang
+brew install ffmpeg mpv yazi shellcheck
+```
+
+No linker setup beyond Xcode: macOS uses Apple's `ld64`, while Linux asks
+clang for `lld`.
 
 ## Build and install
 
@@ -45,6 +56,9 @@ cargo build --release
 # Headless CLI only (no TUI/mpv; cargo feature `tui` off)
 cargo build --release --no-default-features
 ```
+
+If `nile` is not found after installing, `cargo install` put it in
+`$CARGO_HOME/bin` (default `~/.cargo/bin`); add that directory to `PATH`.
 
 ## Quick start
 
@@ -352,11 +366,12 @@ nile detect-edits edit.mov --append --track 2
 # One clip per detected shot; black spans become gaps. Tune with
 # --threshold/--min-shot/--black-min/--no-gaps/--video-only/--fps/--force.
 nile export -o final.mp4                   # balanced: x264 fast CRF 22
-nile export -o fast.mp4 --preset preview   # VAAPI 6M; CPU fallback if unavailable
+nile export -o fast.mp4 --preset preview   # hardware 6M: VideoToolbox/VAAPI
 nile export -o master.mp4 --preset max     # x265 medium CRF 20
-# Preview uses the first /dev/dri/renderD*; override with NLE_VAAPI_DEVICE.
-# Explicit overrides: --encoder cpu|vaapi|qsv|x265|svt-av1, --crf N,
-# --encoder-preset P, --bitrate B.
+# Preview uses VideoToolbox on macOS and the first /dev/dri/renderD* on
+# Linux (override with NLE_VAAPI_DEVICE); a hardware failure retries on CPU.
+# Explicit overrides: --encoder cpu|vaapi|qsv|videotoolbox|x265|svt-av1,
+# --crf N, --encoder-preset P, --bitrate B.
 
 nile export -o final.mp4 --parallel 2      # chunked export, opt-in
 # Chunks split at cut points and transition midpoints, render independently,
