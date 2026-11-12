@@ -152,7 +152,15 @@ pub(crate) fn cmd_init(path: &Path, force: bool) -> Result<()> {
 pub(crate) fn save_and_reset_history(project: &Project, path: &Path) -> Result<()> {
     // Through Document so the clamp-before-save rule holds on this path too;
     // callers that print clamp notes have already done the same clamp.
-    let (mut doc, _) = Document::rebuild(project.clone());
+    // A rebuild replaces the payload but must not rewind the revision: carry
+    // the on-disk one forward, or a compare-and-swap client that read the old
+    // file would match the new one and its write would be accepted against a
+    // different model. An absent or unreadable file has nothing to carry.
+    let mut project = project.clone();
+    if let Ok(existing) = Project::load(path) {
+        project.revision = project.revision.max(existing.revision);
+    }
+    let (mut doc, _) = Document::rebuild(project);
     doc.save(path)?;
     doc.reset_history(path);
     log::line(&format!("saved {} (undo history reset)", path.display()));

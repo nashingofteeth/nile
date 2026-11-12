@@ -500,7 +500,11 @@ fn speed_retimes_the_transition_sides_it_owns() {
 
     // One undo covers the clip and the side it retimed.
     h.undo(&mut q).unwrap();
-    assert_eq!(q, p, "undo retimes the side back with the clip");
+    assert_eq!(
+        without_revision(&q),
+        without_revision(&p),
+        "undo retimes the side back with the clip"
+    );
 
     // The mirror: the clip that *follows* the transition owns the `b` side.
     let mut q = p.clone();
@@ -609,7 +613,11 @@ fn undo_restores_a_transition_bit_for_bit() {
         "fixture's 3 segments (the transition was removed)"
     );
     h.undo(&mut p).unwrap();
-    assert_eq!(p, before, "the transition came back exactly");
+    assert_eq!(
+        without_revision(&p),
+        without_revision(&before),
+        "the transition came back exactly"
+    );
 }
 
 #[test]

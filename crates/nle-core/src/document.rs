@@ -15,7 +15,7 @@ use std::ops::Deref;
 use std::path::Path;
 
 use crate::action::{self, Action, Outcome, Register};
-use crate::edit::{self, Batch, EditError, History, UndoOutcome};
+use crate::edit::{self, Actor, Batch, EditError, History, UndoOutcome};
 use crate::project::{Project, ProjectError, VideoSettings};
 use crate::time::Seconds;
 
@@ -46,11 +46,28 @@ impl Document {
     pub fn rebuild(project: Project) -> (Self, Vec<String>) {
         let mut doc = Self::new(project);
         let notes = edit::clamp_project(&mut doc.project);
+        doc.project.bump_revision();
         (doc, notes)
+    }
+
+    /// The monotonic model revision. Compare-and-swap clients use it as the
+    /// `base_revision`; playhead-only saves leave it unchanged.
+    pub fn revision(&self) -> u64 {
+        self.project.revision
     }
 
     pub fn set_history(&mut self, history: History) {
         self.history = history;
+    }
+
+    /// Set the actor recorded on subsequent history entries. The TUI and
+    /// one-shot CLI leave the default (`Human`); the protocol sets an agent.
+    pub fn set_actor(&mut self, actor: Actor) {
+        self.history.set_actor(actor);
+    }
+
+    pub fn actor(&self) -> &Actor {
+        self.history.actor()
     }
 
     pub fn project(&self) -> &Project {
@@ -70,13 +87,20 @@ impl Document {
     }
 
     /// Fill the sequence settings from the first clip (a real NLE sets the
-    /// project's rate and size once, from the clip that defines it).
+    /// project's rate and size once, from the clip that defines it). Filling
+    /// a setting is a model write, so it bumps the revision; an already-filled
+    /// sequence (the normal repeat call) does not.
     pub fn set_sequence(&mut self, fps: Option<Seconds>, video: Option<VideoSettings>) {
-        if self.project.fps.is_none() {
+        let fps_set = self.project.fps.is_none() && fps.is_some();
+        let video_set = self.project.video.is_none() && video.is_some();
+        if fps_set {
             self.project.fps = fps;
         }
-        if self.project.video.is_none() {
+        if video_set {
             self.project.video = video;
+        }
+        if fps_set || video_set {
+            self.project.bump_revision();
         }
     }
 
@@ -145,9 +169,13 @@ impl Document {
         self.history.edit_tracks(&mut self.project, playhead, edit)
     }
 
-    /// Clamp, then save. The only persisted write path.
+    /// Clamp, then save. The only persisted write path. A clamp that actually
+    /// repaired the model is a model write, so it bumps the revision; a clean
+    /// save — the normal case, and every playhead-only one — leaves it alone.
     pub fn save(&mut self, path: &Path) -> Result<(), ProjectError> {
-        edit::clamp_project(&mut self.project);
+        if !edit::clamp_project(&mut self.project).is_empty() {
+            self.project.bump_revision();
+        }
         self.project.save(path)
     }
 
@@ -250,6 +278,7 @@ mod tests {
         })];
         let (doc, notes) = Document::rebuild(p);
         assert_eq!(doc.depth(), 0);
+        assert_eq!(doc.revision(), 1, "a rebuild is one model revision");
         assert!(!notes.is_empty(), "the clamp reported the adjustment");
         let seg = &doc.timeline.video_track().unwrap().segments[0];
         assert!(seg.duration() <= Seconds::from_integer(4));
@@ -264,5 +293,86 @@ mod tests {
         assert_eq!(doc.timeline.video_track().unwrap().segments.len(), 2);
         doc.undo().unwrap();
         assert_eq!(doc.timeline.video_track().unwrap().segments.len(), 1);
+    }
+
+    #[test]
+    fn revision_bumps_on_model_changes_not_playhead_saves() {
+        let mut doc = document();
+        assert_eq!(doc.revision(), 0, "adopting a project does not bump");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nile.json");
+
+        let before = doc.revision();
+        doc.set_playhead(1.0);
+        doc.save(&path).unwrap();
+        assert_eq!(
+            doc.revision(),
+            before,
+            "a playhead-only save leaves the revision alone"
+        );
+
+        let batch = edit::split_on(&doc, 0, 1.0).unwrap();
+        doc.apply(batch, 0).unwrap();
+        assert_eq!(doc.revision(), before + 1);
+        doc.undo().unwrap();
+        assert_eq!(doc.revision(), before + 2);
+        doc.redo().unwrap();
+        assert_eq!(doc.revision(), before + 3);
+
+        doc.save(&path).unwrap();
+        assert_eq!(Project::load(&path).unwrap().revision, doc.revision());
+
+        let before_asset = doc.revision();
+        doc.add_asset("/media/extra.mp4".into(), probe("2"), 0);
+        assert_eq!(doc.revision(), before_asset + 1, "a pool add bumps");
+    }
+
+    #[test]
+    fn filling_the_sequence_settings_bumps_the_revision_once() {
+        let mut doc = Document::new(Project::new());
+        let before = doc.revision();
+        doc.set_sequence(Some(Seconds::new(30, 1)), None);
+        assert_eq!(doc.revision(), before + 1, "filling fps is a model write");
+        doc.set_sequence(Some(Seconds::new(24, 1)), None);
+        assert_eq!(
+            doc.revision(),
+            before + 1,
+            "an already-filled sequence is not rewritten"
+        );
+    }
+
+    #[test]
+    fn a_repairing_save_bumps_the_revision() {
+        let mut doc = document();
+        if let Segment::Clip(c) = &mut doc.project.timeline.video_track_mut().unwrap().segments[0] {
+            c.asset_out = Seconds::from_integer(9);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nile.json");
+        let before = doc.revision();
+        doc.save(&path).unwrap();
+        assert_eq!(doc.revision(), before + 1, "the clamp changed the model");
+        assert_eq!(Project::load(&path).unwrap().revision, before + 1);
+    }
+
+    #[test]
+    fn the_document_sets_the_history_actor() {
+        let mut doc = document();
+        doc.set_actor(Actor::Agent("planner".into()));
+        let batch = edit::split_on(&doc, 0, 1.0).unwrap();
+        doc.apply(batch, 0).unwrap();
+        let state = doc.history().state();
+        let entry = state.done.last().unwrap();
+        assert!(matches!(
+            &entry.provenance().actor,
+            Actor::Agent(name) if name == "planner"
+        ));
+    }
+
+    #[test]
+    fn a_rebuild_bumps_the_revision_once() {
+        let (doc, _) = Document::rebuild(Project::new());
+        assert_eq!(doc.revision(), 1);
     }
 }

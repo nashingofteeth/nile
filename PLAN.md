@@ -44,12 +44,12 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v9, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v10, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | frame-topology history (segment before/after), sidecar v15 |
+| Undo | frame-topology history (segment before/after), provenance, sidecar v16 |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
