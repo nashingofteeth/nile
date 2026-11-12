@@ -15,7 +15,7 @@ use std::ops::Deref;
 use std::path::Path;
 
 use crate::action::{self, Action, Outcome, Register};
-use crate::edit::{self, Batch, EditError, History, UndoOutcome};
+use crate::edit::{self, Actor, Batch, EditError, History, UndoOutcome};
 use crate::project::{Project, ProjectError, VideoSettings};
 use crate::time::Seconds;
 
@@ -58,6 +58,16 @@ impl Document {
 
     pub fn set_history(&mut self, history: History) {
         self.history = history;
+    }
+
+    /// Set the actor recorded on subsequent history entries. The TUI and
+    /// one-shot CLI leave the default (`Human`); the protocol sets an agent.
+    pub fn set_actor(&mut self, actor: Actor) {
+        self.history.set_actor(actor);
+    }
+
+    pub fn actor(&self) -> &Actor {
+        self.history.actor()
     }
 
     pub fn project(&self) -> &Project {
@@ -303,6 +313,20 @@ mod tests {
         let before_asset = doc.revision();
         doc.add_asset("/media/extra.mp4".into(), probe("2"), 0);
         assert_eq!(doc.revision(), before_asset + 1, "a pool add bumps");
+    }
+
+    #[test]
+    fn the_document_sets_the_history_actor() {
+        let mut doc = document();
+        doc.set_actor(Actor::Agent("planner".into()));
+        let batch = edit::split_on(&doc, 0, 1.0).unwrap();
+        doc.apply(batch, 0).unwrap();
+        let state = doc.history().state();
+        let entry = state.done.last().unwrap();
+        assert!(matches!(
+            &entry.provenance().actor,
+            Actor::Agent(name) if name == "planner"
+        ));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -29,10 +30,44 @@ use super::{Batch, EditError, EditOp, HISTORY_VERSION, MAX_HISTORY};
 /// `Change`. Undo and redo verify the live state against the recorded side
 /// (segment id/frame for tracks, exact pool equality for assets) and
 /// substitute the other.
+/// Who made a recorded change. The protocol will mark agent/analysis edits;
+/// the TUI and one-shot CLI default to a human.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Actor {
+    #[default]
+    Human,
+    Agent(String),
+    Analysis(String),
+}
+
+/// When and by whom a change was recorded. The human-readable label is the
+/// change's existing `desc`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provenance {
+    pub actor: Actor,
+    /// Unix epoch milliseconds.
+    pub at: u64,
+}
+
+impl Provenance {
+    fn now(actor: &Actor) -> Self {
+        Self {
+            actor: actor.clone(),
+            at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct History {
     done: Vec<Change>,
     undone: Vec<Change>,
+    /// Session-only actor applied to new entries; the sidecar stores the
+    /// actor on each change, not a current value.
+    actor: Actor,
 }
 
 impl History {
@@ -69,6 +104,7 @@ impl History {
                 after: project.timeline.tracks.clone(),
                 desc: batch.desc,
                 playhead,
+                provenance: self.provenance(),
             }));
             project.bump_revision();
             return Ok(());
@@ -97,6 +133,7 @@ impl History {
             after,
             desc: batch.desc,
             playhead,
+            provenance: self.provenance(),
         }));
         project.bump_revision();
         Ok(())
@@ -120,6 +157,7 @@ impl History {
             after,
             desc: desc.clone(),
             playhead,
+            provenance: self.provenance(),
         }));
         project.bump_revision();
         Ok(desc)
@@ -155,6 +193,7 @@ impl History {
             after: project.timeline.tracks.clone(),
             desc: desc.clone(),
             playhead,
+            provenance: self.provenance(),
         }));
         project.bump_revision();
         Ok(desc)
@@ -180,6 +219,7 @@ impl History {
             after,
             desc: desc.clone(),
             playhead,
+            provenance: self.provenance(),
         }));
         if changed {
             project.bump_revision();
@@ -216,9 +256,23 @@ impl History {
             after: project.media.clone(),
             desc,
             playhead,
+            provenance: self.provenance(),
         }));
         project.bump_revision();
         ids
+    }
+
+    /// Set the actor recorded on subsequent changes.
+    pub fn set_actor(&mut self, actor: Actor) {
+        self.actor = actor;
+    }
+
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    fn provenance(&self) -> Provenance {
+        Provenance::now(&self.actor)
     }
 
     /// Push onto `done`, clear redo, and enforce the depth cap.
@@ -236,6 +290,7 @@ impl History {
         let outcome = UndoOutcome {
             desc: change.desc().to_string(),
             playhead: change.playhead(),
+            provenance: change.provenance().clone(),
         };
         // Snapshot the whole project so a refused substitution (the live
         // state no longer matches the recorded side) leaves it untouched.
@@ -255,6 +310,7 @@ impl History {
         let outcome = UndoOutcome {
             desc: change.desc().to_string(),
             playhead: change.playhead(),
+            provenance: change.provenance().clone(),
         };
         let snapshot = project.clone();
         if let Err(e) = substitute(project, &change, true) {
@@ -305,7 +361,11 @@ impl History {
             let excess = undone.len() - MAX_HISTORY;
             undone.drain(0..excess);
         }
-        Self { done, undone }
+        Self {
+            done,
+            undone,
+            actor: Actor::Human,
+        }
     }
 
     /// Sidecar path for a project file (`nile.json` →
@@ -442,6 +502,14 @@ impl Change {
             Change::Assets(c) => c.playhead,
         }
     }
+
+    pub fn provenance(&self) -> &Provenance {
+        match self {
+            Change::Track(c) => &c.provenance,
+            Change::Tracks(c) => &c.provenance,
+            Change::Assets(c) => &c.provenance,
+        }
+    }
 }
 
 /// A timeline edit: the affected track's segments before and after, in
@@ -457,6 +525,7 @@ pub struct TrackChange {
     pub after: Vec<Atom>,
     pub desc: String,
     pub playhead: i64,
+    pub provenance: Provenance,
 }
 
 /// A whole-track-list edit — adding, muting, or removing a track. Segment
@@ -469,6 +538,7 @@ pub struct TracksChange {
     pub after: Vec<Track>,
     pub desc: String,
     pub playhead: i64,
+    pub provenance: Provenance,
 }
 
 /// A media-pool edit: the whole pool before and after (probes included).
@@ -480,6 +550,7 @@ pub struct AssetChange {
     pub after: Vec<Asset>,
     pub desc: String,
     pub playhead: i64,
+    pub provenance: Provenance,
 }
 
 /// What an undo/redo restored: the description and the playhead frame.
@@ -487,6 +558,7 @@ pub struct AssetChange {
 pub struct UndoOutcome {
     pub desc: String,
     pub playhead: i64,
+    pub provenance: Provenance,
 }
 
 fn atom_from_segment(seg: &Segment) -> Atom {
