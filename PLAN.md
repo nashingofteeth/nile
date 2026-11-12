@@ -455,15 +455,14 @@ shared by the TUI and agents — with no clipgen code present.
 - `fixtures/` + a golden harness: a synthetic 2-cam show (program, mic, ATEM
   switcher log, tiny Resolve project/EDL) with expected project JSON, EDL,
   frame counts and sampled-frame PSNR, wired into `scripts/check.sh`.
-- `nle-protocol` is wire-complete: one catalog action per apply (one undo
-  step), rational `from`/playhead times, `hello` + `PROTOCOL_VERSION`,
-  response-before-events with client buffering, a 64 MiB line cap, and
-  single-source `wire_catalog!` generation. `nile serve --stdio` (a
-  `Handler` over `Document`) is next.
-- **Order within step 0:** revision + provenance and the `nle-protocol`
-  wire are done; next is `nile serve --stdio`, then fixtures. These are
-  breaking format changes: close any live TUI before testing and rebuild old
-  projects.
+- `nile-protocol` and `nile serve --stdio` are wire-complete: one catalog
+  action per apply (one undo step), rational `from`/playhead times, `hello` +
+  `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
+  single-source `wire_catalog!` generation. The handler owns CAS, saves,
+  playhead, and events; next is fixtures.
+- **Order within step 0:** revision + provenance, the `nle-protocol` wire,
+  and `nile serve --stdio` are done; next is fixtures. These are breaking
+  format changes: close any live TUI before testing and rebuild old projects.
 
 ### 1. Sequences (blocking)
 
