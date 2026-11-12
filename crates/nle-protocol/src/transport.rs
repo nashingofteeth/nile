@@ -64,6 +64,7 @@ pub struct Client<R, W> {
     writer: W,
     next_id: u64,
     events: VecDeque<Event>,
+    skipped: usize,
 }
 
 impl<R, W> Client<R, W> {
@@ -73,6 +74,7 @@ impl<R, W> Client<R, W> {
             writer,
             next_id: 1,
             events: VecDeque::new(),
+            skipped: 0,
         }
     }
 }
@@ -98,12 +100,28 @@ impl<R: BufRead, W: Write> Client<R, W> {
             let Some(value) = self.read_line()? else {
                 return Err(ClientError::Eof);
             };
-            if let Some(event) = decode_event(&value)? {
-                self.events.push_back(event);
-                continue;
+            match decode_event(&value) {
+                Ok(Some(event)) => {
+                    self.events.push_back(event);
+                    continue;
+                }
+                // A newer server may send an event this build does not know.
+                // Skip it: abandoning the pending response would desync every
+                // later call by one reply.
+                Err(_) => {
+                    self.skipped += 1;
+                    continue;
+                }
+                Ok(None) => {}
             }
             let response: Response =
                 serde_json::from_value(value).map_err(|e| ClientError::Decode(e.to_string()))?;
+            let response = match response {
+                // A null-id error is the server's own parse/invalid-request
+                // path; there is no response to match, so surface the error.
+                Response::Error { id: None, error } => return Err(ClientError::Server(error)),
+                response => response,
+            };
             if response.id() != Some(&id) {
                 let got = response
                     .id()
@@ -123,25 +141,42 @@ impl<R: BufRead, W: Write> Client<R, W> {
         }
     }
 
+    /// How many notifications this client skipped because they did not
+    /// decode. A non-zero count after `hello` usually means version skew;
+    /// skipping keeps the pending response (and the connection) in sync.
+    pub fn skipped(&self) -> usize {
+        self.skipped
+    }
+
     /// The next buffered or incoming event. Blocks until an event arrives or
     /// the peer closes (`Ok(None)`); call it from an event loop, not between
     /// unrelated requests on a live connection.
     ///
+    /// Undecodable notifications are skipped and counted, like in
+    /// [`Client::call`]. A response with no pending call is an error.
     /// The server writes a response before its events, so after a successful
     /// [`Client::call`] this reads the event lines that followed it.
     pub fn next_event(&mut self) -> Result<Option<Event>, ClientError> {
-        if let Some(event) = self.events.pop_front() {
-            return Ok(Some(event));
+        loop {
+            if let Some(event) = self.events.pop_front() {
+                return Ok(Some(event));
+            }
+            let Some(value) = self.read_line()? else {
+                return Ok(None);
+            };
+            match decode_event(&value) {
+                Ok(Some(event)) => return Ok(Some(event)),
+                Err(_) => {
+                    self.skipped += 1;
+                    continue;
+                }
+                Ok(None) => {
+                    return Err(ClientError::Decode(
+                        "response without a pending call".to_string(),
+                    ));
+                }
+            }
         }
-        let Some(value) = self.read_line()? else {
-            return Ok(None);
-        };
-        if let Some(event) = decode_event(&value)? {
-            return Ok(Some(event));
-        }
-        Err(ClientError::Decode(
-            "response without a pending call".to_string(),
-        ))
     }
 
     fn read_line(&mut self) -> Result<Option<Value>, ClientError> {
