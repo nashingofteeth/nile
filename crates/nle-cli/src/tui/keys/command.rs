@@ -256,8 +256,8 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     use crate::cmd::export::{ExportOptions, QualityPreset};
 
     const USAGE: &str = "usage: :export -o FILE [--preset preview|balanced|max] \
-        [--encoder cpu|vaapi|qsv|x265|svtav1] [--encoder-preset P] [--crf N] [--bitrate B] \
-        [--parallel N]";
+        [--encoder cpu|vaapi|qsv|videotoolbox|vt|x265|svtav1] [--encoder-preset P] \
+        [--crf N] [--bitrate B] [--parallel N]";
     let output = match f.take("out").or_else(|| f.positional()) {
         Some(o) => PathBuf::from(o),
         None => return Some(USAGE.to_string()),
@@ -277,11 +277,12 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
         Some("cpu") => Some(crate::Encoder::Cpu),
         Some("vaapi") => Some(crate::Encoder::Vaapi),
         Some("qsv") => Some(crate::Encoder::Qsv),
+        Some("videotoolbox") | Some("vt") => Some(crate::Encoder::VideoToolbox),
         Some("x265") => Some(crate::Encoder::X265),
         Some("svtav1") | Some("svt-av1") => Some(crate::Encoder::SvtAv1),
         Some(other) => {
             return Some(format!(
-                "--encoder expects cpu|vaapi|qsv|x265|svtav1, got {other:?}"
+                "--encoder expects cpu|vaapi|qsv|videotoolbox|x265|svtav1, got {other:?}"
             ));
         }
     };

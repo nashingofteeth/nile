@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 use nle_core::Project;
-use nle_ffmpeg::{AudioCodec, Encoder, ExportSpec};
+use nle_ffmpeg::{AudioCodec, Encoder, ExportSpec, hardware_encoder};
 
 use crate::cmd::media::parse_f64;
 use crate::{log, say};
@@ -15,7 +15,8 @@ use crate::{log, say};
 /// 8-core CPU, not a portable quality matrix.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum QualityPreset {
-    /// VAAPI H.264; falls back to software if the GPU path fails.
+    /// Hardware H.264 (VideoToolbox on macOS, VAAPI on Linux); falls back to
+    /// software if the hardware path fails.
     Preview,
     /// x264 software, good quality/speed balance.
     #[default]
@@ -63,7 +64,7 @@ impl QualityPreset {
 
     fn base(self) -> (Encoder, u8, &'static str, &'static str) {
         match self {
-            QualityPreset::Preview => (Encoder::Vaapi, 26, "ultrafast", "6M"),
+            QualityPreset::Preview => (hardware_encoder(), 26, "ultrafast", "6M"),
             QualityPreset::Balanced => (Encoder::Cpu, 22, "fast", "8M"),
             QualityPreset::Max => (Encoder::X265, 20, "medium", "8M"),
         }
@@ -81,7 +82,7 @@ impl ExportOptions {
             None | Some(Encoder::Cpu) => tier_preset.to_string(),
             Some(Encoder::X265) => "medium".to_string(),
             Some(Encoder::SvtAv1) => "6".to_string(),
-            Some(Encoder::Vaapi | Encoder::Qsv) => "fast".to_string(),
+            Some(Encoder::Vaapi | Encoder::Qsv | Encoder::VideoToolbox) => "fast".to_string(),
         };
         if let Some(c) = self.crf {
             crf = c;
@@ -179,14 +180,10 @@ pub(crate) fn run_export(
     };
     let (plan, fallback) = match run(&spec) {
         Ok(plan) => (plan, false),
-        Err(e) if matches!(spec.encoder, Encoder::Vaapi | Encoder::Qsv) => {
+        Err(e) if spec.encoder.is_hardware() => {
             log::line(&format!(
                 "{} export failed ({e}); retrying on CPU",
-                match spec.encoder {
-                    Encoder::Vaapi => "VAAPI",
-                    Encoder::Qsv => "QSV",
-                    _ => unreachable!(),
-                }
+                spec.encoder.label()
             ));
             let cpu = options.cpu_fallback(&spec);
             (run(&cpu)?, true)
@@ -303,7 +300,7 @@ mod tests {
             ..Default::default()
         }
         .spec(out);
-        assert_eq!(preview.encoder, Encoder::Vaapi);
+        assert_eq!(preview.encoder, hardware_encoder());
         assert_eq!(preview.crf, 26);
         assert_eq!(preview.preset, "ultrafast");
 

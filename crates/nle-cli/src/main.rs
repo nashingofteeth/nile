@@ -492,7 +492,8 @@ enum Cmd {
         /// Quality tier: preview, balanced, max
         #[arg(long, value_enum, default_value = "balanced")]
         preset: QualityPreset,
-        /// Override the tier's encode engine (cpu|vaapi|qsv|x265|svt-av1)
+        /// Override the tier's encode engine
+        /// (cpu|vaapi|qsv|videotoolbox|x265|svt-av1)
         #[arg(long, value_enum)]
         encoder: Option<EncoderArg>,
         /// Override the tier's quality (0-51, lower = better)
@@ -501,7 +502,7 @@ enum Cmd {
         /// Override the encoder's own preset (x264 names or SVT-AV1 number)
         #[arg(long)]
         encoder_preset: Option<String>,
-        /// Override the hardware bitrate (vaapi/qsv)
+        /// Override the hardware bitrate (vaapi/qsv/videotoolbox)
         #[arg(long)]
         bitrate: Option<String>,
         /// Force N chunked-export workers; omit to stay single-worker
@@ -552,7 +553,8 @@ enum Cmd {
         /// Where to write the result
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
-        /// Encode engine: cpu (libx264), vaapi (Intel GPU), qsv (Quick Sync)
+        /// Encode engine: cpu (libx264), vaapi (Intel GPU), qsv (Quick Sync),
+        /// videotoolbox (macOS)
         #[arg(long, value_enum, default_value = "cpu")]
         encoder: EncoderArg,
         /// Stream copy: instant + lossless; starts exactly at --in, end lands
@@ -565,7 +567,7 @@ enum Cmd {
         /// x264 preset: ultrafast..veryslow [cpu only]
         #[arg(long, default_value = "fast")]
         preset: String,
-        /// Target bitrate for hardware encoders [vaapi/qsv]
+        /// Target bitrate for hardware encoders [vaapi/qsv/videotoolbox]
         #[arg(long, default_value = "8M")]
         bitrate: String,
     },
@@ -632,6 +634,8 @@ enum EncoderArg {
     Cpu,
     Vaapi,
     Qsv,
+    #[value(name = "videotoolbox", alias = "vt")]
+    VideoToolbox,
     X265,
     #[value(alias = "svtav1")]
     SvtAv1,
@@ -643,6 +647,7 @@ impl From<EncoderArg> for Encoder {
             EncoderArg::Cpu => Encoder::Cpu,
             EncoderArg::Vaapi => Encoder::Vaapi,
             EncoderArg::Qsv => Encoder::Qsv,
+            EncoderArg::VideoToolbox => Encoder::VideoToolbox,
             EncoderArg::X265 => Encoder::X265,
             EncoderArg::SvtAv1 => Encoder::SvtAv1,
         }

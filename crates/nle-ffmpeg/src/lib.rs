@@ -18,4 +18,4 @@ pub use graph::{
 // this crate as the media facade.
 pub use nle_core::media::{RawFormat, RawProbe, RawStream};
 pub use probe::{ProbeError, frame_count, keyframes, probe};
-pub use trim::{Encoder, FfmpegError, TrimError, TrimSpec, trim};
+pub use trim::{Encoder, FfmpegError, TrimError, TrimSpec, hardware_encoder, trim};

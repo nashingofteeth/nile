@@ -638,6 +638,12 @@ fn apply_encoder_tail(
             ));
             "venc"
         }
+        Encoder::VideoToolbox => {
+            // VT ingests software frames, but only nv12/yuv420p. Pin the
+            // format so an RGBA or 10-bit tail can't fail at encoder init.
+            graph.push_str(&format!(";\n[{vout}]format=yuv420p[venc]\n"));
+            "venc"
+        }
     };
     (graph, vmap)
 }
@@ -1105,6 +1111,12 @@ mod tests {
             g.contains("[vout]format=nv12,hwupload=extra_hw_frames=64[venc]"),
             "{g}"
         );
+
+        // VideoToolbox uploads internally: pin the pixel format, no hwupload.
+        let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::VideoToolbox, "vout");
+        assert_eq!(vmap, "venc");
+        assert!(g.contains("[vout]format=yuv420p[venc]"), "{g}");
+        assert!(!g.contains("hwupload"), "{g}");
 
         let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::Cpu, "vout");
         assert_eq!(vmap, "vout");

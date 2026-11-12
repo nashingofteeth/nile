@@ -109,7 +109,7 @@ pub(crate) fn run(
     // key those chunks by their own spec so they are never reused as GPU ones.
     let (paths, encoder, fallback) = match render_all(project, cache, &spec, &chunks) {
         Ok(paths) => (paths, spec.encoder, false),
-        Err(e) if matches!(spec.encoder, Encoder::Vaapi | Encoder::Qsv) => {
+        Err(e) if spec.encoder.is_hardware() => {
             log::line(&format!("chunked export fell back to CPU: {e}"));
             let cpu = options.cpu_fallback(&spec);
             (
