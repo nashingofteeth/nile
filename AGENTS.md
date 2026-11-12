@@ -29,8 +29,8 @@ Low-dependency stance: **the current set is frozen.** No new runtime
 dependencies without explicit justification (a hand-rolled ~50 lines beats a
 transitive tree for most needs).
 
-- Direct deps (10): clap, anyhow, thiserror, serde, serde_json, num-rational,
-  tempfile, ratatui, crossterm (+3 internal crates). Zero network code.
+- Direct deps: clap, anyhow, thiserror, serde, serde_json, num-rational,
+  tempfile, ratatui, crossterm (+ the internal workspace crates). Zero network code.
 - **`tui` is a default Cargo feature.** `cargo build/test
   --no-default-features` is the headless variant — keep it compiling (gate
   `mod`s, commands, and TUI-only helpers).

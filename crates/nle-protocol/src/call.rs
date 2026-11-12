@@ -46,7 +46,9 @@ wire_catalog! {
             )]
             from: Option<Seconds>,
         } = "action.preview";
-        /// Run one catalog action as one undo step.
+        /// Run one catalog action as one undo step. `Action::Undo`/`Redo` are
+        /// accepted here as aliases for the `undo`/`redo` methods; `from` is
+        /// ignored for those two (the history restores its own playhead).
         ActionApply {
             base_revision: u64,
             action: Action,
