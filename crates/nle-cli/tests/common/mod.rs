@@ -15,10 +15,12 @@
 #![allow(dead_code)] // each test binary uses a different subset
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::OnceLock;
 
+use serde_json::Value;
 use tempfile::TempDir;
 
 /// The project every helper addresses unless told otherwise.
@@ -489,6 +491,22 @@ impl Sandbox {
         child.wait().expect("wait")
     }
 
+    /// Spawn `nile serve --stdio` for a protocol test.
+    pub fn serve(&self) -> Serve {
+        let mut cmd = self.command(P, &["serve", "--stdio"]);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut child = cmd.spawn().expect("spawn nile serve");
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        Serve {
+            child,
+            stdin: Some(stdin),
+            stdout: BufReader::new(stdout),
+        }
+    }
+
     /// Every generated file under the sandbox's cache (proxy or black filler).
     pub fn cached_mp4s(&self) -> Vec<PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -735,4 +753,47 @@ fn hostile_template() -> &'static Path {
         cli(dir, &project, &["seek", "1.5"]);
         project
     })
+}
+
+/// A live `nile serve --stdio` child: one JSON object per line.
+pub struct Serve {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Serve {
+    pub fn send(&mut self, value: &Value) {
+        let stdin = self.stdin.as_mut().expect("serve stdin is open");
+        writeln!(stdin, "{value}").expect("write request");
+        stdin.flush().expect("flush request");
+    }
+
+    pub fn read(&mut self) -> Value {
+        let mut line = String::new();
+        let n = self.stdout.read_line(&mut line).expect("read nile serve");
+        assert!(n > 0, "nile serve closed stdout");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("non-JSON stdout line {line:?}: {e}"))
+    }
+
+    pub fn request(&mut self, value: Value) -> Value {
+        self.send(&value);
+        self.read()
+    }
+
+    /// Close stdin, let the server drain EOF, and return its exit status.
+    pub fn finish(mut self) -> std::process::ExitStatus {
+        drop(self.stdin.take());
+        self.child.wait().expect("wait for nile serve")
+    }
+}
+
+impl Drop for Serve {
+    fn drop(&mut self) {
+        if self.stdin.is_some() {
+            drop(self.stdin.take());
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
