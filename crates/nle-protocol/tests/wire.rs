@@ -448,13 +448,42 @@ fn events_before_a_response_are_buffered() {
 }
 
 #[test]
-fn an_unknown_event_fails_the_call() {
+fn an_unknown_event_is_skipped_and_the_call_succeeds() {
     let bad = r#"{"jsonrpc":"2.0","method":"job.progress","params":{}}"#;
     let response = r#"{"jsonrpc":"2.0","id":1,"result":"TITLE: t"}"#;
     let input = format!("{bad}\n{response}\n");
     let mut client = Client::new(Cursor::new(input), Vec::new());
-    let error = client.edl(None).expect_err("unknown event");
-    assert!(matches!(error, ClientError::Decode(_)), "got {error:?}");
+    assert_eq!(client.edl(None).expect("edl"), "TITLE: t");
+    assert_eq!(
+        client.skipped(),
+        1,
+        "the unknown notification is counted, not fatal"
+    );
+}
+
+#[test]
+fn next_event_skips_undecodable_notifications() {
+    let bad = r#"{"jsonrpc":"2.0","method":"job.progress","params":{}}"#;
+    let good = Event::Playhead {
+        at: Seconds::new(1, 2),
+    };
+    let good_line =
+        serde_json::to_string(&good.notification().expect("notification")).expect("event line");
+    let input = format!("{bad}\n{good_line}\n");
+    let mut client = Client::new(Cursor::new(input), Vec::new());
+    assert_eq!(client.next_event().expect("event"), Some(good));
+    assert_eq!(client.skipped(), 1);
+}
+
+#[test]
+fn a_null_id_error_is_reported_as_the_server_error() {
+    let line =
+        r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error: bad"}}"#;
+    let mut client = Client::new(Cursor::new(format!("{line}\n")), Vec::new());
+    match client.call(Call::ProjectShow).expect_err("null-id error") {
+        ClientError::Server(error) => assert_eq!(error.code, PARSE_ERROR),
+        other => panic!("expected the server error, got {other:?}"),
+    }
 }
 
 #[test]
