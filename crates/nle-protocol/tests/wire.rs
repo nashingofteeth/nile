@@ -792,6 +792,19 @@ fn a_call_without_params_uses_an_empty_object() {
 }
 
 #[test]
+fn undo_and_redo_are_accepted_as_apply_actions() {
+    for action in [Action::Undo, Action::Redo] {
+        let call = Call::ActionApply {
+            base_revision: 1,
+            action,
+            from: None,
+        };
+        let params = call.params().expect("params");
+        assert_eq!(Call::decode(call.method(), params).expect("decode"), call);
+    }
+}
+
+#[test]
 fn every_call_has_a_known_method_and_decodes() {
     let calls = all_calls();
     assert_eq!(
