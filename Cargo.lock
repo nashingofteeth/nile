@@ -767,6 +767,7 @@ dependencies = [
  "crossterm",
  "nle-core",
  "nle-ffmpeg",
+ "nle-protocol",
  "ratatui",
  "serde",
  "serde_json",

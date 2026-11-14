@@ -404,6 +404,26 @@ nile edl --track N                        # one track (debugging)
 NLE_LOG=/tmp/nle.log nile edit            # timestamped diagnostics
 ```
 
+### Protocol server (experimental)
+
+```sh
+nile serve --stdio
+```
+
+`nile serve` exposes the loaded project over JSON-RPC 2.0 on stdin/stdout, one
+object per line. Call `hello` first, then `project.show`, `timeline.edl`,
+`action.preview`, `action.apply`, `undo`, or `redo`:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"hello"}
+{"jsonrpc":"2.0","id":2,"method":"action.apply","params":{"base_revision":4,"action":{"action":"split","track":0,"at":1.0},"from":"1/2"}}
+```
+
+The wire is pre-1.0 and may change. It is a single-writer interface: close the
+TUI and other editing commands while it runs. `stdout` is protocol-only; logs
+go to stderr or `NLE_LOG`. The full contract, including the error codes and
+the event order, is in [docs/pitfalls/protocol.md](docs/pitfalls/protocol.md).
+
 ## Files and concurrency
 
 The project is `nile.json` unless this directory sets another default. The
@@ -443,7 +463,7 @@ The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a
 mode holds indices (extend, pool, `:` line), then apply in Normal mode.
 
-## One action catalog, three front-ends
+## One action catalog, four front-ends
 
 Every timeline edit is one `Action` in `nle-core`, executed by one runner:
 
@@ -452,8 +472,9 @@ Every timeline edit is one `Action` in `nle-core`, executed by one runner:
 | TUI keys | frequent actions | `s`, `dd`, `p`, `e`/`E`, `u` |
 | TUI `:` line | every action | `:delete --at 3 --ripple` |
 | CLI | every action | `nile delete --at 3 --ripple` |
+| Protocol server | agents and scripts | `action.apply` with `{"action":"split",…}` |
 
-Edits made in either front-end share undo history, the playhead, and the yank
+Edits made in any front-end share undo history, the playhead, and the yank
 register. Commands that need processes (`:import`, `:export`, `:detect`,
 `:edl-import`, `:otio-import`, `:add`) run in a worker while the monitor keeps
 playing.
