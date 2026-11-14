@@ -489,12 +489,14 @@ fn snap(fps: Option<&Seconds>, t: Seconds) -> Seconds {
 fn chunk_hash(project: &Project, spec: &ExportSpec, chunk: &Chunk) -> u64 {
     let mut h = DefaultHasher::new();
     EXPORT_CACHE_VERSION.hash(&mut h);
-    // The playhead is session state — the TUI rewrites it on every seek and
-    // no render reads it — so exclude it or every chunk is invalidated by a
-    // move of the cursor.
-    let mut snapshot = project.clone();
-    snapshot.playhead = Seconds::from_integer(0);
-    serde_json::to_vec(&snapshot)
+    // Hash only the active sequence: the render reads nothing else, and the
+    // playhead is session state (the TUI rewrites it on every seek). Keying
+    // by the whole project would let a move or edit in another sequence
+    // invalidate these chunks.
+    let mut sequence = project.active_sequence().clone();
+    sequence.playhead = Seconds::from_integer(0);
+    project.active_id().hash(&mut h);
+    serde_json::to_vec(&sequence)
         .unwrap_or_default()
         .hash(&mut h);
     // Project JSON has paths, not source content. Include size/mtime so a
@@ -773,6 +775,37 @@ mod tests {
         moved.set_playhead(1.5);
         assert_ne!(moved.playhead, p.playhead);
         assert_eq!(chunk_hash(&p, &spec, &one), chunk_hash(&moved, &spec, &one));
+    }
+
+    #[test]
+    fn chunk_hash_ignores_other_sequences() {
+        let p = project();
+        let spec = ExportOptions::default().spec(Path::new("/tmp/out.mp4"));
+        let one = Chunk {
+            a: Seconds::from_integer(0),
+            b: Seconds::from_integer(2),
+            pre: Seconds::from_integer(0),
+            post: Seconds::from_integer(2),
+        };
+        let mut other = p.clone();
+        let id = other.add_sequence("Second", Some(Seconds::from_integer(24)), None);
+        let sequence = other.sequence_mut(id).unwrap();
+        sequence.playhead = Seconds::from_integer(3);
+        sequence.timeline.video_track_mut().unwrap().segments = vec![Segment::Gap(Gap {
+            duration: Seconds::from_integer(2),
+        })];
+        assert_eq!(
+            chunk_hash(&p, &spec, &one),
+            chunk_hash(&other, &spec, &one),
+            "a move or edit in sequence 2 must not invalidate sequence 1"
+        );
+
+        other.select_sequence(id).unwrap();
+        assert_ne!(
+            chunk_hash(&p, &spec, &one),
+            chunk_hash(&other, &spec, &one),
+            "switching the active sequence changes what is rendered"
+        );
     }
 
     /// The fixture plus a second video track reading a 24 fps source: a cut at

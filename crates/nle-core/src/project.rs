@@ -848,6 +848,37 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_broken_sequence_lists() {
+        let mut p = Project::new();
+        p.sequences.clear();
+        assert!(matches!(p.validate(), Err(ProjectError::NoSequences)));
+
+        let mut p = Project::new();
+        p.sequences.push(p.sequences[0].clone());
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::SequenceDuplicate(1))
+        ));
+
+        let mut p = Project::new();
+        p.active = 99;
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::SequenceNotFound(99))
+        ));
+    }
+
+    #[test]
+    fn select_sequence_refuses_an_unknown_id_and_keeps_the_active_one() {
+        let mut p = Project::new();
+        assert!(matches!(
+            p.select_sequence(99),
+            Err(ProjectError::SequenceNotFound(99))
+        ));
+        assert_eq!(p.active_id(), 1);
+    }
+
+    #[test]
     fn validate_rejects_a_non_positive_frame_rate() {
         for rate in [Seconds::from_integer(0), Seconds::from_integer(-30)] {
             let mut p = Project::new();

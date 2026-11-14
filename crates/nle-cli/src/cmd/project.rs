@@ -319,12 +319,15 @@ pub(crate) fn secs_f64(t: &Seconds) -> f64 {
 
 pub(crate) fn cmd_show(project_path: &Path, json: bool, sequence: Option<u32>) -> Result<()> {
     let mut project = Project::load(project_path)?;
-    if let Some(id) = sequence {
-        project.select_sequence(id)?;
-    }
     if json {
+        if sequence.is_some() {
+            bail!("--json prints the whole project; omit --sequence");
+        }
         say!("{}", serde_json::to_string_pretty(&project)?);
         return Ok(());
+    }
+    if let Some(id) = sequence {
+        project.select_sequence(id)?;
     }
     say!(
         "{} — {}",
