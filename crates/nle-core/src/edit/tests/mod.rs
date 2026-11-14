@@ -27,6 +27,9 @@ mod trim;
 fn without_revision(p: &Project) -> Project {
     let mut p = p.clone();
     p.revision = 0;
+    for sequence in &mut p.sequences {
+        sequence.manual_edits = 0;
+    }
     p
 }
 

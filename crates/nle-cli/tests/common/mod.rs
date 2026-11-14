@@ -433,6 +433,25 @@ impl Sandbox {
         }
     }
 
+    /// A container's coded picture size, `(w, h)`.
+    pub fn size(&self, file: &str) -> (u32, u32) {
+        let got = self.probe(
+            file,
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0",
+            ],
+        );
+        let (w, h) = got
+            .split_once(',')
+            .unwrap_or_else(|| panic!("{file}: {got}"));
+        (w.parse().expect("width"), h.parse().expect("height"))
+    }
+
     // ------------------------------------------------------------- invariant
 
     /// One step of the hostile battery: no panic, and an exit code of 0

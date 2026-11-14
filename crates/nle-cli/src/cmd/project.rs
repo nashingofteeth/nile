@@ -19,13 +19,13 @@ use nle_ffmpeg::probe;
 
 use super::asset_summary;
 use super::{cli_index, run_cli_action};
-use crate::CacheCmd;
 #[cfg(feature = "tui")]
 use crate::mpv;
 use crate::preview;
 use crate::proxy;
 #[cfg(feature = "tui")]
 use crate::tui;
+use crate::{CacheCmd, SequenceCmd, parse_fps_arg};
 use crate::{log, say};
 #[cfg(feature = "tui")]
 pub(crate) fn cmd_edit(
@@ -88,8 +88,15 @@ pub(crate) fn cmd_edit(
 }
 
 /// Print the `edl://` URL the monitor plays (or one track's, for debugging).
-pub(crate) fn cmd_edl(project_path: &Path, track: Option<usize>) -> Result<()> {
-    let project = Project::load(project_path)?;
+pub(crate) fn cmd_edl(
+    project_path: &Path,
+    track: Option<usize>,
+    sequence: Option<u32>,
+) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    if let Some(id) = sequence {
+        project.select_sequence(id)?;
+    }
     let Some(track) = track else {
         say!("{}", preview::build_composite_edl(&project, project_path)?);
         return Ok(());
@@ -175,9 +182,9 @@ pub(crate) fn cmd_add(
     in_point: Option<&str>,
     out_point: Option<&str>,
 ) -> Result<()> {
-    let mut doc = Document::with_history(
+    let mut doc = Document::with_histories(
         Project::load(project_path)?,
-        edit::History::load_project(project_path).unwrap_or_default(),
+        edit::Histories::load_project(project_path).unwrap_or_default(),
     );
     // `--track` is 1-based (matching the `v1`/`a1` labels); 0 internally.
     // 0 is not a track number — it used to silently mean "track 1".
@@ -211,7 +218,7 @@ pub(crate) fn cmd_add(
     // same `Paste` the TUI's pool insert runs.
     doc.save(project_path)?;
     if imported {
-        doc.save_history(&edit::History::sidecar_path(project_path))?;
+        doc.save_history(&edit::Histories::sidecar_path(project_path))?;
     }
     run_cli_action(
         project_path,
@@ -310,8 +317,11 @@ pub(crate) fn secs_f64(t: &Seconds) -> f64 {
     *t.numer() as f64 / *t.denom() as f64
 }
 
-pub(crate) fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
-    let project = Project::load(project_path)?;
+pub(crate) fn cmd_show(project_path: &Path, json: bool, sequence: Option<u32>) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    if let Some(id) = sequence {
+        project.select_sequence(id)?;
+    }
     if json {
         say!("{}", serde_json::to_string_pretty(&project)?);
         return Ok(());
@@ -374,6 +384,79 @@ pub(crate) fn cmd_media_ls(project_path: &Path) -> Result<()> {
 }
 
 /// `nile track ls` — the track listing. (add/mute/rm are catalog actions.)
+/// `nile sequence ls|add|use` — the project's timelines. Selection is
+/// session state: edits and undo follow the active sequence.
+pub(crate) fn cmd_sequence(project_path: &Path, action: &SequenceCmd) -> Result<()> {
+    match action {
+        SequenceCmd::Ls => {
+            let project = Project::load(project_path)?;
+            say!(
+                "{} — {} sequence(s)",
+                project_path.display(),
+                project.sequences.len()
+            );
+            for sequence in &project.sequences {
+                let mark = if sequence.id == project.active_id() {
+                    "*"
+                } else {
+                    " "
+                };
+                let fps = sequence
+                    .fps
+                    .map(|fps| format!("{}/{} fps", fps.numer(), fps.denom()))
+                    .unwrap_or_else(|| "no fps".into());
+                let video = sequence
+                    .video
+                    .as_ref()
+                    .map(|v| format!("{}×{}", v.width, v.height))
+                    .unwrap_or_else(|| "no size".into());
+                let clips: usize = sequence
+                    .timeline
+                    .tracks
+                    .iter()
+                    .flat_map(|track| track.segments.iter())
+                    .filter(|seg| matches!(seg, Segment::Clip(_)))
+                    .count();
+                say!(
+                    "{mark} #{:<2} {:<20} {fps:<12} {video:<11} {clips} clip(s)",
+                    sequence.id,
+                    sequence.name
+                );
+            }
+            Ok(())
+        }
+        SequenceCmd::Add {
+            name,
+            width,
+            height,
+            fps,
+        } => {
+            let video = match (width, height) {
+                (Some(width), Some(height)) => Some(VideoSettings {
+                    width: *width,
+                    height: *height,
+                }),
+                (None, None) => None,
+                _ => bail!("--width and --height go together"),
+            };
+            let fps = fps.as_deref().map(parse_fps_arg).transpose()?;
+            let mut doc = Document::new(Project::load(project_path)?);
+            let id = doc.add_sequence(name.clone(), fps, video);
+            doc.save(project_path)?;
+            say!("✓ sequence #{id} {name} (not active — `nile sequence use {id}`)");
+            Ok(())
+        }
+        SequenceCmd::Use { id } => {
+            let mut project = Project::load(project_path)?;
+            project.select_sequence(*id)?;
+            let name = project.active_sequence().name.clone();
+            Document::new(project).save(project_path)?;
+            say!("✓ sequence #{id} {name} is active");
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn cmd_track_ls(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
     say!(
@@ -440,7 +523,15 @@ pub(crate) fn show_report(project: &Project) -> String {
         .filter(|s| matches!(s, Segment::Clip(_)))
         .count();
 
-    let mut out = format!(
+    let mut out = String::new();
+    if project.sequences.len() > 1 {
+        out += &format!(
+            "#{} {} · ",
+            project.active_id(),
+            project.active_sequence().name
+        );
+    }
+    out += &format!(
         "{} clip(s) · {} s",
         clip_count,
         format_seconds(&project.timeline.end())

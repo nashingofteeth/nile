@@ -23,6 +23,77 @@ fn baseline_export() {
 }
 
 #[test]
+fn two_sequences_export_at_their_own_sizes() {
+    let s = Sandbox::new();
+    s.base(); // sequence 1: 320x240, three clips
+
+    s.ok(&[
+        "sequence", "add", "Vertical", "--width", "1080", "--height", "1920", "--fps", "30/1",
+    ]);
+    let list = s.ok(&["sequence", "ls"]);
+    assert!(list.contains("* #1"), "{list}");
+    assert!(list.contains("#2  Vertical"), "{list}");
+    assert!(list.contains("1080×1920"), "{list}");
+
+    s.ok(&["sequence", "use", "2"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["export", "-o", "vertical.mp4"]);
+    assert_eq!(
+        s.size("vertical.mp4"),
+        (1080, 1920),
+        "the active sequence's size"
+    );
+
+    s.ok(&["export", "--sequence", "1", "-o", "landscape.mp4"]);
+    assert_eq!(
+        s.size("landscape.mp4"),
+        (320, 240),
+        "--sequence picks the other timeline without switching"
+    );
+    // The explicit export did not change the stored active sequence.
+    assert!(s.ok(&["sequence", "ls"]).contains("* #2"));
+    assert!(s.ok(&["show"]).contains("#2 Vertical"), "{}", s.show());
+    assert!(s.ok(&["show", "--sequence", "1"]).contains("320×240"));
+}
+
+#[test]
+fn cli_undo_follows_the_active_sequence() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["split", "--at", "1"]);
+
+    let segments = |s: &Sandbox| {
+        let project: serde_json::Value =
+            serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+        let active = project["active"].as_u64().expect("active");
+        project["sequences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|sequence| sequence["id"].as_u64() == Some(active))
+            .unwrap()["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(segments(&s), 4, "the split landed on sequence 1");
+
+    s.ok(&["sequence", "add", "Second"]);
+    s.ok(&["sequence", "use", "2"]);
+    let refused = s.run(&["undo"]);
+    assert!(!refused.status.success(), "nothing to undo on sequence 2");
+    assert_eq!(segments(&s), 0, "sequence 2 is still empty");
+
+    s.ok(&["sequence", "use", "1"]);
+    s.ok(&["undo"]);
+    assert_eq!(
+        segments(&s),
+        3,
+        "undo on sequence 1 replayed its own split only"
+    );
+}
+
+#[test]
 fn split_and_ripple_delete() {
     let s = Sandbox::new();
     s.base();
@@ -493,6 +564,14 @@ fn model_json(path: &std::path::Path) -> serde_json::Value {
         .as_object_mut()
         .expect("project object")
         .remove("revision");
+    if let Some(sequences) = value["sequences"].as_array_mut() {
+        for sequence in sequences {
+            sequence
+                .as_object_mut()
+                .expect("sequence object")
+                .remove("manual_edits");
+        }
+    }
     value
 }
 

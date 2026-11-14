@@ -164,7 +164,7 @@ fn the_dump_carries_the_saved_undo_history() {
     })
     .unwrap();
     doc.save(&path).unwrap();
-    doc.save_history(&History::sidecar_path(&path)).unwrap();
+    doc.save_history(&Histories::sidecar_path(&path)).unwrap();
 
     // `u` only works if the dump loaded the sidecar: `App::new` starts with
     // an empty stack, so this is the distinguishing case.

@@ -15,7 +15,7 @@ pub mod playhead;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
-use nle_core::edit::{Actor, EditError, History};
+use nle_core::edit::{Actor, EditError, Histories, History};
 use nle_core::{
     Action, Document, Outcome as ActionOutcome, Project, ProjectError, Register, load_register,
     save_register,
@@ -43,18 +43,24 @@ impl Session {
     /// the CLI), and the shared register.
     pub fn load(path: &Path) -> Result<Self, SessionError> {
         let project = Project::load(path)?;
-        let history = History::load_project(path).unwrap_or_default();
-        Ok(Self::from_history(project, history, path.to_path_buf()))
+        let histories = Histories::load_project(path).unwrap_or_default();
+        Ok(Self::from_histories(project, histories, path.to_path_buf()))
     }
 
-    /// Adopt a project and history already loaded elsewhere (the TUI), and
-    /// read the shared register beside `path`.
-    pub fn from_history(project: Project, history: History, path: PathBuf) -> Self {
+    /// Adopt a project and its per-sequence histories (the TUI), and read the
+    /// shared register beside `path`.
+    pub fn from_histories(project: Project, histories: Histories, path: PathBuf) -> Self {
         Self {
-            document: Document::with_history(project, history),
+            document: Document::with_histories(project, histories),
             register: load_register(&path),
             path,
         }
+    }
+
+    /// Adopt a single stack for the active sequence (tests, scratch dumps).
+    pub fn from_history(project: Project, history: History, path: PathBuf) -> Self {
+        let active = project.active_id();
+        Self::from_histories(project, Histories::from_history(active, history), path)
     }
 
     pub fn path(&self) -> &Path {
@@ -96,9 +102,9 @@ impl Session {
     /// undo/redo preview is real, and the cloned register keeps a preview yank
     /// away from the live clipboard.
     pub fn preview(&self, action: &Action, from: f64) -> Result<ActionOutcome, EditError> {
-        let mut document = Document::with_history(
+        let mut document = Document::with_histories(
             self.document.project().clone(),
-            self.document.history().clone(),
+            self.document.histories().clone(),
         );
         let mut register = self.register.clone();
         document.edit(action, from, &mut register)
@@ -121,7 +127,7 @@ impl Session {
     /// Save only the undo stack beside the project.
     pub fn save_history(&self) -> std::io::Result<()> {
         self.document
-            .save_history(&History::sidecar_path(&self.path))
+            .save_history(&Histories::sidecar_path(&self.path))
     }
 
     /// Drop the undo stack and its sidecar (a rebuild).
