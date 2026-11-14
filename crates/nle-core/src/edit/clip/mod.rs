@@ -196,8 +196,8 @@ pub fn paste_on(
     // (the straddled segment is re-created as the right piece, so it has
     // its own note instead).
     let covered_upto = straddle.map(|(ei, _)| ei).unwrap_or(track.segments.len());
-    for k in si + 1..covered_upto {
-        notes.push(format!("replaced {}", segment_note(&track.segments[k])));
+    for segment in track.segments.iter().take(covered_upto).skip(si + 1) {
+        notes.push(format!("replaced {}", segment_note(segment)));
     }
 
     // What survives past the paste: the straddled segment's tail (none
