@@ -12,7 +12,7 @@ use nle_core::{frame_of, track_label};
 
 use crate::mpv::Mpv;
 
-use super::super::actions::{clip_under, run_action};
+use super::super::actions::{clip_under, persist_and_refresh, run_action, select_sequence};
 use super::super::jobs::{start_import, start_job};
 use super::super::keys::pool::leave_pool_command;
 use super::super::motion::fmt_timecode;
@@ -20,7 +20,7 @@ use super::super::{App, Mode, persist_playhead, secs};
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :cache · :filmstrip · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :sequence · :media · :cache · :filmstrip · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// Split a `:import` argument string into paths. Quoted paths keep their
 /// spaces; a backslash escapes the next character, so `a\ b.mp4` works too.
@@ -110,6 +110,7 @@ pub(crate) fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<S
         "show" => Some(show_command(app)),
         "media" => Some(media_ls_command(app)),
         "track" => Some(track_ls_command(app)),
+        "sequence" => sequence_command(app, player, &mut f),
         "cache" => cache_command(app, &mut f),
         "filmstrip" => filmstrip_command(app, &mut f),
         "reload" => {
@@ -321,7 +322,7 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     };
     let project_path = app.project.path().to_path_buf();
     std::thread::spawn(move || {
-        let result = crate::cmd::export::run_export(&project_path, &output, &options, true)
+        let result = crate::cmd::export::run_export(&project_path, &output, None, &options, true)
             .map_err(|e| e.to_string());
         let _ = job.send(result);
     });
@@ -582,6 +583,108 @@ pub(crate) fn media_ls_command(app: &App) -> String {
         crate::log::line(&format!("asset #{} {}", a.id, a.path.display()));
     }
     format!("{} asset(s) · {used} in use", app.project.media.len())
+}
+
+/// `:sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]]` —
+/// list, switch, or add sequences. Switching is session state: it saves the
+/// project (active + playhead), switches undo, and reloads the monitor.
+pub(crate) fn sequence_command(
+    app: &mut App,
+    player: &dyn Mpv,
+    f: &mut action::Flags,
+) -> Option<String> {
+    const USAGE: &str = "usage: :sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]]";
+    let verb = f.positional();
+    match verb.as_deref() {
+        None | Some("ls") => {
+            if let Err(e) = f.finish(USAGE) {
+                return Some(e.to_string());
+            }
+            let active = app.project.active_id();
+            let lines: Vec<String> = app
+                .project
+                .sequences
+                .iter()
+                .map(|sequence| {
+                    let mark = if sequence.id == active { "*" } else { " " };
+                    format!("{mark}#{} {}", sequence.id, sequence.name)
+                })
+                .collect();
+            for line in &lines {
+                crate::log::line(line);
+            }
+            Some(format!(
+                "{} sequence(s) · {}",
+                lines.len(),
+                lines.join(" · ")
+            ))
+        }
+        Some("use") => {
+            let Some(id) = f.positional() else {
+                return Some(USAGE.to_string());
+            };
+            let id = match id.parse::<u32>() {
+                Ok(id) => id,
+                Err(_) => return Some(format!("sequence id expects a number, got {id:?}")),
+            };
+            if let Err(e) = f.finish(USAGE) {
+                return Some(e.to_string());
+            }
+            select_sequence(app, player, id)
+        }
+        Some("add") => {
+            let Some(name) = f.positional() else {
+                return Some(USAGE.to_string());
+            };
+            let parse_u32 = |flag: &str, value: Option<String>| match value {
+                Some(v) => v
+                    .parse::<u32>()
+                    .map(Some)
+                    .map_err(|_| format!("--{flag} expects a number, got {v:?}")),
+                None => Ok(None),
+            };
+            let width = match parse_u32("width", f.take("width")) {
+                Ok(w) => w,
+                Err(e) => return Some(e),
+            };
+            let height = match parse_u32("height", f.take("height")) {
+                Ok(h) => h,
+                Err(e) => return Some(e),
+            };
+            let video = match (width, height) {
+                (Some(width), Some(height)) => Some(nle_core::VideoSettings { width, height }),
+                (None, None) => None,
+                _ => return Some("--width and --height go together".to_string()),
+            };
+            let fps = match f.take("fps") {
+                Some(rate) => match crate::parse_fps_arg(&rate) {
+                    Ok(rate) => Some(rate),
+                    Err(e) => return Some(format!("{e}")),
+                },
+                None => None,
+            };
+            if let Err(e) = f.finish(USAGE) {
+                return Some(e.to_string());
+            }
+            let id = app.project.add_sequence(name.clone(), fps, video);
+            persist_and_refresh(app, player);
+            Some(format!(
+                "sequence #{id} {name} added (not active — `:sequence use {id}`)"
+            ))
+        }
+        Some(id) => {
+            let id = match id.parse::<u32>() {
+                Ok(id) => id,
+                Err(_) => {
+                    return Some(format!("unknown sequence command: {id} — {USAGE}"));
+                }
+            };
+            if let Err(e) = f.finish(USAGE) {
+                return Some(e.to_string());
+            }
+            select_sequence(app, player, id)
+        }
+    }
 }
 
 /// `:track ls` — one line per track (the label carries the number).

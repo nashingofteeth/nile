@@ -4,6 +4,23 @@ use super::*;
 use crate::time::Seconds;
 use crate::timeline::{Clip, Segment};
 
+/// The fixture project's single sequence.
+const SEQ: u32 = 1;
+
+fn save(history: &History, path: &Path) {
+    Histories::from_history(SEQ, history.clone())
+        .save(path)
+        .unwrap();
+}
+
+fn load(path: &Path) -> History {
+    Histories::load(path)
+        .unwrap()
+        .get(SEQ)
+        .expect("sequence stack")
+        .clone()
+}
+
 #[test]
 fn failed_batches_leave_no_trace() {
     let p = fixture();
@@ -17,12 +34,12 @@ fn failed_batches_leave_no_trace() {
 #[test]
 fn sidecar_path_maps_beside_the_project() {
     assert_eq!(
-        History::sidecar_path(Path::new("nile.json")),
+        Histories::sidecar_path(Path::new("nile.json")),
         PathBuf::from(".nile/nile/history.json")
     );
     // A project without an extension still gets a state directory.
     assert_eq!(
-        History::sidecar_path(Path::new("dir/proj")),
+        Histories::sidecar_path(Path::new("dir/proj")),
         PathBuf::from("dir/.nile/proj/history.json")
     );
 }
@@ -32,12 +49,11 @@ fn an_old_adjacent_history_is_copied_into_the_state_directory() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("nile.json");
     let legacy = dir.path().join("nile.history.json");
-    let history = History::default();
-    history.save(&legacy).unwrap();
-    let loaded = History::load_project(&project).unwrap();
-    assert_eq!(loaded.depth(), 0);
+    save(&History::default(), &legacy);
+    let loaded = Histories::load_project(&project).unwrap();
+    assert_eq!(loaded.get(SEQ).unwrap().depth(), 0);
     assert!(
-        History::sidecar_path(&project).exists(),
+        Histories::sidecar_path(&project).exists(),
         "the legacy sidecar is copied into .nile/<stem>/"
     );
     assert!(legacy.exists(), "the old file is left for safety");
@@ -54,7 +70,7 @@ fn sidecar_round_trips_both_stacks() {
     h.undo(&mut p).unwrap(); // done=[split], undone=[trim]
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nle.history.json");
-    h.save(&path).unwrap();
+    save(&h, &path);
 
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
@@ -66,7 +82,7 @@ fn sidecar_round_trips_both_stacks() {
     assert!(text.contains("undone"), "{text}");
     assert!(!text.contains("30/1"), "{text}");
 
-    let mut loaded = History::load(&path).unwrap();
+    let mut loaded = load(&path);
     assert!(loaded.can_undo());
     assert!(loaded.can_redo());
     let mut q = p.clone();
@@ -76,6 +92,41 @@ fn sidecar_round_trips_both_stacks() {
     loaded.undo(&mut q).unwrap();
     loaded.undo(&mut q).unwrap(); // the split undoes
     assert_eq!(clip_ids(&q), vec![1, 2]);
+}
+
+#[test]
+fn the_sidecar_keys_stacks_by_sequence() {
+    let mut p = fixture();
+    let mut first = History::default();
+    let batch = split(&p, 4.0).unwrap();
+    first.apply(&mut p, batch, 0).unwrap();
+    let mut second = History::default();
+    let batch = split(&p, 1.0).unwrap();
+    second.apply(&mut p, batch, 0).unwrap();
+    let mut all = Histories::default();
+    all.set(1, first);
+    all.set(2, second);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nle.history.json");
+    all.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"stacks\""), "{text}");
+    assert!(text.contains("\"1\""), "{text}");
+    assert!(text.contains("\"2\""), "{text}");
+
+    let loaded = Histories::load(&path).unwrap();
+    assert_eq!(loaded.get(1).unwrap().depth(), 1);
+    assert_eq!(loaded.get(2).unwrap().depth(), 1);
+    assert!(loaded.get(3).is_none());
+}
+
+#[test]
+fn a_v16_sidecar_is_rejected_not_misread() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.json");
+    std::fs::write(&path, "{\"version\": 16, \"done\": [], \"undone\": []}").unwrap();
+    assert!(Histories::load(&path).is_err());
 }
 
 #[test]
@@ -109,14 +160,14 @@ fn persisted_edits_undo_by_topology_after_reload() {
     h.apply(&mut p, batch, 0).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nle.history.json");
-    h.save(&path).unwrap();
+    save(&h, &path);
 
     // Restart simulation: project and history both reloaded from disk
     // (production saves both after every edit). The reloaded project
     // is in the post-edit state; history is purely from the sidecar.
     let saved_project = serde_json::to_string(&p).unwrap();
     let mut p2: Project = serde_json::from_str(&saved_project).unwrap();
-    let mut h2 = History::load(&path).unwrap();
+    let mut h2 = load(&path);
     h2.undo(&mut p2).unwrap(); // paste_ripple
     h2.undo(&mut p2).unwrap(); // trim_in
     let outcome = h2.undo(&mut p2).unwrap(); // split
@@ -138,14 +189,14 @@ fn stale_history_fails_cleanly_on_edited_project() {
     h.apply(&mut p, batch, 0).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nle.history.json");
-    h.save(&path).unwrap();
+    save(&h, &path);
 
     // Hand-edit outside undo: renumber a clip id.
     let mut p2 = fixture();
     if let Segment::Clip(c) = &mut p2.timeline.video_track_mut().unwrap().segments[2] {
         c.id = 99;
     }
-    let mut h2 = History::load(&path).unwrap();
+    let mut h2 = load(&path);
     assert!(matches!(h2.undo(&mut p2), Err(EditError::History(_))));
     // project untouched by the failed undo
     assert_eq!(clip_ids(&p2), vec![1, 99]);
@@ -269,11 +320,11 @@ fn asset_removal_sidecar_round_trips() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nle.history.json");
-    h.save(&path).unwrap();
+    save(&h, &path);
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("\"kind\": \"assets\""), "{text}");
 
-    let mut h2 = History::load(&path).unwrap();
+    let mut h2 = load(&path);
     let mut p2 = p.clone();
     h2.undo(&mut p2).unwrap();
     assert!(p2.asset(spare).is_some(), "asset restored after reload");
@@ -320,8 +371,8 @@ fn history_depth_is_capped_and_redo_clears() {
     // cap survives a save/load round trip
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nle.history.json");
-    h.save(&path).unwrap();
-    assert_eq!(History::load(&path).unwrap().depth(), MAX_HISTORY);
+    save(&h, &path);
+    assert_eq!(load(&path).depth(), MAX_HISTORY);
 
     // a new edit clears the redo stack
     h.undo(&mut p).unwrap();
@@ -338,15 +389,14 @@ fn corrupt_and_foreign_sidecars_start_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let bad = dir.path().join("bad.json");
     std::fs::write(&bad, "not json").unwrap();
-    assert!(History::load(&bad).is_err());
+    assert!(Histories::load(&bad).is_err());
 
     // v2 stored raw op shapes: rejected, never misread
     let old = dir.path().join("old.json");
     std::fs::write(&old, "{\"version\": 2, \"done\": [], \"undone\": []}").unwrap();
-    assert!(History::load(&old).is_err());
+    assert!(Histories::load(&old).is_err());
     assert!(
         History::restore(HistoryState {
-            version: 2,
             done: vec![],
             undone: vec![],
         })
@@ -362,7 +412,7 @@ fn corrupt_and_foreign_sidecars_start_fresh() {
     let batch = split(&p, 4.0).unwrap();
     h.apply(&mut p, batch, 0).unwrap();
     let good = dir.path().join("good.json");
-    h.save(&good).unwrap();
+    save(&h, &good);
     let text = std::fs::read_to_string(&good).unwrap();
     let bad = dir.path().join("denom.json");
     std::fs::write(
@@ -370,7 +420,7 @@ fn corrupt_and_foreign_sidecars_start_fresh() {
         text.replace("\"speed\": \"1/1\"", "\"speed\": \"5/0\""),
     )
     .unwrap();
-    assert!(History::load(&bad).is_err());
+    assert!(Histories::load(&bad).is_err());
 }
 
 #[test]
@@ -451,8 +501,8 @@ fn provenance_round_trips_through_the_sidecar() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nle.history.json");
-    h.save(&path).unwrap();
-    let loaded = History::load(&path).unwrap();
+    save(&h, &path);
+    let loaded = load(&path);
     let after = loaded.state().done.last().unwrap().provenance().clone();
     assert_eq!(after, before);
     assert!(matches!(

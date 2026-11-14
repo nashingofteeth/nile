@@ -125,9 +125,13 @@ impl ExportOptions {
 pub(crate) fn cmd_export(
     project_path: &Path,
     output: &Path,
+    sequence: Option<u32>,
     options: &ExportOptions,
 ) -> Result<()> {
-    say!("{}", run_export(project_path, output, options, false)?);
+    say!(
+        "{}",
+        run_export(project_path, output, sequence, options, false)?
+    );
     Ok(())
 }
 
@@ -137,10 +141,14 @@ pub(crate) fn cmd_export(
 pub(crate) fn run_export(
     project_path: &Path,
     output: &Path,
+    sequence: Option<u32>,
     options: &ExportOptions,
     quiet: bool,
 ) -> Result<String> {
-    let project = Project::load(project_path)?;
+    let mut project = Project::load(project_path)?;
+    if let Some(id) = sequence {
+        project.select_sequence(id)?;
+    }
     // The scheduler is opt-in: a local benchmark showed no gain from
     // splitting an x264 (already multithreaded) or a short VAAPI export.
     // `--parallel N` is for benchmarking/experiments and for long-proxy
@@ -259,7 +267,7 @@ pub(crate) fn cmd_bench(
                 ..Default::default()
             };
             let started = std::time::Instant::now();
-            let summary = run_export(project_path, &out, &options, true)?;
+            let summary = run_export(project_path, &out, None, &options, true)?;
             let elapsed = started.elapsed().as_secs_f64();
             let actual = nle_ffmpeg::frame_count(&out).unwrap_or(frames);
             let effective = if elapsed > 0.0 {

@@ -19,9 +19,9 @@ use super::project::{save_and_reset_history, secs_f64};
 use super::{CommandReport, asset_summary};
 use crate::{parse_fps_arg, say};
 pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
-    let mut doc = Document::with_history(
+    let mut doc = Document::with_histories(
         Project::load(project_path)?,
-        edit::History::load_project(project_path).unwrap_or_default(),
+        edit::Histories::load_project(project_path).unwrap_or_default(),
     );
     let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
     let (files, mut errors) = expand_import_paths(files);
@@ -68,7 +68,7 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
     let added = ids.len();
     if added > 0 {
         doc.save(project_path)?;
-        doc.save_history(&edit::History::sidecar_path(project_path))?;
+        doc.save_history(&edit::Histories::sidecar_path(project_path))?;
     }
     let clip_count = |p: &Project| {
         p.timeline

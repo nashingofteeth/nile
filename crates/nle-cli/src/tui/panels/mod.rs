@@ -148,7 +148,7 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
         return vec![
             "type a command · enter run · esc cancel · tab completes paths",
             "edits   :split :trim-in|out :delete :yank :paste :gap :extend :speed",
-            "history :undo :redo · tracks :track add video|audio · :track rm N",
+            "history :undo :redo · :track add|rm · :sequence use N",
             "media   :import PATH|DIR · :add FILE · :media ls · :media rm N",
             "more    :show :seek :purge :detect :edl-import :otio-import :export",
         ];

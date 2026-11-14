@@ -619,7 +619,7 @@ fn hostile_projects() {
     // Rewrite the single video track's segments, optionally emptying the pool.
     let write = |name: &str, segments: serde_json::Value, empty_pool: bool| {
         let mut project = base.clone();
-        project["timeline"]["tracks"][0]["segments"] = segments;
+        project["sequences"][0]["timeline"]["tracks"][0]["segments"] = segments;
         if empty_pool {
             project["media"] = json!([]);
         }
