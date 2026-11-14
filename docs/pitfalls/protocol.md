@@ -90,9 +90,11 @@ close the TUI and other edits while it runs; foreign-change adoption is not
 implemented yet. Mutations go through one `apply`, which owns CAS, the edit,
 playhead conversion, saving, and events.
 
-The server sets the shared playhead only when `nle_core::Outcome.playhead` is
-`Some` (transitions, undo/redo). It does not replicate the TUI's media-frame
-reanchoring; split/trim/delete may leave the playhead where it was. Recorded
+The server shares the TUI's media-frame playhead anchor on the base video
+track: a media edit keeps the same source frame, falls back to the seam when
+the clip disappears, and clamps into the new timeline. `Outcome.playhead` and
+`playhead` events report the resulting cursor when it moves; undo/redo use
+their restored position, and track/pool changes leave it clamped. Recorded
 history uses `Actor::Agent("nile-serve")`.
 
 A save failure poisons mutations (the response is `internal`, and later writes

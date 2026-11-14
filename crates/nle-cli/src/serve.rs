@@ -16,10 +16,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use nle_core::edit::Actor;
-use nle_core::{Action, EditError, Outcome as ActionOutcome, Seconds, frames_to_seconds, secs_f64};
+use nle_core::{
+    Action, EditError, Outcome as ActionOutcome, Seconds, TrackKind, frames_to_seconds, secs_f64,
+};
 use nle_protocol::{Call, Event, Handler, Hello, Outcome as WireOutcome, Reply, RpcError, Server};
 
-use crate::session::Session;
+use crate::session::{Session, playhead};
 
 /// Run the blocking JSON-RPC loop on stdin/stdout.
 pub(crate) fn cmd_serve(project_path: &Path, _stdio: bool) -> Result<()> {
@@ -73,6 +75,18 @@ impl Handler for ServeHandler {
 }
 
 impl ServeHandler {
+    /// The base video track is the protocol's active track for playhead
+    /// anchoring; the TUI passes the user's active track instead.
+    fn active_track(&self) -> usize {
+        self.session
+            .project()
+            .timeline
+            .tracks
+            .iter()
+            .position(|track| track.kind == TrackKind::Video)
+            .unwrap_or(0)
+    }
+
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {
         if base_revision == self.session.revision() {
             Ok(())
@@ -160,19 +174,39 @@ impl ServeHandler {
         }
         self.check_revision(base_revision)?;
 
+        // Match the TUI's media-frame policy on the base video track: an edit
+        // that moves material under the playhead keeps the same source frame,
+        // falling back to the seam when the clip disappears.
+        let before = self.session.project().playhead;
+        let current = secs_f64(&before);
+        let track = self.active_track();
+        let anchor = playhead::edit_anchor(self.session.project(), current, track);
+
         let outcome = self
             .session
             .apply_action(action, self.anchor_seconds(from))
             .map_err(edit_rpc)?;
 
-        let playhead = match outcome.playhead {
-            Some(frame) => {
-                let at = self.frame_seconds(frame);
-                self.session.set_playhead(secs_f64(&at));
-                Some(self.session.project().playhead)
+        let mut landed = None;
+        if let Some(frame) = outcome.playhead {
+            let at = self.frame_seconds(frame);
+            self.session.set_playhead(secs_f64(&at));
+            landed = Some(self.session.project().playhead);
+        } else if outcome.changed && playhead::reanchors(action) {
+            let pos = playhead::reanchor(self.session.project(), current, track, anchor);
+            self.session.set_playhead(pos);
+            if self.session.project().playhead != before {
+                landed = Some(self.session.project().playhead);
             }
-            None => None,
-        };
+        } else if outcome.changed {
+            // Track/pool edits leave the active media alone; just clamp.
+            let clamped = current.clamp(0.0, secs_f64(&self.session.project().last_frame()));
+            if clamped != current {
+                self.session.set_playhead(clamped);
+                landed = Some(self.session.project().playhead);
+            }
+        }
+        let playhead = landed;
 
         if let Err(e) = self.session.save_if(outcome.changed, playhead.is_some()) {
             self.poisoned = Some(e.to_string());

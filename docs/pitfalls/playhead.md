@@ -2,6 +2,10 @@
 
 Read before changing an action, a trim, or the TUI's playhead handling.
 
+The policy is shared: `nile-cli/src/session/playhead.rs` provides
+`edit_anchor`/`reanchor`, and both the TUI and `nile serve` call it. The TUI
+passes its active track; the protocol server passes the base video track.
+
 The playhead is stored in the project (`Project.playhead`), snapped to the
 frame grid and clamped into the timeline. The TUI opens there, adopts the
 file's value on reload, and writes it back through one writer
