@@ -274,7 +274,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
 /// is written alongside the project, then the monitor is reloaded for
 /// whichever view is showing: the pool's raw file when the pool is open, or
 /// the timeline EDL (with the playhead baked into the load) otherwise.
-pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
+pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) -> bool {
     // The stored playhead follows the session — it is what `nile seek`
     // reads and where the next TUI session opens.
     match persist_playhead(app) {
@@ -284,24 +284,26 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
             // clobber it, and say so — this edit was not saved.
             if let Err(e) = reload_project(app, player, true) {
                 app.fail(&format!("reload failed: {e}"));
-                return;
+                return false;
             }
             let prev = app.message.clone();
             app.fail(&format!(
                 "{prev} — not saved: nile.json changed on disk (reloaded)"
             ));
-            return;
+            return false;
         }
         Err(e) => {
             app.fail(&format!("save failed: {e}"));
-            return;
+            return false;
         }
     }
-    if let Err(e) = app.project.save_history() {
+    let history_saved = if let Err(e) = app.project.save_history() {
         app.fail(&format!("history save failed: {e}"));
+        false
     } else {
         app.note_history();
-    }
+        true
+    };
     // An asset removed (or an undone import) frees its id; drop any cache
     // entries so a later import that reuses the id starts clean.
     forget_missing_assets(app);
@@ -324,6 +326,7 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
         // let the status row show progress. A newer edit supersedes this one.
         start_preview(app);
     }
+    history_saved
 }
 
 /// Switch the active sequence and its undo stack. Session state, not an
@@ -332,6 +335,9 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
 /// monitor reloads the new timeline. Tracks are per sequence, so the active
 /// track resets to the first rather than pointing into another timeline.
 pub(crate) fn select_sequence(app: &mut App, player: &dyn Mpv, id: u32) -> Option<String> {
+    // Flush the cursor into the sequence we are leaving; otherwise a move
+    // since the last idle save is lost when it is reloaded later.
+    app.project.set_playhead(app.playhead);
     if let Err(e) = app.project.select_sequence(id) {
         let msg = e.to_string();
         app.fail(&msg);
@@ -339,6 +345,7 @@ pub(crate) fn select_sequence(app: &mut App, player: &dyn Mpv, id: u32) -> Optio
     }
     app.active_track = 0;
     app.playhead = secs(&app.project.playhead);
+    app.follow_timeline();
     app.save_session_state();
     let sequence = app.project.active_sequence();
     let fps = sequence
@@ -351,7 +358,9 @@ pub(crate) fn select_sequence(app: &mut App, player: &dyn Mpv, id: u32) -> Optio
         .map(|v| format!("{}×{}", v.width, v.height))
         .unwrap_or_else(|| "no size".into());
     let note = format!("sequence #{id} {} · {fps} · {video}", sequence.name);
-    persist_and_refresh(app, player);
+    if !persist_and_refresh(app, player) {
+        return None;
+    }
     app.set_message(&note);
     Some(note)
 }

@@ -670,7 +670,9 @@ pub(crate) fn sequence_command(
                 Ok(id) => id,
                 Err(e) => return Some(e.to_string()),
             };
-            persist_and_refresh(app, player);
+            if !persist_and_refresh(app, player) {
+                return None;
+            }
             Some(format!(
                 "sequence #{id} {name} added (not active — `:sequence use {id}`)"
             ))
