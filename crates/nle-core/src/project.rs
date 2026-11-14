@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::io::Write as _;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -22,8 +23,9 @@ use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 /// v7 stores `crop` as percentages (scale/x/y) instead of pixel w/h/x/y;
 /// v8 stores `crop` as per-edge percentage insets and `scale` as percentages;
 /// v9 stores each transition side's effects (they render the neighbour);
-/// v10 stores the monotonic model `revision`.
-pub const PROJECT_VERSION: u32 = 10;
+/// v10 stores the monotonic model `revision`;
+/// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s.
+pub const PROJECT_VERSION: u32 = 11;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -45,6 +47,12 @@ pub enum ProjectError {
     AssetNotFound(u32),
     #[error("asset #{0} is used by clip(s) {1:?} — remove them first")]
     AssetInUse(u32, Vec<u32>),
+    #[error("project has no sequences")]
+    NoSequences,
+    #[error("sequence #{0} not found")]
+    SequenceNotFound(u32),
+    #[error("sequence #{0} is duplicated")]
+    SequenceDuplicate(u32),
 }
 
 /// Output sequence settings (set from the first clip, changeable later).
@@ -100,6 +108,59 @@ impl Asset {
     }
 }
 
+/// Where a sequence came from. Derived sequences are future work, but the
+/// provenance is recorded from day one so they stay traceable.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub enum SequenceOrigin {
+    #[default]
+    Root,
+    Derived {
+        from: u32,
+        spec: serde_json::Value,
+    },
+}
+
+/// One editable timeline. A project may hold several (e.g. 16:9 and 9:16
+/// deliverables); the active one is the session scope the front-ends edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sequence {
+    pub id: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub origin: SequenceOrigin,
+    /// Count of manual edits applied to this sequence (derived sequences
+    /// later use it to decide what can be regenerated).
+    #[serde(default)]
+    pub manual_edits: u64,
+    /// Output frame rate — None until the first clip sets it.
+    #[serde(default, with = "rational_ser::opt")]
+    pub fps: Option<Seconds>,
+    /// Output size — None until the first clip sets it.
+    #[serde(default)]
+    pub video: Option<VideoSettings>,
+    #[serde(default)]
+    pub timeline: Timeline,
+    /// The stored playhead for this sequence.
+    #[serde(default, with = "rational_ser")]
+    pub playhead: Seconds,
+}
+
+impl Sequence {
+    pub fn new(id: u32, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            origin: SequenceOrigin::Root,
+            manual_edits: 0,
+            fps: None,
+            video: None,
+            timeline: Timeline::new(),
+            playhead: Seconds::from_integer(0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     /// Project file format — v3 is the segment model with multi-track
@@ -111,21 +172,34 @@ pub struct Project {
     /// whose clamp repaired the model does).
     #[serde(default)]
     pub revision: u64,
-    /// Output frame rate — None until the first clip sets it.
-    #[serde(default, with = "rational_ser::opt")]
-    pub fps: Option<Seconds>,
-    /// Output size — None until the first clip sets it.
-    #[serde(default)]
-    pub video: Option<VideoSettings>,
+    /// The media pool is shared by every sequence.
     #[serde(default)]
     pub media: Vec<Asset>,
+    /// One or more editable timelines.
     #[serde(default)]
-    pub timeline: Timeline,
-    /// The shared playhead (`nile seek`, the TUI's position) — stored so a
-    /// shell and the TUI can hand the cursor back and forth. Session
-    /// state, not edit state: no edit op reads it (they take `--at`).
-    #[serde(default, with = "rational_ser")]
-    pub playhead: Seconds,
+    pub sequences: Vec<Sequence>,
+    /// The active sequence id. `Deref` exposes its `fps`/`video`/`timeline`/
+    /// `playhead` so existing edit paths stay sequence-agnostic.
+    #[serde(default = "default_active")]
+    active: u32,
+}
+
+fn default_active() -> u32 {
+    1
+}
+
+impl Deref for Project {
+    type Target = Sequence;
+
+    fn deref(&self) -> &Sequence {
+        self.active_sequence()
+    }
+}
+
+impl DerefMut for Project {
+    fn deref_mut(&mut self) -> &mut Sequence {
+        self.active_sequence_mut()
+    }
 }
 
 impl Default for Project {
@@ -139,12 +213,69 @@ impl Project {
         Self {
             version: PROJECT_VERSION,
             revision: 0,
-            fps: None,
-            video: None,
             media: Vec::new(),
-            timeline: Timeline::new(),
-            playhead: Seconds::from_integer(0),
+            sequences: vec![Sequence::new(1, "Sequence 1")],
+            active: 1,
         }
+    }
+
+    pub fn active_id(&self) -> u32 {
+        self.active
+    }
+
+    pub fn active_sequence(&self) -> &Sequence {
+        self.sequences
+            .iter()
+            .find(|sequence| sequence.id == self.active)
+            .expect("active sequence")
+    }
+
+    pub fn active_sequence_mut(&mut self) -> &mut Sequence {
+        self.sequences
+            .iter_mut()
+            .find(|sequence| sequence.id == self.active)
+            .expect("active sequence")
+    }
+
+    pub fn sequence(&self, id: u32) -> Option<&Sequence> {
+        self.sequences.iter().find(|sequence| sequence.id == id)
+    }
+
+    /// Make `id` the active sequence. Callers that own a per-sequence undo
+    /// history must switch that too.
+    pub fn select_sequence(&mut self, id: u32) -> Result<(), ProjectError> {
+        if self.sequence(id).is_none() {
+            return Err(ProjectError::SequenceNotFound(id));
+        }
+        self.active = id;
+        Ok(())
+    }
+
+    /// Add an empty sequence and return its id. It does not become active.
+    pub fn add_sequence(
+        &mut self,
+        name: impl Into<String>,
+        fps: Option<Seconds>,
+        video: Option<VideoSettings>,
+    ) -> u32 {
+        let id = self
+            .sequences
+            .iter()
+            .map(|sequence| sequence.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut sequence = Sequence::new(id, name);
+        sequence.fps = fps;
+        sequence.video = video;
+        self.sequences.push(sequence);
+        id
+    }
+
+    /// Count one manual edit on the active sequence.
+    pub(crate) fn bump_manual_edits(&mut self) {
+        let edits = self.active_sequence().manual_edits;
+        self.active_sequence_mut().manual_edits = edits.saturating_add(1);
     }
 
     /// Bump the monotonic model revision. Crate-private: the mutation paths
@@ -208,38 +339,54 @@ impl Project {
 
     /// Structural sanity of the whole project.
     pub fn validate(&self) -> Result<(), ProjectError> {
-        self.timeline.validate()?;
-        for track in &self.timeline.tracks {
-            for seg in &track.segments {
-                match seg {
-                    Segment::Gap(_) => {}
-                    Segment::Clip(clip) => {
-                        let asset = self.pooled(clip.asset)?;
-                        // A clip must carry the track's kind of stream, or
-                        // export can't build the graph (an audio-only asset on
-                        // a video track failed deep inside ffmpeg; a video-only
-                        // asset on an audio track exported silence).
-                        if let Some(reason) = asset.wrong_kind(track.kind) {
-                            return Err(ProjectError::Asset(clip.asset, reason));
+        if self.sequences.is_empty() {
+            return Err(ProjectError::NoSequences);
+        }
+        for (i, sequence) in self.sequences.iter().enumerate() {
+            if self.sequences[..i]
+                .iter()
+                .any(|other| other.id == sequence.id)
+            {
+                return Err(ProjectError::SequenceDuplicate(sequence.id));
+            }
+        }
+        if self.sequence(self.active).is_none() {
+            return Err(ProjectError::SequenceNotFound(self.active));
+        }
+        for sequence in &self.sequences {
+            sequence.timeline.validate()?;
+            for track in &sequence.timeline.tracks {
+                for seg in &track.segments {
+                    match seg {
+                        Segment::Gap(_) => {}
+                        Segment::Clip(clip) => {
+                            let asset = self.pooled(clip.asset)?;
+                            // A clip must carry the track's kind of stream, or
+                            // export can't build the graph (an audio-only asset on
+                            // a video track failed deep inside ffmpeg; a video-only
+                            // asset on an audio track exported silence).
+                            if let Some(reason) = asset.wrong_kind(track.kind) {
+                                return Err(ProjectError::Asset(clip.asset, reason));
+                            }
                         }
-                    }
-                    // A transition owns its source spans too, so its assets
-                    // must be pooled exactly like a clip's (`remove_asset`
-                    // already refuses to strand one) — and carry picture: the
-                    // export's xfade reads `[input:v]`, so an audio-only side
-                    // would only fail inside ffmpeg.
-                    Segment::Transition(tr) => {
-                        for side in [&tr.a, &tr.b] {
-                            if let Some(asset_id) = side.asset() {
-                                let asset = self.pooled(asset_id)?;
-                                if asset.wrong_kind(TrackKind::Video).is_some() {
-                                    return Err(ProjectError::Asset(
-                                        asset_id,
-                                        format!(
-                                            "{} has no video stream — a transition side needs picture",
-                                            asset.path.display()
-                                        ),
-                                    ));
+                        // A transition owns its source spans too, so its assets
+                        // must be pooled exactly like a clip's (`remove_asset`
+                        // already refuses to strand one) — and carry picture: the
+                        // export's xfade reads `[input:v]`, so an audio-only side
+                        // would only fail inside ffmpeg.
+                        Segment::Transition(tr) => {
+                            for side in [&tr.a, &tr.b] {
+                                if let Some(asset_id) = side.asset() {
+                                    let asset = self.pooled(asset_id)?;
+                                    if asset.wrong_kind(TrackKind::Video).is_some() {
+                                        return Err(ProjectError::Asset(
+                                            asset_id,
+                                            format!(
+                                                "{} has no video stream — a transition side needs picture",
+                                                asset.path.display()
+                                            ),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -278,9 +425,9 @@ impl Project {
 
     /// Clip ids across all tracks that reference asset `id`.
     pub fn asset_usage(&self, id: u32) -> Vec<u32> {
-        self.timeline
-            .tracks
+        self.sequences
             .iter()
+            .flat_map(|sequence| &sequence.timeline.tracks)
             .flat_map(|t| t.segments.iter())
             .filter_map(|s| match s {
                 Segment::Clip(c) if c.asset == id => Some(c.id),
@@ -338,7 +485,9 @@ mod tests {
     use crate::edit::{self, History};
     use crate::media::{RawFormat, RawStream};
     use crate::time::Seconds;
-    use crate::timeline::{Effect, Segment, Transition, TransitionKind, TransitionSource};
+    use crate::timeline::{
+        Effect, Gap, Segment, TrackKind, Transition, TransitionKind, TransitionSource,
+    };
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -610,6 +759,94 @@ mod tests {
         let back: Project = serde_json::from_str(&first).unwrap();
         let second = serde_json::to_string_pretty(&back).unwrap();
         assert_eq!(first, second, "a round trip must not reorder the file");
+    }
+
+    #[test]
+    fn a_new_project_has_one_root_sequence() {
+        assert_eq!(PROJECT_VERSION, 11);
+        let p = Project::new();
+        assert_eq!(p.revision, 0);
+        assert_eq!(p.sequences.len(), 1);
+        assert_eq!(p.active_id(), 1);
+        assert_eq!(p.active_sequence().name, "Sequence 1");
+        assert_eq!(p.active_sequence().origin, SequenceOrigin::Root);
+        assert_eq!(p.active_sequence().manual_edits, 0);
+        assert!(p.fps.is_none());
+        assert!(p.video.is_none());
+        assert_eq!(p.timeline.tracks.len(), 1);
+    }
+
+    #[test]
+    fn sequences_keep_their_own_settings_and_timelines() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Gap(Gap {
+            duration: Seconds::from_integer(2),
+        })];
+        let second = p.add_sequence(
+            "Vertical",
+            Some(Seconds::from_integer(24)),
+            Some(VideoSettings {
+                width: 1080,
+                height: 1920,
+            }),
+        );
+        assert_eq!(second, 2);
+        p.select_sequence(second).unwrap();
+        assert_eq!(p.active_id(), second);
+        assert_eq!(p.fps, Some(Seconds::from_integer(24)));
+        assert_eq!(
+            p.video,
+            Some(VideoSettings {
+                width: 1080,
+                height: 1920
+            })
+        );
+        assert!(p.timeline.video_track().unwrap().segments.is_empty());
+        p.select_sequence(1).unwrap();
+        assert_eq!(p.fps, Some(Seconds::from_integer(30)));
+        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 1);
+    }
+
+    #[test]
+    fn project_serializes_sequences_not_a_flat_timeline() {
+        let value = serde_json::to_value(Project::new()).unwrap();
+        assert!(value["sequences"].is_array());
+        assert_eq!(value["active"], 1);
+        assert!(value.get("timeline").is_none());
+        assert!(value.get("fps").is_none());
+    }
+
+    #[test]
+    fn asset_usage_spans_sequences() {
+        let mut p = sample_project();
+        let before = p.asset_usage(1).len();
+        let second = p.add_sequence("Second", None, None);
+        p.select_sequence(second).unwrap();
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            10,
+            1,
+            Seconds::from_integer(0),
+            Seconds::from_integer(1),
+        ))];
+        assert_eq!(p.asset_usage(1).len(), before + 1);
+    }
+
+    #[test]
+    fn a_sequence_counts_manual_edits_but_not_undo() {
+        let mut p = sample_project();
+        p.fps = Some(Seconds::from_integer(30));
+        let before = p.active_sequence().manual_edits;
+        let mut history = History::default();
+        let batch = edit::split_on(&p, 0, 1.0).unwrap();
+        history.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(p.active_sequence().manual_edits, before + 1);
+        history.undo(&mut p).unwrap();
+        assert_eq!(
+            p.active_sequence().manual_edits,
+            before + 1,
+            "undo does not rewrite the manual-edit counter"
+        );
     }
 
     #[test]

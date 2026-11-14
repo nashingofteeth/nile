@@ -37,7 +37,7 @@ pub use extend::{
 };
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
-pub use project::{Asset, Project, ProjectError, VideoSettings};
+pub use project::{Asset, Project, ProjectError, Sequence, SequenceOrigin, VideoSettings};
 pub use time::{
     Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, grid_time,
     nominal_fps, parse_rate, parse_signed_time, parse_time, parse_timecode, secs_f64,
