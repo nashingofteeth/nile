@@ -1,0 +1,4 @@
+# Synthetic ATEM 2-cam switcher log. PGM is the program bus.
+00:00:00.000 PGM 1
+00:00:02.000 PGM 2
+00:00:04.000 PGM 1

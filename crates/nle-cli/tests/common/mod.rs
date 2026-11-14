@@ -66,6 +66,16 @@ impl Sandbox {
         Sandbox { dir }
     }
 
+    /// A throwaway 2-cam fixture show (cam_a/cam_b/mic), with no project yet.
+    pub fn fixtures() -> Sandbox {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let d = dir.path();
+        gen_av(d, "cam_a.mp4", "red", "320x240", "30", "6", "440");
+        gen_av(d, "cam_b.mp4", "green", "320x240", "30", "6", "660");
+        gen_a(d, "mic.m4a", "6");
+        Sandbox { dir }
+    }
+
     pub fn path(&self) -> &Path {
         self.dir.path()
     }

@@ -1,0 +1,53 @@
+{
+  "fps": "30/1",
+  "video": {
+    "width": 320,
+    "height": 240
+  },
+  "tracks": [
+    {
+      "kind": "Video",
+      "muted": false,
+      "segments": [
+        {
+          "kind": "clip",
+          "id": 1,
+          "asset": "cam_a.mp4",
+          "in": "0/1",
+          "out": "2/1",
+          "speed": "1/1"
+        },
+        {
+          "kind": "clip",
+          "id": 2,
+          "asset": "cam_b.mp4",
+          "in": "0/1",
+          "out": "2/1",
+          "speed": "1/1"
+        },
+        {
+          "kind": "clip",
+          "id": 3,
+          "asset": "cam_a.mp4",
+          "in": "2/1",
+          "out": "4/1",
+          "speed": "1/1"
+        }
+      ]
+    },
+    {
+      "kind": "Audio",
+      "muted": false,
+      "segments": [
+        {
+          "kind": "clip",
+          "id": 4,
+          "asset": "mic.m4a",
+          "in": "0/1",
+          "out": "6/1",
+          "speed": "1/1"
+        }
+      ]
+    }
+  ]
+}
