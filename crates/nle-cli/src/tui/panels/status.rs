@@ -22,10 +22,11 @@ pub(crate) fn logo(app: &App) -> &'static str {
 
 pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let name = app
-        .path
+        .project
+        .path()
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| app.path.display().to_string());
+        .unwrap_or_else(|| app.project.path().display().to_string());
 
     let icon = if app.dead {
         "monitor closed"

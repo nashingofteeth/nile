@@ -9,7 +9,7 @@ use nle_core::time::frame_to_secs;
 use nle_core::timeline::{Segment as TimelineSegment, Track};
 #[cfg(test)]
 use nle_core::{Batch, EditError, edit};
-use nle_core::{Clip, History, Project, Seconds, Target, clip_span, save_register};
+use nle_core::{Clip, Project, Seconds, Target, clip_span};
 
 use crate::mpv::Mpv;
 
@@ -376,7 +376,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
         _ => app.playhead,
     };
     let playhead_before = app.playhead;
-    match app.project.edit(action, from, &mut app.register) {
+    match app.project.apply_action(action, from) {
         Ok(outcome) => {
             match outcome.playhead {
                 Some(frame) => {
@@ -409,7 +409,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
             }
             app.set_message(&outcome.desc);
             // The register is shared with the CLI (`nile yank`/`nile paste`).
-            if save_register(&app.path, app.register.as_ref()).is_ok() {
+            if app.project.save_register().is_ok() {
                 app.note_register();
             }
             if outcome.changed {
@@ -452,7 +452,7 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
             return;
         }
     }
-    if let Err(e) = app.project.save_history(&History::sidecar_path(&app.path)) {
+    if let Err(e) = app.project.save_history() {
         app.fail(&format!("history save failed: {e}"));
     } else {
         app.note_history();
