@@ -40,8 +40,8 @@ pub use extend::{
     extend_gap_end_on, extend_gap_head, extend_gap_head_on, extend_gap_tail, extend_gap_tail_on,
 };
 pub use history::{
-    Actor, AssetChange, Atom, Change, History, HistoryState, Provenance, TrackChange, TracksChange,
-    UndoOutcome,
+    Actor, AssetChange, Atom, Change, Histories, HistoriesState, History, HistoryState, Provenance,
+    TrackChange, TracksChange, UndoOutcome,
 };
 pub use speed::{set_speed, set_speed_on};
 pub use transitions::{add_transition, retime_transition_on, transition_at};
@@ -62,8 +62,8 @@ pub const MAX_HISTORY: usize = 100;
 /// v13 follows the project's percentage `crop` (segments carry effects);
 /// v14 follows the per-edge crop insets and percentage `scale`;
 /// v15 follows the effects carried on a transition side; v16 carries each
-/// change's `{ actor, at }` provenance.
-pub const HISTORY_VERSION: u32 = 16;
+/// change's `{ actor, at }` provenance; v17 keys the stacks by sequence.
+pub const HISTORY_VERSION: u32 = 17;
 
 #[derive(Debug, Error)]
 pub enum EditError {

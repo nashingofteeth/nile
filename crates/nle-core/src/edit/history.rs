@@ -6,6 +6,7 @@
 //! records the before/after pair as a `Change`. Undo and redo verify the
 //! live state against the recorded side and substitute the other.
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -338,12 +339,11 @@ impl History {
         self.done.len()
     }
 
-    /// Serializable snapshot of the undo stacks (persisted in a sidecar
-    /// file). Both stacks are stored: `nile redo` runs in its own process,
-    /// so a session-only redo stack would make it permanently empty.
+    /// Serializable snapshot of this stack's undo entries. Both stacks are
+    /// stored: `nile redo` runs in its own process, so a session-only redo
+    /// stack would make it permanently empty.
     pub fn state(&self) -> HistoryState {
         HistoryState {
-            version: HISTORY_VERSION,
             done: self.done.clone(),
             undone: self.undone.clone(),
         }
@@ -351,9 +351,6 @@ impl History {
 
     /// Rebuild a History from a snapshot, honoring the depth cap.
     pub fn restore(state: HistoryState) -> Self {
-        if state.version != HISTORY_VERSION {
-            return Self::default();
-        }
         let mut done = state.done;
         if done.len() > MAX_HISTORY {
             let excess = done.len() - MAX_HISTORY;
@@ -370,28 +367,89 @@ impl History {
             actor: Actor::Human,
         }
     }
+}
+
+/// Every sequence's undo stack, keyed by sequence id. Undo is a session
+/// action against the active sequence, so keeping the stacks apart is what
+/// stops it from replaying a change recorded against another timeline.
+#[derive(Debug, Default, Clone)]
+pub struct Histories {
+    stacks: BTreeMap<u32, History>,
+    /// Session-only actor applied to new entries in every stack.
+    actor: Actor,
+}
+
+impl Histories {
+    pub fn from_history(sequence: u32, history: History) -> Self {
+        let mut stacks = BTreeMap::new();
+        stacks.insert(sequence, history);
+        Self {
+            stacks,
+            actor: Actor::Human,
+        }
+    }
+
+    /// Make sure `sequence` has a stack (an untouched sequence starts empty).
+    pub fn ensure(&mut self, sequence: u32) {
+        if !self.stacks.contains_key(&sequence) {
+            let mut history = History::default();
+            history.set_actor(self.actor.clone());
+            self.stacks.insert(sequence, history);
+        }
+    }
+
+    pub fn get(&self, sequence: u32) -> Option<&History> {
+        self.stacks.get(&sequence)
+    }
+
+    /// The stack for `sequence`, created on first use.
+    pub fn get_mut(&mut self, sequence: u32) -> &mut History {
+        self.ensure(sequence);
+        self.stacks.get_mut(&sequence).expect("just ensured")
+    }
+
+    pub fn set(&mut self, sequence: u32, history: History) {
+        self.stacks.insert(sequence, history);
+    }
+
+    pub fn set_actor(&mut self, actor: Actor) {
+        self.actor = actor.clone();
+        for history in self.stacks.values_mut() {
+            history.set_actor(actor.clone());
+        }
+    }
+
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    /// Drop every stack and remove the sidecar (a rebuild re-baselines).
+    pub fn remove_sidecar(project_path: &Path) {
+        let _ = std::fs::remove_file(Self::sidecar_path(project_path));
+        let _ = std::fs::remove_file(crate::state::legacy_history_path(project_path));
+    }
 
     /// Sidecar path for a project file (`nile.json` →
-    /// `.nile/nile/history.json`). The history lives in the project's state
+    /// `.nile/nile/history.json`). The histories live in the project's state
     /// directory so the whole set moves together.
     pub fn sidecar_path(project_path: &Path) -> PathBuf {
         crate::state::history_path(project_path)
     }
 
-    /// Load a project's history, copying an old adjacent sidecar into the
+    /// Load a project's histories, copying an old adjacent sidecar into the
     /// state directory once if the new one does not exist yet.
     pub fn load_project(project_path: &Path) -> Result<Self, std::io::Error> {
         let path = Self::sidecar_path(project_path);
         match Self::load(&path) {
-            Ok(history) => Ok(history),
+            Ok(histories) => Ok(histories),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let legacy = crate::state::legacy_history_path(project_path);
                 if !legacy.exists() {
                     return Err(e);
                 }
-                let history = Self::load(&legacy)?;
-                let _ = history.save(&path);
-                Ok(history)
+                let histories = Self::load(&legacy)?;
+                let _ = histories.save(&path);
+                Ok(histories)
             }
             Err(e) => Err(e),
         }
@@ -412,11 +470,11 @@ impl History {
         Ok(())
     }
 
-    /// Load a sidecar. Missing or unreadable file → error; use
-    /// `History::default()` at the call site to start fresh.
+    /// Load a sidecar. Missing, corrupt or old-version file → error; use
+    /// `Histories::default()` at the call site to start fresh.
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
         let text = std::fs::read_to_string(path)?;
-        let state: HistoryState = serde_json::from_str(&text)
+        let state: HistoriesState = serde_json::from_str(&text)
             .map_err(|e| std::io::Error::other(format!("corrupt history file: {e}")))?;
         if state.version != HISTORY_VERSION {
             return Err(std::io::Error::other(format!(
@@ -426,15 +484,40 @@ impl History {
         }
         Ok(Self::restore(state))
     }
+
+    pub fn state(&self) -> HistoriesState {
+        HistoriesState {
+            version: HISTORY_VERSION,
+            stacks: self
+                .stacks
+                .iter()
+                .map(|(sequence, history)| (*sequence, history.state()))
+                .collect(),
+        }
+    }
+
+    pub fn restore(state: HistoriesState) -> Self {
+        let mut restored = Self::default();
+        for (sequence, history) in state.stacks {
+            restored.stacks.insert(sequence, History::restore(history));
+        }
+        restored
+    }
 }
 
-/// Serializable snapshot of the undo stacks (the sidecar file). Both
-/// stacks persist so `nile undo` / `nile redo` work across processes.
+/// Serializable snapshot of one sequence's undo stacks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryState {
-    pub version: u32,
     pub done: Vec<Change>,
     pub undone: Vec<Change>,
+}
+
+/// The sidecar file: every sequence's undo stack together. Both stacks per
+/// sequence persist so `nile undo` / `nile redo` work across processes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoriesState {
+    pub version: u32,
+    pub stacks: BTreeMap<u32, HistoryState>,
 }
 
 /// One timeline segment, snapshotted for the undo stack. Clips are located

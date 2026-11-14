@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use nle_core::action;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
 use nle_core::{
-    Armed, Clip, History, Project, frame_of, load_register_without_migration, track_label,
+    Armed, Clip, Histories, History, Project, frame_of, load_register_without_migration,
+    track_label,
 };
 
 use crate::session::Session;
@@ -418,7 +419,7 @@ impl App {
     fn note_seen(&mut self) {
         self.seen = Seen {
             project: stamp(self.project.path()),
-            history: stamp(&History::sidecar_path(self.project.path())),
+            history: stamp(&Histories::sidecar_path(self.project.path())),
             register: stamp(&action::register_path(self.project.path())),
         };
     }
@@ -428,7 +429,7 @@ impl App {
     }
 
     fn note_history(&mut self) {
-        self.seen.history = stamp(&History::sidecar_path(self.project.path()));
+        self.seen.history = stamp(&Histories::sidecar_path(self.project.path()));
     }
 
     fn note_register(&mut self) {
@@ -439,7 +440,7 @@ impl App {
     /// wrote it.
     fn external_change(&self) -> bool {
         stamp(self.project.path()) != self.seen.project
-            || stamp(&History::sidecar_path(self.project.path())) != self.seen.history
+            || stamp(&Histories::sidecar_path(self.project.path())) != self.seen.history
             || stamp(&action::register_path(self.project.path())) != self.seen.register
     }
 
@@ -850,10 +851,10 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     let mut app = App::new(project, copy);
     // Bring the session state along (undo depth, the register) so the dump
     // shows the same thing. Read the source sidecars directly — not
-    // `History::load_project`, whose legacy migration would write — and let
+    // `Histories::load_project`, whose legacy migration would write — and let
     // every save land in the scratch copy's state dir.
     app.project
-        .set_history(History::load(&History::sidecar_path(&path)).unwrap_or_default());
+        .set_histories(Histories::load(&Histories::sidecar_path(&path)).unwrap_or_default());
     app.project
         .set_register(load_register_without_migration(&path));
     apply_session_state(&mut app, view_state::load(&path));
@@ -921,9 +922,9 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
 
 pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
-    let history = History::load_project(&path).unwrap_or_default();
+    let histories = Histories::load_project(&path).unwrap_or_default();
     let mut app = App::new(project, path);
-    app.project.set_history(history);
+    app.project.set_histories(histories);
     // Open where `nile seek` (or the last session) left the playhead.
     app.playhead = secs(&app.project.playhead);
     // Restore the session viewport and active track after the playhead: don't
@@ -1148,8 +1149,8 @@ fn watch_foreign(app: &mut App) -> bool {
 fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> anyhow::Result<()> {
     let path = app.project.path().to_path_buf();
     let project = Project::load(&path)?;
-    let history = History::load_project(&path).unwrap_or_default();
-    app.project = Session::from_history(project, history, path);
+    let histories = Histories::load_project(&path).unwrap_or_default();
+    app.project = Session::from_histories(project, histories, path);
     app.active_track = app
         .active_track
         .min(app.project.timeline.tracks.len().saturating_sub(1));

@@ -175,9 +175,9 @@ pub(crate) fn cmd_add(
     in_point: Option<&str>,
     out_point: Option<&str>,
 ) -> Result<()> {
-    let mut doc = Document::with_history(
+    let mut doc = Document::with_histories(
         Project::load(project_path)?,
-        edit::History::load_project(project_path).unwrap_or_default(),
+        edit::Histories::load_project(project_path).unwrap_or_default(),
     );
     // `--track` is 1-based (matching the `v1`/`a1` labels); 0 internally.
     // 0 is not a track number — it used to silently mean "track 1".
@@ -211,7 +211,7 @@ pub(crate) fn cmd_add(
     // same `Paste` the TUI's pool insert runs.
     doc.save(project_path)?;
     if imported {
-        doc.save_history(&edit::History::sidecar_path(project_path))?;
+        doc.save_history(&edit::Histories::sidecar_path(project_path))?;
     }
     run_cli_action(
         project_path,

@@ -39,7 +39,7 @@ fn transport_moves_flush_the_stored_playhead() {
         "our own save is not a foreign change"
     );
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
@@ -71,7 +71,7 @@ fn a_foreign_write_is_seen_and_adopted() {
     assert_eq!(app.project.register(), Some(&reg), "and its yank");
     assert!(!app.external_change(), "the watch re-baselines");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
@@ -96,7 +96,7 @@ fn a_user_reload_keeps_the_live_playhead() {
     assert_eq!(app.playhead, 1.0, "a foreign reload adopts the cursor");
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
@@ -112,7 +112,7 @@ fn a_user_reload_clamps_a_stale_playhead() {
     assert!(app.playhead >= 0.0);
 
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
@@ -134,7 +134,7 @@ fn a_foreign_write_is_not_clobbered() {
         "the shell's cursor survived"
     );
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
@@ -168,7 +168,7 @@ fn watch_foreign_waits_for_a_mode_to_end() {
     assert!(watch_foreign(&mut app), "applied once Normal");
     assert!(!app.reload_pending);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
@@ -198,7 +198,7 @@ fn seek_moves_the_playhead_and_persists_it() {
         Seconds::from_integer(2)
     );
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
