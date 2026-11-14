@@ -82,8 +82,92 @@ fn sequence_command_switches_undo_and_adds() {
     );
     assert_eq!(square.fps, Some(Seconds::from_integer(24)));
 
+    let before = app.project.sequences.len();
+    let refused = cmd(&mut app, "sequence add Zero --fps 0");
+    assert!(refused.contains("positive"), "{refused}");
+    assert_eq!(app.project.sequences.len(), before, "nothing was added");
+
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
+fn switching_flushes_the_outgoing_playhead_and_follows_the_new_one() {
+    let path = temp_project_path("sequence-switch-cursor");
+    let mut p = asset_project();
+    let second = p.add_sequence(
+        "Vertical",
+        Some(Seconds::new(30, 1)),
+        Some(nle_core::VideoSettings {
+            width: 1080,
+            height: 1920,
+        }),
+    );
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+    app.playhead = 2.0; // moved, but not yet flushed by the idle timer
+    app.timeline_view.zoom = 4.0;
+    app.timeline_view.start = 5.0; // the new sequence's 0 s cursor is off-screen
+
+    let notice = cmd(&mut app, &format!("sequence {second}"));
+    assert!(notice.contains("Vertical"), "{notice}");
+    let saved = Project::load(&path).unwrap();
+    assert_eq!(
+        saved.sequence(1).unwrap().playhead,
+        Seconds::from_integer(2),
+        "the sequence we left kept its live cursor"
+    );
+    assert_eq!(app.playhead, 0.0, "the target's stored cursor is adopted");
+    assert!(
+        app.timeline_view.start < 1.0,
+        "the viewport followed the new playhead (start {})",
+        app.timeline_view.start
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+#[test]
+fn a_foreign_write_is_not_hidden_by_a_switch_notice() {
+    let path = temp_project_path("sequence-switch-guard");
+    let mut p = asset_project();
+    let second = p.add_sequence("Vertical", None, None);
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+    app.playhead = 1.0;
+
+    // The shell writes first; our switch must adopt, not clobber.
+    let mut foreign = Project::load(&path).unwrap();
+    foreign.set_playhead(3.0);
+    foreign.save(&path).unwrap();
+
+    let notice = cmd(&mut app, &format!("sequence {second}"));
+    assert!(notice.contains("not saved"), "{notice}");
+    assert!(
+        !notice.contains("sequence #2"),
+        "a failed switch must not claim success: {notice}"
+    );
+    assert_eq!(app.project.active_id(), 1, "the reload undid the switch");
+    assert_eq!(app.playhead, 3.0, "and adopted the shell's cursor");
+
+    // The add path is honest too: another shell write, then the reload
+    // discards the in-memory add.
+    let mut foreign = Project::load(&path).unwrap();
+    foreign.set_playhead(0.5);
+    foreign.save(&path).unwrap();
+    let notice = cmd(&mut app, "sequence add Third");
+    assert!(notice.contains("not saved"), "{notice}");
+    assert!(
+        !notice.contains("Third added"),
+        "a failed add must not claim success: {notice}"
+    );
+    assert_eq!(app.project.sequences.len(), 2);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
 #[test]

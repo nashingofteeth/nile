@@ -25,10 +25,16 @@ use crate::time::Seconds;
 /// A project plus one undo stack per sequence. Undo acts on the active
 /// sequence only, so a switch can never replay a change recorded against a
 /// different timeline.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Document {
     project: Project,
     histories: Histories,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self::new(Project::new())
+    }
 }
 
 impl Document {
@@ -119,11 +125,16 @@ impl Document {
         name: impl Into<String>,
         fps: Option<Seconds>,
         video: Option<VideoSettings>,
-    ) -> u32 {
+    ) -> Result<u32, ProjectError> {
+        if fps.is_some_and(|fps| fps <= Seconds::from_integer(0)) {
+            return Err(ProjectError::NonPositiveFps(
+                self.project.next_sequence_id(),
+            ));
+        }
         let id = self.project.add_sequence(name, fps, video);
         self.histories.ensure(id);
         self.project.bump_revision();
-        id
+        Ok(id)
     }
 
     pub fn into_parts(self) -> (Project, Histories) {
@@ -399,6 +410,26 @@ mod tests {
             effects: Vec::new(),
         })];
         id
+    }
+
+    #[test]
+    fn default_document_has_a_usable_history() {
+        let doc = Document::default();
+        assert_eq!(doc.project().active_id(), 1);
+        assert!(!doc.can_undo());
+        assert_eq!(doc.depth(), 0);
+    }
+
+    #[test]
+    fn adding_a_sequence_rejects_a_non_positive_rate_before_mutating() {
+        let mut doc = document();
+        let before = doc.project.sequences.len();
+        assert!(matches!(
+            doc.add_sequence("Zero", Some(Seconds::from_integer(0)), None),
+            Err(ProjectError::NonPositiveFps(2))
+        ));
+        assert_eq!(doc.project.sequences.len(), before);
+        assert_eq!(doc.revision(), 0, "a refused add is not a model write");
     }
 
     #[test]

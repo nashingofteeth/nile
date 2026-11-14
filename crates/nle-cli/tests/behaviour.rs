@@ -57,6 +57,57 @@ fn two_sequences_export_at_their_own_sizes() {
 }
 
 #[test]
+fn sequence_add_rejects_a_non_positive_frame_rate() {
+    let s = Sandbox::new();
+    s.base();
+    let out = s.run(&["sequence", "add", "Bad", "--fps", "0"]);
+    assert!(!out.status.success(), "--fps 0 must be refused");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("positive"), "{text}");
+    assert!(!text.contains("panicked"), "{text}");
+    assert_eq!(s.ok(&["sequence", "ls"]).matches("#").count(), 1);
+    // A zero-rate property in the file is rejected on load, not a later panic.
+    let mut project: serde_json::Value = serde_json::from_str(&s.ok(&["show", "--json"])).unwrap();
+    project["sequences"][0]["fps"] = serde_json::json!("0/1");
+    s.write(P, &serde_json::to_string_pretty(&project).unwrap());
+    for argv in [&["show"][..], &["seek", "1"][..]] {
+        let out = s.run(argv);
+        assert!(!out.status.success(), "{argv:?} must reject the file");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("non-positive"), "{argv:?}: {text}");
+        assert!(!text.contains("panicked"), "{argv:?}: {text}");
+    }
+}
+
+#[test]
+fn show_json_does_not_rewrite_the_active_sequence() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["sequence", "add", "Second"]);
+    let before: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let out = s.run(&["show", "--json", "--sequence", "1"]);
+    assert!(!out.status.success(), "--json and --sequence conflict");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("omit --sequence"), "{text}");
+    let after: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(before, after, "the rejected command changed the file");
+}
+
+#[test]
 fn cli_undo_follows_the_active_sequence() {
     let s = Sandbox::new();
     s.base();

@@ -907,20 +907,24 @@ fn main() -> Result<()> {
 
 /// `--fps` accepts `n/d`, a decimal NTSC rate, or a whole number.
 pub(crate) fn parse_fps_arg(s: &str) -> Result<Seconds> {
-    if let Some(r) = parse_rate(s) {
-        return Ok(r);
+    let rate = match parse_rate(s) {
+        Some(rate) => rate,
+        None => match s {
+            "23.976" => Seconds::new(24000, 1001),
+            "29.97" => Seconds::new(30000, 1001),
+            "59.94" => Seconds::new(60000, 1001),
+            _ => {
+                let n: i64 = s.parse().with_context(|| {
+                    format!("invalid --fps {s:?} (try 30000/1001, 29.97, or 24)")
+                })?;
+                Seconds::from_integer(n)
+            }
+        },
+    };
+    if rate <= Seconds::from_integer(0) {
+        bail!("--fps must be positive (got {s:?})");
     }
-    match s {
-        "23.976" => Ok(Seconds::new(24000, 1001)),
-        "29.97" => Ok(Seconds::new(30000, 1001)),
-        "59.94" => Ok(Seconds::new(60000, 1001)),
-        _ => {
-            let n: i64 = s
-                .parse()
-                .with_context(|| format!("invalid --fps {s:?} (try 30000/1001, 29.97, or 24)"))?;
-            Ok(Seconds::from_integer(n))
-        }
-    }
+    Ok(rate)
 }
 
 /// A speed accepts `n/d` or a positive decimal (`1`, `0.5`, `0.8`, `2`).

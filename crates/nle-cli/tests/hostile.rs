@@ -783,6 +783,44 @@ fn hostile_projects() {
 }
 
 #[test]
+fn hostile_sequence_shapes() {
+    fn no_sequences(project: &mut serde_json::Value) {
+        project["sequences"] = json!([]);
+    }
+    fn missing_active(project: &mut serde_json::Value) {
+        project["active"] = json!(99);
+    }
+    fn duplicate_id(project: &mut serde_json::Value) {
+        let mut copy = project["sequences"][0].clone();
+        copy["id"] = json!(1);
+        project["sequences"].as_array_mut().unwrap().push(copy);
+    }
+    fn zero_fps(project: &mut serde_json::Value) {
+        project["sequences"][0]["fps"] = json!("0/1");
+    }
+
+    let s = Sandbox::new();
+    type Case = (&'static str, fn(&mut serde_json::Value), &'static str);
+    let cases: &[Case] = &[
+        ("empty sequence list", no_sequences, "no sequences"),
+        ("active id is missing", missing_active, "not found"),
+        ("duplicate sequence ids", duplicate_id, "duplicated"),
+        ("zero sequence fps", zero_fps, "non-positive"),
+    ];
+    for &(label, mutate, expected) in cases {
+        s.hostile_base();
+        let mut project: serde_json::Value =
+            serde_json::from_str(&s.read(P)).expect("the base project");
+        mutate(&mut project);
+        s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+        for argv in [&["show"][..], &["seek", "1"][..]] {
+            let text = s.insist(label, P, argv);
+            assert!(text.contains(expected), "[{label}] {argv:?}: {text}");
+        }
+    }
+}
+
+#[test]
 fn a_truncated_cache_entry_is_rerendered() {
     let s = Sandbox::new();
     s.base();
