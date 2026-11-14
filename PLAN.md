@@ -452,9 +452,10 @@ shared by the TUI and agents — with no clipgen code present.
   changes, undo/redo) bump it, but playhead-only saves do not. History entries
   carry `{ actor, label, at }` provenance. This is the substrate for protocol
   compare-and-swap and human/agent review.
-- `fixtures/` + a golden harness: a synthetic 2-cam show (program, mic, ATEM
-  switcher log, tiny Resolve project/EDL) with expected project JSON, EDL,
-  frame counts and sampled-frame PSNR, wired into `scripts/check.sh`.
+- `fixtures/` + a golden harness (landed): a synthetic 2-cam show
+  (`cam_a.mp4`/`cam_b.mp4`, mic, ATEM log, tiny Resolve EDL/OTIO) with a
+  normalized golden project, video-track EDL, frame count and sampled PSNR,
+  wired through `crates/nle-cli/tests/fixtures.rs` and `cargo test`.
 - `nile-protocol` and `nile serve --stdio` are wire-complete: one catalog
   action per apply (one undo step), rational `from`/playhead times, `hello` +
   `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
