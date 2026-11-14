@@ -460,10 +460,11 @@ shared by the TUI and agents — with no clipgen code present.
   action per apply (one undo step), rational `from`/playhead times, `hello` +
   `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
   single-source `wire_catalog!` generation. The handler owns CAS, saves,
-  playhead, and events; next is fixtures.
+  playhead, and events. Step 1 (sequences) is next.
 - **Order within step 0:** revision + provenance, the `nle-protocol` wire,
-  and `nile serve --stdio` are done; next is fixtures. These are breaking
-  format changes: close any live TUI before testing and rebuild old projects.
+  `nile serve --stdio`, and fixtures are done. Step 0 is complete; sequences
+  (step 1) start next. These are breaking format changes: close any live TUI
+  before testing and rebuild old projects.
 
 ### 1. Sequences (blocking)
 
