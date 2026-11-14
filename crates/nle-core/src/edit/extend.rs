@@ -303,8 +303,8 @@ pub fn extend_gap_tail_on(
     let mut covered: Vec<usize> = Vec::new();
     let mut straddler: Option<usize> = None;
     let mut acc = gap_end;
-    for k in index + 1..track.segments.len() {
-        let dur = track.segments[k].duration();
+    for (k, segment) in track.segments.iter().enumerate().skip(index + 1) {
+        let dur = segment.duration();
         if acc + dur <= t {
             covered.push(k);
         } else if acc < t && t < acc + dur {
@@ -582,8 +582,8 @@ pub fn absorb_outward_on(
         let mut straddler: Option<usize> = None;
         let mut covered: Vec<usize> = Vec::new();
         let mut acc = edge;
-        for k in si + 1..track.segments.len() {
-            let dur = track.segments[k].duration();
+        for (k, segment) in track.segments.iter().enumerate().skip(si + 1) {
+            let dur = segment.duration();
             if acc + dur <= t {
                 covered.push(k);
             } else if acc < t && t < acc + dur {
