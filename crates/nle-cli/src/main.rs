@@ -34,6 +34,7 @@ mod waveform;
 // precedes the `mod` declaration.
 mod cmd;
 mod serve;
+mod session;
 
 /// Print a line, tolerating a closed consumer (`nile show | head`). Rust
 /// ignores `SIGPIPE`, so `say!` *panics* on the broken pipe; a Unix
