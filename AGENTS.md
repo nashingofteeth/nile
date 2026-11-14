@@ -249,15 +249,17 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 
 ## Testing and debugging
 
-- **Two integration batteries back the unit tests.**
+- **Three integration batteries back the unit tests.**
   `crates/nle-cli/tests/behaviour.rs` asserts *results* (pixels, durations,
   frame counts, structure); `hostile.rs` holds garbage input to *invariants*
   (never panic, exit 0/1/2 only, leave a project that loads with a finite
-  non-negative length). New end-to-end behaviour → `behaviour.rs`; new
-  "garbage in" → `hostile.rs` (a case is a list of argv sequences). Both run
-  under `cargo test` against the debug binary; `cargo test -p nle-core` is the
-  sub-second loop. `tests/common` rebuilds templates every run — a stale
-  template poisons every case.
+  non-negative length); `fixtures.rs` pins the 2-cam golden show (normalized
+  project/EDL, frame count, sampled PSNR). New end-to-end behaviour →
+  `behaviour.rs`; new "garbage in" → `hostile.rs` (a case is a list of argv
+  sequences); a fixture change → `fixtures.rs`. All run under `cargo test`
+  against the debug binary; `cargo test -p nle-core` is the sub-second loop.
+  `tests/common` rebuilds templates every run — a stale template poisons every
+  case.
 - **Split decide from apply** so logic is testable without mpv/ffmpeg:
   `plan_for_armed`/`apply_extend_plan`, `commit_batch` vs
   `run_commit_action`, `pool_step_target` vs `pool_step`,

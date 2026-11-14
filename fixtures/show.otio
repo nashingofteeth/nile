@@ -1,0 +1,63 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "2-cam show",
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "Program",
+        "kind": "Video",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "cam_a.mp4",
+            "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "cam_a.mp4" },
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 30 },
+              "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 60, "rate": 30 }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "cam_b.mp4",
+            "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "cam_b.mp4" },
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 30 },
+              "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 60, "rate": 30 }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "cam_a.mp4",
+            "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "cam_a.mp4" },
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 60, "rate": 30 },
+              "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 60, "rate": 30 }
+            }
+          }
+        ]
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "Mic",
+        "kind": "Audio",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "mic.m4a",
+            "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "mic.m4a" },
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 30 },
+              "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 180, "rate": 30 }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
