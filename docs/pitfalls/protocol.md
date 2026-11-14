@@ -82,6 +82,25 @@ handler queued.
 - Invalid UTF-8 gets a null-id parse-error response and the loop continues;
   only an over-cap line ends the connection. A peer can only deny itself.
 
+## Serve
+
+`nile serve --stdio` loads the project, its history sidecar, and the yank
+register, then serves one connection. It is a **single-writer** interface:
+close the TUI and other edits while it runs; foreign-change adoption is not
+implemented yet. Mutations go through one `apply`, which owns CAS, the edit,
+playhead conversion, saving, and events.
+
+The server sets the shared playhead only when `nle_core::Outcome.playhead` is
+`Some` (transitions, undo/redo). It does not replicate the TUI's media-frame
+reanchoring; split/trim/delete may leave the playhead where it was. Recorded
+history uses `Actor::Agent("nile-serve")`.
+
+A save failure poisons mutations (the response is `internal`, and later writes
+say to restart); reads continue. `timeline.edl` returns the `edl://` URL that
+`nile edl` prints, and its `track` is 0-based while the CLI flag is 1-based.
+`stdout` is protocol-only: no `say!`/`println!`; logs go to stderr or
+`NLE_LOG`.
+
 ## Tests
 
 `crates/nle-protocol/tests/wire.rs` covers the envelopes, every call/event,
