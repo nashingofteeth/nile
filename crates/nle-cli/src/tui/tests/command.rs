@@ -25,7 +25,7 @@ fn track_command_adds_mutes_and_removes() {
     assert!(cmd(&mut app, "track rm 2").contains("removed"));
     assert_eq!(app.project.timeline.tracks.len(), 1);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn track_rm_deletes_a_nonempty_track_with_its_clips() {
     assert!(msg.contains("removed") && msg.contains("1 clip"), "{msg}");
     assert_eq!(app.project.timeline.tracks.len(), 1);
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
 }
 
 #[test]
