@@ -319,3 +319,39 @@ fn nothing_to_undo_is_an_invalid_request_and_serving_continues() {
 
     assert!(serve.finish().success(), "serve exits cleanly");
 }
+
+#[test]
+fn serve_reanchors_the_playhead_like_the_tui() {
+    let sandbox = Sandbox::new();
+    sandbox.hostile_base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let show = call(&mut serve, 2, "project.show", None);
+    assert_eq!(show["result"]["playhead"], "3/2");
+
+    // The clip's out-edge moves before the playhead; the shared media anchor
+    // resolves to the new out-edge (1 s), just as the TUI would.
+    let trimmed = call(
+        &mut serve,
+        3,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "action": {"action": "trim_out", "track": 0, "at": 1.0, "ripple": false},
+            "from": "3/2"
+        })),
+    );
+    assert_eq!(trimmed["result"]["changed"], true);
+    assert_eq!(trimmed["result"]["playhead"], "1/1");
+    let event = serve.read();
+    assert_eq!(event["method"], "project.changed");
+    let event = serve.read();
+    assert_eq!(event["method"], "playhead");
+    assert_eq!(event["params"]["at"], "1/1");
+
+    let show = call(&mut serve, 4, "project.show", None);
+    assert_eq!(show["result"]["playhead"], "1/1");
+    assert!(serve.finish().success(), "serve exits cleanly");
+}

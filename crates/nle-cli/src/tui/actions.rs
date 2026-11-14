@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use nle_core::action::Action;
 use nle_core::time::frame_to_secs;
-use nle_core::timeline::{Segment as TimelineSegment, Track};
+use nle_core::timeline::Segment as TimelineSegment;
 #[cfg(test)]
 use nle_core::{Batch, EditError, edit};
 use nle_core::{Clip, Project, Seconds, Target, clip_span};
@@ -52,83 +52,9 @@ pub(crate) fn seek_clip_end(app: &mut App, player: &dyn Mpv, head: bool) {
     ));
 }
 
-/// The clip and source frame under the playhead — the media anchor an
-/// edit should preserve. `None` over a gap (or past the end).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct MediaAnchor {
-    pub(crate) id: u32,
-    pub(crate) source: Seconds,
-    /// The clip's timeline start before the edit — where a ripple delete
-    /// leaves the seam between its neighbours.
-    pub(crate) start: f64,
-    /// The playhead before the edit — the offset a plain delete keeps
-    /// inside the gap it leaves.
-    pub(crate) at: f64,
-}
-
-/// A position anchor for a gap or transition — neither is media (a gap has no
-/// id, a transition is opaque), so the playhead can't be re-found by frame.
-/// It is kept where it was while the segment survives; a *removal* ripples and
-/// leaves the seam (`start`) between the neighbours.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct GapAnchor {
-    /// The seam a removal leaves: a gap's start, a transition's end.
-    pub(crate) start: f64,
-    /// The playhead before the edit — kept while a gap or transition is still
-    /// under it (an insert, a trim, an effect elsewhere), so those don't slide
-    /// the playhead to the seam.
-    pub(crate) at: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Anchor {
-    Media(MediaAnchor),
-    Gap(GapAnchor),
-}
-
-/// The gap or transition whose span *ends* exactly at `t`. `index_at` gives
-/// the boundary to the follower, but for anchoring the segment the playhead
-/// sits *on* is what matters: a blend's far edge is still the blend, and a
-/// trim that moves that edge to the playhead must keep the playhead put.
-pub(crate) fn gap_ending_at(track: &Track, t: Seconds) -> Option<usize> {
-    let mut acc = Seconds::from_integer(0);
-    for (i, s) in track.segments.iter().enumerate() {
-        acc += s.duration();
-        if acc == t && matches!(s, TimelineSegment::Gap(_) | TimelineSegment::Transition(_)) {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Anchor the playhead's position before an edit: the clip + source frame
-/// over a clip, or the gap's start over a gap.
-pub(crate) fn edit_anchor(project: &Project, playhead: f64, ti: usize) -> Option<Anchor> {
-    let track = project.timeline.track(ti)?;
-    let t = grid_time(project, playhead);
-    let idx = gap_ending_at(track, t).or_else(|| track.index_at(t))?;
-    let at = secs(&t);
-    match &track.segments[idx] {
-        TimelineSegment::Clip(c) => Some(Anchor::Media(MediaAnchor {
-            id: c.id,
-            // Timeline → source scales by the clip's speed (a 2× clip's
-            // timeline second is two source seconds).
-            source: c.source_at(t - track.start_of(idx)),
-            start: secs(&track.start_of(idx)),
-            at,
-        })),
-        TimelineSegment::Gap(_) => Some(Anchor::Gap(GapAnchor {
-            start: secs(&track.start_of(idx)),
-            at,
-        })),
-        // A transition is removed by handing its trimmed spans back, so the
-        // neighbours meet at its *end*; a non-removing edit keeps the playhead.
-        TimelineSegment::Transition(tr) => Some(Anchor::Gap(GapAnchor {
-            start: secs(&(track.start_of(idx) + tr.dur)),
-            at,
-        })),
-    }
-}
+pub(crate) use crate::session::playhead::{Anchor, edit_anchor};
+#[cfg(test)]
+pub(crate) use crate::session::playhead::{GapAnchor, MediaAnchor};
 
 #[cfg(test)]
 pub(crate) fn clip_anchor(project: &Project, playhead: f64) -> Option<MediaAnchor> {
@@ -138,95 +64,14 @@ pub(crate) fn clip_anchor(project: &Project, playhead: f64) -> Option<MediaAncho
     }
 }
 
-/// The timeline position of `source` in clip `id`, clamped to the clip's
-/// current extent. `None` when the clip is gone.
-pub(crate) fn resolve_anchor(
-    project: &Project,
-    id: u32,
-    source: Seconds,
-    ti: usize,
-) -> Option<f64> {
-    let track = project.timeline.track(ti)?;
-    let mut acc = Seconds::from_integer(0);
-    for seg in &track.segments {
-        if let TimelineSegment::Clip(c) = seg
-            && c.id == id
-        {
-            let pos = if source < c.asset_in {
-                acc
-            } else if source >= c.asset_out {
-                acc + c.duration()
-            } else {
-                // Source → timeline divides by speed: the inverse of the
-                // mapping `edit_anchor` used to record the media frame.
-                acc + c.timeline_offset_of(source)
-            };
-            return Some(secs(&pos));
-        }
-        acc += seg.duration();
-    }
-    None
-}
-
-/// After an edit, put the playhead back on the media frame it was on
-/// (`anchor`), so a trim that moves material under it keeps the same
-/// frame rather than the same timecode.
+/// Apply the shared media-frame policy to this TUI session's active track.
 pub(crate) fn reanchor_playhead(app: &mut App, anchor: Option<Anchor>) {
-    let Some(anchor) = anchor else { return };
-    let pos = match anchor {
-        Anchor::Media(a) => resolve_anchor(&app.project, a.id, a.source, app.active())
-            .unwrap_or_else(|| fallback_position(&app.project, &a, app.active())),
-        // A gap or transition still under the playhead: an edit that doesn't
-        // remove it keeps the playhead put. A removal leaves the seam between
-        // the neighbours (the segment under `at` is then a clip).
-        Anchor::Gap(g) => {
-            let ti = app.active();
-            let idx = app.project.timeline.track(ti).and_then(|track| {
-                let t = grid_time(&app.project, g.at);
-                gap_ending_at(track, t).or_else(|| track.index_at(t))
-            });
-            match idx {
-                Some(i)
-                    if !matches!(
-                        app.project.timeline.tracks[ti].segments[i],
-                        TimelineSegment::Clip(_)
-                    ) =>
-                {
-                    g.at
-                }
-                _ => g.start,
-            }
-        }
-    };
-    let total = app.last_frame();
-    app.playhead = pos.clamp(0.0, total);
+    app.playhead =
+        crate::session::playhead::reanchor(&app.project, app.playhead, app.active(), anchor);
 }
 
-/// Does this action move the active track's media? If not, the playhead stays
-/// where it is — an anchor taken against the old active track would otherwise
-/// resolve against the wrong one (`track rm` re-indexes).
 pub(crate) fn reanchors(action: &Action) -> bool {
-    !matches!(
-        action,
-        Action::TrackAdd { .. }
-            | Action::TrackMute { .. }
-            | Action::TrackRm { .. }
-            | Action::AssetRm { .. }
-    )
-}
-
-/// Where the playhead lands when the anchored clip is gone. A plain
-/// delete replaces it with a gap of the same length, so keep the same
-/// offset (`at`); a ripple delete removes it and closes the gap, so land
-/// on the cut the neighbours now share (`start`).
-pub(crate) fn fallback_position(project: &Project, a: &MediaAnchor, ti: usize) -> f64 {
-    if let Some(track) = project.timeline.track(ti)
-        && let Some(idx) = track.index_at(grid_time(project, a.at))
-        && matches!(track.segments[idx], TimelineSegment::Gap(_))
-    {
-        return a.at;
-    }
-    a.start
+    crate::session::playhead::reanchors(action)
 }
 
 /// The playhead's position on the project's frame grid, as Seconds.

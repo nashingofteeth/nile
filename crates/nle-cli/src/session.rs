@@ -7,8 +7,10 @@
 //! orders, register handling, or preview behavior.
 //!
 //! The TUI's `App` keeps its `project` field, but it is now a `Session`;
-//! `Deref` preserves the existing model access. Moving the TUI's media-frame
-//! playhead anchor policy here is the next structural step.
+//! `Deref` preserves the existing model access. The media-frame playhead
+//! policy lives in [`playhead`] and is shared by the TUI and `nile serve`.
+
+pub mod playhead;
 
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
