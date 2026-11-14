@@ -44,12 +44,12 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v10, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v11, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | frame-topology history (segment before/after), provenance, sidecar v16 |
+| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v17 |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
@@ -460,13 +460,13 @@ shared by the TUI and agents — with no clipgen code present.
   action per apply (one undo step), rational `from`/playhead times, `hello` +
   `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
   single-source `wire_catalog!` generation. The handler owns CAS, saves,
-  playhead, and events. Step 1 (sequences) is next.
+  playhead, and events. Step 1 (sequences) landed; step 2 (protocol) is next.
 - **Order within step 0:** revision + provenance, the `nle-protocol` wire,
-  `nile serve --stdio`, and fixtures are done. Step 0 is complete; sequences
-  (step 1) start next. These are breaking format changes: close any live TUI
-  before testing and rebuild old projects.
+  `nile serve --stdio`, and fixtures are done. Steps 0 and 1 are complete; the
+  protocol (step 2) starts next. These are breaking format changes: close any
+  live TUI before testing and rebuild old projects.
 
-### 1. Sequences (blocking)
+### 1. Sequences (done)
 
 - `Project { media, sequences, active }`; `Sequence { id, name, fps, video,
   tracks, playhead }`. Output settings move onto the sequence so a 16:9 and a
@@ -478,7 +478,11 @@ shared by the TUI and agents — with no clipgen code present.
 - `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
   land now; derived sequences come later but must be traceable from day one.
 - Export takes a sequence; proxy/export caches key per sequence.
-- **Gate:** demo + EDL/OTIO builds `sequences[0]`; two sequences with
+- Landed: v11 projects with shared media, v17 per-sequence histories,
+  `nile sequence ls|add|use`, `:sequence`, and `--sequence` on
+  `show`/`edl`/`export` (it reads another timeline without switching). The
+  protocol resolves the sequence in step 2 (`sequence.*`).
+- **Gate (met):** demo + EDL/OTIO builds `sequences[0]`; two sequences with
   different sizes export; the TUI switches and undo is isolated.
 
 ### 2. Protocol (blocking)
@@ -578,8 +582,8 @@ is what makes the merge modular.
 
 ### Order and merge gate
 
-Workspace/revisions/fixtures → sequences → protocol → time maps →
-annotations → render (keyframes, audio, reports, jobs) → sampling contract →
+Workspace/revisions/fixtures → sequences (done) → protocol (next) → time maps
+→ annotations → render (keyframes, audio, reports, jobs) → sampling contract →
 toolkit hooks. Do not start the clipgen port until the merge-ready sentence
 above is true; then port ingest, planners and cases against the protocol and
 prove parity with the existing renders in `fixtures/`.
