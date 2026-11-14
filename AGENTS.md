@@ -23,6 +23,7 @@ build — see "Learning Rust along the way".
 | actions, trims, playhead | `docs/pitfalls/playhead.md` |
 | transitions, blends | `docs/pitfalls/transitions.md` |
 | `nle-protocol`, `serve`, wire methods | `docs/pitfalls/protocol.md` |
+| sequences, selection, `nile sequence` | `docs/pitfalls/sequences.md` |
 | the borrow checker or clippy | `docs/rust-notes.md` |
 
 Low-dependency stance: **the current set is frozen.** No new runtime
@@ -110,6 +111,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - **Every write path clamps clips to their media.** `Document::save` clamps
   before writing, `History::apply` after every batch; new saves go through
   `Document`, or the model reads past EOF and the export silently truncates.
+- **Sequences.** Switch via `Document::select_sequence` (undo too);
+  `Document::save` clamps every sequence. Details:
+  `docs/pitfalls/sequences.md`.
 - **Track-scoped edits.** Every track-resolving edit is
   `*_on(project, track, …)`; the plain name wraps the first video track. New
   ops take the index — don't add fresh `video_track()` calls. A stale index
