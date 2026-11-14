@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 use nle_core::action;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
 use nle_core::{
-    Armed, Clip, Document, History, Project, frame_of, load_register,
-    load_register_without_migration, track_label,
+    Armed, Clip, History, Project, frame_of, load_register_without_migration, track_label,
 };
+
+use crate::session::Session;
 
 use crate::filmstrip::{Filmstrip, FilmstripKey};
 use crate::mpv::{Mpv, PlaybackState};
@@ -226,8 +227,7 @@ struct Seen {
 }
 
 pub struct App {
-    pub project: Document,
-    pub path: PathBuf,
+    pub project: Session,
     pub mode: Mode,
     /// Playhead in seconds (from mpv; EDL time == timeline time).
     pub playhead: f64,
@@ -235,11 +235,6 @@ pub struct App {
     pub count: Option<u32>,
     /// Pending two-key sequence.
     pub pending: Pending,
-    /// Yanked segment, for `p`/`P` — the shared register (`.nile/<stem>/clipboard.json`),
-    /// so `nile yank` and `yy` fill the same slot. Carries the clip's asset
-    /// path, so a register from a rebuilt project resolves (or refuses)
-    /// instead of pasting the wrong media.
-    pub register: Option<nle_core::Register>,
     /// Undo/redo stack of edit batches (session-only).
     pub reload_requested: bool,
     pub quit: bool,
@@ -341,13 +336,11 @@ pub struct App {
 impl App {
     pub fn new(project: Project, path: PathBuf) -> Self {
         let mut app = Self {
-            project: Document::new(project),
-            path,
+            project: Session::from_history(project, History::default(), path),
             mode: Mode::Normal,
             playhead: 0.0,
             count: None,
             pending: Pending::None,
-            register: None,
             reload_requested: false,
             quit: false,
             message: String::new(),
@@ -424,30 +417,30 @@ impl App {
     /// after a save we made (so our own writes don't read as foreign).
     fn note_seen(&mut self) {
         self.seen = Seen {
-            project: stamp(&self.path),
-            history: stamp(&History::sidecar_path(&self.path)),
-            register: stamp(&action::register_path(&self.path)),
+            project: stamp(self.project.path()),
+            history: stamp(&History::sidecar_path(self.project.path())),
+            register: stamp(&action::register_path(self.project.path())),
         };
     }
 
     fn note_project(&mut self) {
-        self.seen.project = stamp(&self.path);
+        self.seen.project = stamp(self.project.path());
     }
 
     fn note_history(&mut self) {
-        self.seen.history = stamp(&History::sidecar_path(&self.path));
+        self.seen.history = stamp(&History::sidecar_path(self.project.path()));
     }
 
     fn note_register(&mut self) {
-        self.seen.register = stamp(&action::register_path(&self.path));
+        self.seen.register = stamp(&action::register_path(self.project.path()));
     }
 
     /// Whether a shell wrote one of the shared files since we last read or
     /// wrote it.
     fn external_change(&self) -> bool {
-        stamp(&self.path) != self.seen.project
-            || stamp(&History::sidecar_path(&self.path)) != self.seen.history
-            || stamp(&action::register_path(&self.path)) != self.seen.register
+        stamp(self.project.path()) != self.seen.project
+            || stamp(&History::sidecar_path(self.project.path())) != self.seen.history
+            || stamp(&action::register_path(self.project.path())) != self.seen.register
     }
 
     pub fn sync(&mut self, st: &PlaybackState) {
@@ -586,7 +579,8 @@ impl App {
                     .filter(|p| p.is_dir())
             })
             .or_else(|| {
-                self.path
+                self.project
+                    .path()
                     .parent()
                     .map(|p| p.to_path_buf())
                     .filter(|p| p.is_dir())
@@ -686,7 +680,7 @@ impl App {
             active_track: self.active_track,
             pool_marks: self.pool_marks.clone(),
         };
-        if let Err(e) = view_state::save(&self.path, state) {
+        if let Err(e) = view_state::save(self.project.path(), state) {
             crate::log::line(&format!("session state save failed: {e}"));
         }
     }
@@ -860,7 +854,8 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     // every save land in the scratch copy's state dir.
     app.project
         .set_history(History::load(&History::sidecar_path(&path)).unwrap_or_default());
-    app.register = load_register_without_migration(&path);
+    app.project
+        .set_register(load_register_without_migration(&path));
     apply_session_state(&mut app, view_state::load(&path));
     // The handlers guard on this (mpv "loaded"); the dump has no monitor.
     app.loaded = true;
@@ -929,13 +924,11 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     let history = History::load_project(&path).unwrap_or_default();
     let mut app = App::new(project, path);
     app.project.set_history(history);
-    // The shared register: what `nile yank` (or an earlier session) left.
-    app.register = load_register(&app.path);
     // Open where `nile seek` (or the last session) left the playhead.
     app.playhead = secs(&app.project.playhead);
     // Restore the session viewport and active track after the playhead: don't
     // let a load-time follow discard a saved pan.
-    let session = view_state::load(&app.path);
+    let session = view_state::load(app.project.path());
     apply_session_state(&mut app, session);
     // Build the monitor off-thread before the first frame: a cold proxy can
     // take seconds and the status row will show it.
@@ -1110,7 +1103,7 @@ fn persist_playhead(app: &mut App) -> anyhow::Result<bool> {
         return Ok(false);
     }
     app.project.set_playhead(app.playhead);
-    app.project.save(&app.path)?;
+    app.project.save_project()?;
     app.note_project();
     Ok(true)
 }
@@ -1153,14 +1146,13 @@ fn watch_foreign(app: &mut App) -> bool {
 /// foreign write (`nile seek`, an edit in another window) also adopts that
 /// file's playhead.
 fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> anyhow::Result<()> {
-    let project = Project::load(&app.path)?;
-    let history = History::load_project(&app.path).unwrap_or_default();
-    app.project = Document::with_history(project, history);
+    let path = app.project.path().to_path_buf();
+    let project = Project::load(&path)?;
+    let history = History::load_project(&path).unwrap_or_default();
+    app.project = Session::from_history(project, history, path);
     app.active_track = app
         .active_track
         .min(app.project.timeline.tracks.len().saturating_sub(1));
-    // The register is shared too: a shell may have yanked since we read it.
-    app.register = load_register(&app.path);
     if adopt_playhead {
         // A shell may have moved it (`nile seek`); adopt that cursor.
         app.playhead = secs(&app.project.playhead);

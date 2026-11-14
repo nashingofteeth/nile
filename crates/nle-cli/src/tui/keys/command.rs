@@ -8,7 +8,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use nle_core::action::{self, Action, ParseDefaults, ParseError};
-use nle_core::{History, frame_of, track_label};
+use nle_core::{frame_of, track_label};
 
 use crate::mpv::Mpv;
 
@@ -194,10 +194,10 @@ pub(crate) fn add_command(
     if imported {
         // A recorded pool addition lands on disk before the edit does, so
         // undo peels the insert and then the import.
-        if let Err(e) = app.project.save(&app.path) {
+        if let Err(e) = app.project.save_project() {
             return Some(format!("save failed: {e}"));
         }
-        if let Err(e) = app.project.save_history(&History::sidecar_path(&app.path)) {
+        if let Err(e) = app.project.save_history() {
             return Some(format!("history save failed: {e}"));
         }
         app.note_seen();
@@ -319,7 +319,7 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     let Some(job) = start_job(app, "export", false) else {
         return Some("a job is already running — wait for it".to_string());
     };
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     std::thread::spawn(move || {
         let result = crate::cmd::export::run_export(&project_path, &output, &options, true)
             .map_err(|e| e.to_string());
@@ -359,7 +359,7 @@ pub(crate) fn detect_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     let Some(job) = start_job(app, "detect-edits", reload) else {
         return Some("a job is already running — wait for it".to_string());
     };
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     std::thread::spawn(move || {
         let result = crate::cmd::detect::detect_edits_work(crate::cmd::detect::DetectArgs {
             project: &project_path,
@@ -413,7 +413,7 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
     let Some(job) = start_job(app, "edl-import", true) else {
         return Some("a job is already running — wait for it".to_string());
     };
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     std::thread::spawn(move || {
         let result = crate::cmd::import::import_edl_work(
             &project_path,
@@ -457,7 +457,7 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
     let Some(job) = start_job(app, "otio-import", true) else {
         return Some("a job is already running — wait for it".to_string());
     };
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     std::thread::spawn(move || {
         let result = crate::cmd::import::import_otio_work(
             &project_path,
@@ -642,31 +642,31 @@ pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> 
         return Some(e.to_string());
     }
     let age = Duration::from_secs(days.saturating_mul(86_400));
-    let proxy = match crate::proxy::prune(&app.path, age, dry_run) {
+    let proxy = match crate::proxy::prune(app.project.path(), age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
-    let audio = match crate::preview::prune_audio(&app.path, age, dry_run) {
+    let audio = match crate::preview::prune_audio(app.project.path(), age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
-    let wave = match crate::waveform::prune(&app.path, age, dry_run) {
+    let wave = match crate::waveform::prune(app.project.path(), age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
-    let keyframes = match crate::keyframes::prune(&app.path, age, dry_run) {
+    let keyframes = match crate::keyframes::prune(app.project.path(), age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
-    let thumbs = match crate::thumbnails::prune(&app.path, age, dry_run) {
+    let thumbs = match crate::thumbnails::prune(app.project.path(), age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
-    let filmstrip = match crate::filmstrip::prune(&app.path, age, dry_run) {
+    let filmstrip = match crate::filmstrip::prune(app.project.path(), age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
-    let export = match crate::cmd::schedule::prune_export(&app.path, age, dry_run) {
+    let export = match crate::cmd::schedule::prune_export(app.project.path(), age, dry_run) {
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };

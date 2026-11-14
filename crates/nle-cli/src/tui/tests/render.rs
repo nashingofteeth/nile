@@ -13,7 +13,7 @@ use crate::waveform::Waveform;
 use nle_core::edit;
 use nle_core::time::Seconds;
 use nle_core::timeline::Effect;
-use nle_core::{Armed, Project, track_label};
+use nle_core::{Armed, Document, Project, track_label};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 

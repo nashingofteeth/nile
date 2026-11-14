@@ -2,14 +2,15 @@
 //!
 //! `Document` pairs the project with its undo history. `Session` adds the
 //! on-disk path and the shared register, then owns the one load/edit/preview/
-//! save order the CLI and `nile serve` use. Keeping that transaction in one
-//! place is what stops the front-ends from growing subtly different save
+//! save order the CLI, TUI, and `nile serve` use. Keeping that transaction in
+//! one place is what stops the front-ends from growing subtly different save
 //! orders, register handling, or preview behavior.
 //!
-//! The TUI still holds its own project/register/path fields; migrating it to
-//! this type is the next structural step, along with moving the media-frame
-//! playhead anchor policy here so every front-end agrees.
+//! The TUI's `App` keeps its `project` field, but it is now a `Session`;
+//! `Deref` preserves the existing model access. Moving the TUI's media-frame
+//! playhead anchor policy here is the next structural step.
 
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 use nle_core::edit::{Actor, EditError, History};
@@ -41,12 +42,17 @@ impl Session {
     pub fn load(path: &Path) -> Result<Self, SessionError> {
         let project = Project::load(path)?;
         let history = History::load_project(path).unwrap_or_default();
-        let register = load_register(path);
-        Ok(Self {
+        Ok(Self::from_history(project, history, path.to_path_buf()))
+    }
+
+    /// Adopt a project and history already loaded elsewhere (the TUI), and
+    /// read the shared register beside `path`.
+    pub fn from_history(project: Project, history: History, path: PathBuf) -> Self {
+        Self {
             document: Document::with_history(project, history),
-            register,
-            path: path.to_path_buf(),
-        })
+            register: load_register(&path),
+            path,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -69,9 +75,18 @@ impl Session {
         self.document.set_playhead(at)
     }
 
+    #[allow(dead_code)] // the TUI and its tests read the shared register
+    pub fn register(&self) -> Option<&Register> {
+        self.register.as_ref()
+    }
+
+    pub fn set_register(&mut self, register: Option<Register>) {
+        self.register = register;
+    }
+
     /// Run one catalog action, recording it in the session's history and
     /// register. The caller decides whether to save.
-    pub fn edit(&mut self, action: &Action, from: f64) -> Result<ActionOutcome, EditError> {
+    pub fn apply_action(&mut self, action: &Action, from: f64) -> Result<ActionOutcome, EditError> {
         self.document.edit(action, from, &mut self.register)
     }
 
@@ -88,22 +103,56 @@ impl Session {
     }
 
     /// Save project, history, and register. This is the CLI's one-shot path.
-    pub fn save(&mut self) -> Result<(), SessionError> {
+    pub fn persist(&mut self) -> Result<(), SessionError> {
         self.save_if(true, true)
+    }
+
+    pub fn save_register(&self) -> std::io::Result<()> {
+        save_register(&self.path, self.register.as_ref())
+    }
+
+    /// Save only the project (a playhead move, a TUI reload).
+    pub fn save_project(&mut self) -> Result<(), ProjectError> {
+        self.document.save(&self.path)
+    }
+
+    /// Save only the undo stack beside the project.
+    pub fn save_history(&self) -> std::io::Result<()> {
+        self.document
+            .save_history(&History::sidecar_path(&self.path))
+    }
+
+    /// Drop the undo stack and its sidecar (a rebuild).
+    #[allow(dead_code)] // used by the TUI rebuild tests
+    pub fn reset_history(&mut self) {
+        self.document.reset_history(&self.path);
     }
 
     /// Save the parts a caller actually changed. A yank only needs the
     /// register; a playhead-only move needs the project but not the stack.
     pub fn save_if(&mut self, changed: bool, playhead_moved: bool) -> Result<(), SessionError> {
         if changed || playhead_moved {
-            self.document.save(&self.path)?;
+            self.save_project()?;
         }
         if changed {
-            self.document
-                .save_history(&History::sidecar_path(&self.path))?;
+            self.save_history()?;
         }
-        save_register(&self.path, self.register.as_ref())?;
+        self.save_register()?;
         Ok(())
+    }
+}
+
+impl Deref for Session {
+    type Target = Document;
+
+    fn deref(&self) -> &Document {
+        &self.document
+    }
+}
+
+impl DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Document {
+        &mut self.document
     }
 }
 
@@ -136,9 +185,20 @@ mod tests {
             "the project loads"
         );
         session.set_playhead(1.0);
-        session.save().expect("save");
+        session.persist().expect("save");
         let again = Session::load(&path).expect("reload");
         assert_eq!(again.project().playhead, Seconds::from_integer(1));
+    }
+
+    #[test]
+    fn from_history_owns_the_document_and_register() {
+        let (_dir, path) = seeded();
+        let project = Project::load(&path).expect("load");
+        let history = History::default();
+        let session = Session::from_history(project, history, path.clone());
+        assert_eq!(session.project().timeline.tracks.len(), 1);
+        assert_eq!(session.register(), None);
+        assert_eq!(session.path(), path.as_path());
     }
 
     #[test]
