@@ -162,7 +162,7 @@ impl ServeHandler {
 
         let outcome = self
             .session
-            .edit(action, self.anchor_seconds(from))
+            .apply_action(action, self.anchor_seconds(from))
             .map_err(edit_rpc)?;
 
         let playhead = match outcome.playhead {

@@ -68,7 +68,7 @@ fn a_foreign_write_is_seen_and_adopted() {
     assert!(watch_foreign(&mut app), "Normal mode adopts it right away");
     reload_project(&mut app, &FakeMpv::new(), true).unwrap();
     assert_eq!(app.playhead, 3.0, "the shell's cursor");
-    assert_eq!(app.register, Some(reg), "and its yank");
+    assert_eq!(app.project.register(), Some(&reg), "and its yank");
     assert!(!app.external_change(), "the watch re-baselines");
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));

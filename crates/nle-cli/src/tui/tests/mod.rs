@@ -229,7 +229,7 @@ fn set_effects(app: &mut App, clip: u32, effects: Vec<nle_core::timeline::Effect
             Ok(format!("fixture: effects on clip #{clip}"))
         })
         .unwrap();
-    app.project.reset_history(&app.path);
+    app.project.reset_history();
 }
 
 // ---- input routing, against a fake monitor (no mpv process) ----
