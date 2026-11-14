@@ -25,10 +25,16 @@ use crate::time::Seconds;
 /// A project plus one undo stack per sequence. Undo acts on the active
 /// sequence only, so a switch can never replay a change recorded against a
 /// different timeline.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Document {
     project: Project,
     histories: Histories,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self::new(Project::new())
+    }
 }
 
 impl Document {
@@ -404,6 +410,14 @@ mod tests {
             effects: Vec::new(),
         })];
         id
+    }
+
+    #[test]
+    fn default_document_has_a_usable_history() {
+        let doc = Document::default();
+        assert_eq!(doc.project().active_id(), 1);
+        assert!(!doc.can_undo());
+        assert_eq!(doc.depth(), 0);
     }
 
     #[test]
