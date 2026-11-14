@@ -107,6 +107,7 @@ impl History {
                 provenance: self.provenance(),
             }));
             project.bump_revision();
+            project.bump_manual_edits();
             return Ok(());
         }
         let track = batch_track(&batch, project)?;
@@ -136,6 +137,7 @@ impl History {
             provenance: self.provenance(),
         }));
         project.bump_revision();
+        project.bump_manual_edits();
         Ok(())
     }
 
@@ -196,6 +198,7 @@ impl History {
             provenance: self.provenance(),
         }));
         project.bump_revision();
+        project.bump_manual_edits();
         Ok(desc)
     }
 

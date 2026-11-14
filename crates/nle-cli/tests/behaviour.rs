@@ -493,6 +493,14 @@ fn model_json(path: &std::path::Path) -> serde_json::Value {
         .as_object_mut()
         .expect("project object")
         .remove("revision");
+    if let Some(sequences) = value["sequences"].as_array_mut() {
+        for sequence in sequences {
+            sequence
+                .as_object_mut()
+                .expect("sequence object")
+                .remove("manual_edits");
+        }
+    }
     value
 }
 

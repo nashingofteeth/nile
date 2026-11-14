@@ -9,6 +9,16 @@ mod common;
 use common::Sandbox;
 use serde_json::{Value, json};
 
+fn active(project: &Value) -> &Value {
+    let id = project["active"].as_u64().expect("active sequence");
+    project["sequences"]
+        .as_array()
+        .expect("sequences")
+        .iter()
+        .find(|sequence| sequence["id"].as_u64() == Some(id))
+        .expect("active sequence")
+}
+
 fn call(serve: &mut common::Serve, id: u64, method: &str, params: Option<Value>) -> Value {
     let mut request = json!({"jsonrpc": "2.0", "id": id, "method": method});
     if let Some(params) = params {
@@ -25,7 +35,7 @@ fn protocol_server_round_trip() {
 
     let hello = call(&mut serve, 1, "hello", None);
     assert_eq!(hello["result"]["protocol"], 1);
-    assert_eq!(hello["result"]["project_version"], 10);
+    assert_eq!(hello["result"]["project_version"], 11);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
         hello["result"]["methods"]
@@ -36,7 +46,7 @@ fn protocol_server_round_trip() {
     );
 
     let show = call(&mut serve, 2, "project.show", None);
-    let before = show["result"]["timeline"]["tracks"][0]["segments"]
+    let before = active(&show["result"])["timeline"]["tracks"][0]["segments"]
         .as_array()
         .expect("segments")
         .len();
@@ -62,7 +72,7 @@ fn protocol_server_round_trip() {
     let show = call(&mut serve, 5, "project.show", None);
     assert_eq!(show["result"]["revision"], revision, "preview did not save");
     assert_eq!(
-        show["result"]["timeline"]["tracks"][0]["segments"]
+        active(&show["result"])["timeline"]["tracks"][0]["segments"]
             .as_array()
             .expect("segments")
             .len(),
@@ -95,7 +105,7 @@ fn protocol_server_round_trip() {
 
     let show = call(&mut serve, 7, "project.show", None);
     assert_eq!(
-        show["result"]["timeline"]["tracks"][0]["segments"]
+        active(&show["result"])["timeline"]["tracks"][0]["segments"]
             .as_array()
             .expect("segments")
             .len(),
@@ -159,7 +169,7 @@ fn protocol_server_round_trip() {
     let project: Value =
         serde_json::from_str(&sandbox.ok(&["show", "--json"])).expect("project JSON");
     assert_eq!(
-        project["timeline"]["tracks"][0]["segments"]
+        active(&project)["timeline"]["tracks"][0]["segments"]
             .as_array()
             .expect("segments")
             .len(),
@@ -169,7 +179,7 @@ fn protocol_server_round_trip() {
     let project: Value =
         serde_json::from_str(&sandbox.ok(&["show", "--json"])).expect("project JSON");
     assert_eq!(
-        project["timeline"]["tracks"][0]["segments"]
+        active(&project)["timeline"]["tracks"][0]["segments"]
             .as_array()
             .expect("segments")
             .len(),
@@ -276,7 +286,7 @@ fn yank_and_paste_share_the_register_across_the_server() {
 
     let show = call(&mut serve, 4, "project.show", None);
     assert_eq!(
-        show["result"]["timeline"]["tracks"][0]["segments"]
+        active(&show["result"])["timeline"]["tracks"][0]["segments"]
             .as_array()
             .expect("segments")
             .len(),
@@ -290,7 +300,7 @@ fn yank_and_paste_share_the_register_across_the_server() {
     let project: Value =
         serde_json::from_str(&sandbox.ok(&["show", "--json"])).expect("project JSON");
     assert_eq!(
-        project["timeline"]["tracks"][0]["segments"]
+        active(&project)["timeline"]["tracks"][0]["segments"]
             .as_array()
             .expect("segments")
             .len(),
@@ -329,7 +339,7 @@ fn serve_reanchors_the_playhead_like_the_tui() {
     let hello = call(&mut serve, 1, "hello", None);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     let show = call(&mut serve, 2, "project.show", None);
-    assert_eq!(show["result"]["playhead"], "3/2");
+    assert_eq!(active(&show["result"])["playhead"], "3/2");
 
     // The clip's out-edge moves before the playhead; the shared media anchor
     // resolves to the new out-edge (1 s), just as the TUI would.
@@ -352,6 +362,6 @@ fn serve_reanchors_the_playhead_like_the_tui() {
     assert_eq!(event["params"]["at"], "1/1");
 
     let show = call(&mut serve, 4, "project.show", None);
-    assert_eq!(show["result"]["playhead"], "1/1");
+    assert_eq!(active(&show["result"])["playhead"], "1/1");
     assert!(serve.finish().success(), "serve exits cleanly");
 }

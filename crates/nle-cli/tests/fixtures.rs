@@ -97,7 +97,14 @@ fn normalized(project: &Value) -> Value {
         })
         .collect();
 
-    let tracks: Vec<Value> = project["timeline"]["tracks"]
+    let active = project["active"].as_u64().expect("active sequence");
+    let sequence = project["sequences"]
+        .as_array()
+        .expect("sequences")
+        .iter()
+        .find(|sequence| sequence["id"].as_u64() == Some(active))
+        .expect("active sequence");
+    let tracks: Vec<Value> = sequence["timeline"]["tracks"]
         .as_array()
         .expect("tracks")
         .iter()
@@ -140,8 +147,8 @@ fn normalized(project: &Value) -> Value {
         .collect();
 
     json!({
-        "fps": project["fps"],
-        "video": project["video"],
+        "fps": sequence["fps"],
+        "video": sequence["video"],
         "tracks": tracks,
     })
 }

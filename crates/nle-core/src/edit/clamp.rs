@@ -194,8 +194,16 @@ pub fn clamp_project(project: &mut Project) -> Vec<String> {
     let Some(fps) = project.fps else {
         return Vec::new();
     };
-    let media = &project.media;
-    let duration = |id: u32| media.iter().find(|a| a.id == id).and_then(|a| a.duration());
+    let durations: Vec<(u32, Seconds)> = project
+        .media
+        .iter()
+        .filter_map(|asset| asset.duration().map(|duration| (asset.id, duration)))
+        .collect();
+    let duration = |id: u32| {
+        durations
+            .iter()
+            .find_map(|(asset, duration)| (*asset == id).then_some(*duration))
+    };
     project
         .timeline
         .tracks

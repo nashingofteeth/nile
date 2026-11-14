@@ -48,7 +48,7 @@ fn media_pool_guarded_removal() {
     p.timeline = {
         let mut q = p.clone();
         edit::History::default().apply(&mut q, batch, 0).unwrap();
-        q.timeline
+        q.timeline.clone()
     };
     assert_eq!(p.asset_usage(spare).len(), 1);
     assert!(p.remove_asset(spare).is_err(), "in use → refused");
