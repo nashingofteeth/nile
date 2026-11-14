@@ -203,6 +203,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   (playhead, register contents) is not an action. The catalog is also the
   wire DTO (`Action` serde): `nle-protocol` sends it, so don't add a parallel
   action request type.
+- **CLI, TUI, and serve share one session.** Load/edit/save go through
+  `nile-cli/src/session.rs`; media anchoring through `session/playhead.rs`.
+  Don't duplicate either in a front-end.
 - **Visual range ops are catalog actions.** `DeleteRange`, `YankRange`, and
   `PasteRange` back visual `d`/`y`/`p`; front-ends call `run_action`, never
   `edit::delete_range_on`/`insert_segments_on` directly. `DeleteRange`
