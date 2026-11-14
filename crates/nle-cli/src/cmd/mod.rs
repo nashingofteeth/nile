@@ -7,13 +7,13 @@ use std::path::Path;
 use anyhow::Result;
 
 use nle_core::action::{EffectArgs, effect_from_args};
-use nle_core::edit;
 use nle_core::timeline::TrackKind;
 use nle_core::{
-    Action, Asset, DEFAULT_TRANSITION_FRAMES, Document, Edge, GapLen, Project, Target,
-    TransitionKind, TransitionLen, format_seconds, load_register, parse_signed_time, save_register,
+    Action, Asset, DEFAULT_TRANSITION_FRAMES, Edge, GapLen, Target, TransitionKind, TransitionLen,
+    format_seconds, parse_signed_time,
 };
 
+use crate::session::Session;
 use crate::{
     Cmd, MediaCmd, TrackCmd, TrackKindArg, edit_message, log, parse_speed_arg, say, say_err,
 };
@@ -373,10 +373,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
 /// undoable (`nile undo`) exactly like a TUI edit — same executor, same
 /// history.
 pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()> {
-    let project = Project::load(project_path)?;
-    let history = edit::History::load_project(project_path).unwrap_or_default();
-    let mut doc = Document::with_history(project, history);
-    let mut register = load_register(project_path);
+    let mut session = Session::load(project_path)?;
     // The edit is "made from" its own position, so undoing it returns
     // there (the TUI passes the playhead instead — its session state).
     let from = match action {
@@ -392,12 +389,10 @@ pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()>
         },
         _ => 0.0,
     };
-    let outcome = doc
-        .edit(action, from, &mut register)
+    let outcome = session
+        .edit(action, from)
         .map_err(|e| anyhow::Error::msg(edit_message(&e)))?;
-    doc.save(project_path)?;
-    doc.save_history(&edit::History::sidecar_path(project_path))?;
-    save_register(project_path, register.as_ref())?;
+    session.save()?;
     log::line(&format!("action {}", outcome.desc));
     match outcome.playhead {
         Some(f) => say!("✓ {} (playhead f{f})", outcome.desc),
