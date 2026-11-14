@@ -441,7 +441,7 @@ pub(crate) fn cmd_sequence(project_path: &Path, action: &SequenceCmd) -> Result<
             };
             let fps = fps.as_deref().map(parse_fps_arg).transpose()?;
             let mut doc = Document::new(Project::load(project_path)?);
-            let id = doc.add_sequence(name.clone(), fps, video);
+            let id = doc.add_sequence(name.clone(), fps, video)?;
             doc.save(project_path)?;
             say!("✓ sequence #{id} {name} (not active — `nile sequence use {id}`)");
             Ok(())

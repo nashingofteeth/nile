@@ -57,6 +57,39 @@ fn two_sequences_export_at_their_own_sizes() {
 }
 
 #[test]
+fn sequence_add_rejects_a_non_positive_frame_rate() {
+    let s = Sandbox::new();
+    s.base();
+    for rate in ["0"] {
+        let out = s.run(&["sequence", "add", "Bad", "--fps", rate]);
+        assert!(!out.status.success(), "--fps {rate} must be refused");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("positive"), "{rate}: {text}");
+        assert!(!text.contains("panicked"), "{rate}: {text}");
+    }
+    assert_eq!(s.ok(&["sequence", "ls"]).matches("#").count(), 1);
+    // A zero-rate property in the file is rejected on load, not a later panic.
+    let mut project: serde_json::Value = serde_json::from_str(&s.ok(&["show", "--json"])).unwrap();
+    project["sequences"][0]["fps"] = serde_json::json!("0/1");
+    s.write(P, &serde_json::to_string_pretty(&project).unwrap());
+    for argv in [&["show"][..], &["seek", "1"][..]] {
+        let out = s.run(argv);
+        assert!(!out.status.success(), "{argv:?} must reject the file");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("non-positive"), "{argv:?}: {text}");
+        assert!(!text.contains("panicked"), "{argv:?}: {text}");
+    }
+}
+
+#[test]
 fn cli_undo_follows_the_active_sequence() {
     let s = Sandbox::new();
     s.base();

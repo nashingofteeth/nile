@@ -53,6 +53,8 @@ pub enum ProjectError {
     SequenceNotFound(u32),
     #[error("sequence #{0} is duplicated")]
     SequenceDuplicate(u32),
+    #[error("sequence #{0} has a non-positive frame rate")]
+    NonPositiveFps(u32),
 }
 
 /// Output sequence settings (set from the first clip, changeable later).
@@ -262,18 +264,21 @@ impl Project {
         fps: Option<Seconds>,
         video: Option<VideoSettings>,
     ) -> u32 {
-        let id = self
-            .sequences
-            .iter()
-            .map(|sequence| sequence.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let id = self.next_sequence_id();
         let mut sequence = Sequence::new(id, name);
         sequence.fps = fps;
         sequence.video = video;
         self.sequences.push(sequence);
         id
+    }
+
+    pub(crate) fn next_sequence_id(&self) -> u32 {
+        self.sequences
+            .iter()
+            .map(|sequence| sequence.id)
+            .max()
+            .unwrap_or(0)
+            + 1
     }
 
     /// Count one manual edit on the active sequence.
@@ -358,6 +363,12 @@ impl Project {
             return Err(ProjectError::SequenceNotFound(self.active));
         }
         for sequence in &self.sequences {
+            if sequence
+                .fps
+                .is_some_and(|fps| fps <= Seconds::from_integer(0))
+            {
+                return Err(ProjectError::NonPositiveFps(sequence.id));
+            }
             sequence.timeline.validate()?;
             for track in &sequence.timeline.tracks {
                 for seg in &track.segments {
@@ -834,6 +845,31 @@ mod tests {
             Seconds::from_integer(1),
         ))];
         assert_eq!(p.asset_usage(1).len(), before + 1);
+    }
+
+    #[test]
+    fn validate_rejects_a_non_positive_frame_rate() {
+        for rate in [Seconds::from_integer(0), Seconds::from_integer(-30)] {
+            let mut p = Project::new();
+            p.fps = Some(rate);
+            assert!(
+                matches!(p.validate(), Err(ProjectError::NonPositiveFps(1))),
+                "{rate:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn load_rejects_a_zero_frame_rate_without_panicking() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(0));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nile.json");
+        std::fs::write(&path, serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(matches!(
+            Project::load(&path),
+            Err(ProjectError::NonPositiveFps(1))
+        ));
     }
 
     #[test]
