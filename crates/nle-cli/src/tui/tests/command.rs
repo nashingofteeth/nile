@@ -82,6 +82,11 @@ fn sequence_command_switches_undo_and_adds() {
     );
     assert_eq!(square.fps, Some(Seconds::from_integer(24)));
 
+    let before = app.project.sequences.len();
+    let refused = cmd(&mut app, "sequence add Zero --fps 0");
+    assert!(refused.contains("positive"), "{refused}");
+    assert_eq!(app.project.sequences.len(), before, "nothing was added");
+
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
 }
