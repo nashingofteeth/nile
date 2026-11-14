@@ -800,7 +800,8 @@ fn hostile_sequence_shapes() {
     }
 
     let s = Sandbox::new();
-    let cases: &[(&str, fn(&mut serde_json::Value), &str)] = &[
+    type Case = (&'static str, fn(&mut serde_json::Value), &'static str);
+    let cases: &[Case] = &[
         ("empty sequence list", no_sequences, "no sequences"),
         ("active id is missing", missing_active, "not found"),
         ("duplicate sequence ids", duplicate_id, "duplicated"),
