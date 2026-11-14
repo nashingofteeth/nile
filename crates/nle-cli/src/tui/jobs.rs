@@ -294,16 +294,13 @@ fn finish_import(
     if existing > 0 {
         msg.push_str(&format!(", {existing} already pooled"));
     }
-    if let Err(e) = app.project.save(&app.path) {
+    if let Err(e) = app.project.save_project() {
         let mut msg = format!("imported {} — save failed: {e}", ids.len());
         append_errors(&mut msg, &errors);
         app.fail(&msg);
         return;
     }
-    if let Err(e) = app
-        .project
-        .save_history(&nle_core::History::sidecar_path(&app.path))
-    {
+    if let Err(e) = app.project.save_history() {
         let mut msg = format!("imported {} — history save failed: {e}", ids.len());
         append_errors(&mut msg, &errors);
         app.fail(&msg);
@@ -353,7 +350,7 @@ pub(crate) fn start_waveforms(app: &mut App) {
     if missing.is_empty() {
         return;
     }
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     app.wave_job = Some(WaveJob { rx });
     std::thread::spawn(move || {
@@ -406,7 +403,7 @@ pub(crate) fn start_keyframes(app: &mut App) {
         return;
     }
     let id = asset.id;
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     app.keyframe_job = Some(KeyframeJob { asset: id, rx });
     std::thread::spawn(move || {
@@ -428,7 +425,7 @@ pub(crate) fn start_thumbnail(app: &mut App) {
         return;
     }
     let id = asset.id;
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     app.thumb_job = Some(ThumbnailJob { asset: id, rx });
     std::thread::spawn(move || {
@@ -502,7 +499,7 @@ pub(crate) fn start_filmstrips(app: &mut App) {
     let Some((key, asset, src_in, src_out)) = next else {
         return;
     };
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     app.filmstrip_job = Some(FilmstripJob { key, rx });
     std::thread::spawn(move || {
@@ -574,7 +571,7 @@ pub(crate) fn start_preview(app: &mut App) {
         return;
     }
     let project = app.project.clone();
-    let project_path = app.path.clone();
+    let project_path = app.project.path().to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     app.preview = Some(PreviewJob {
         rx,

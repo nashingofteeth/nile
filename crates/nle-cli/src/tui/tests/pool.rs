@@ -715,7 +715,9 @@ fn pool_source_marks_trim_the_insert() {
         }
     );
     assert_eq!(
-        super::super::view_state::load(&app.path).pool_marks.get(&1),
+        super::super::view_state::load(app.project.path())
+            .pool_marks
+            .get(&1),
         Some(&PoolMarks {
             in_at: Some(2.0),
             out_at: Some(4.0)

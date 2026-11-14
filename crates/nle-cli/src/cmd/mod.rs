@@ -390,9 +390,9 @@ pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()>
         _ => 0.0,
     };
     let outcome = session
-        .edit(action, from)
+        .apply_action(action, from)
         .map_err(|e| anyhow::Error::msg(edit_message(&e)))?;
-    session.save()?;
+    session.persist()?;
     log::line(&format!("action {}", outcome.desc));
     match outcome.playhead {
         Some(f) => say!("✓ {} (playhead f{f})", outcome.desc),
