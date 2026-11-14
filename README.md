@@ -117,6 +117,15 @@ frames sampled across each clip's source span and cached under
 `.nile/<stem>/cache/filmstrip/`. `Ctrl-t` or `:filmstrip` toggles the rows
 for this session; effects are not baked into the preview strip.
 
+A project can hold several **sequences** — separate timelines with their own
+frame rate, output size, playhead and undo stack, sharing one media pool. The
+TUI edits the active sequence; the status row names it when there is more than
+one. `:sequence ls` lists them, `:sequence N` switches, and `:sequence add NAME
+[--width W --height H --fps RATE]` creates one. Switching saves `active`,
+adopts that timeline's playhead, resets the active track and reloads the
+monitor. Undo is per sequence: an edit made on one timeline never replays on
+another.
+
 ### Transport and motion
 
 | Key | Action |
@@ -231,6 +240,7 @@ The `:` line is the CLI grammar, flag for flag:
 :effect rm [--index N]        :effect clear
 :undo / :redo                 :purge
 :track add video|audio        :track mute [N] / :track rm N
+:sequence [ls|N|use N]         :sequence add NAME [--width W --height H --fps RATE]
 :media ls|rm                  :cache prune [--days N] [--dry-run]
 :filmstrip [on|off]           # timeline strips (session-only)
 :import PATH|DIR …            :add FILE
@@ -306,7 +316,11 @@ nile add b-roll.mov --at 10 --track 2     # tracks are 1-based
 nile track add video                      # overlay track
 nile track add audio                      # mixed on export
 nile track ls
+nile sequence ls                          # timelines, active marked with *
+nile sequence add Vertical --width 1080 --height 1920 --fps 30
+nile sequence use 2                       # edits, undo and export follow it
 nile show                                 # or --json
+nile show --sequence 1                    # report another timeline
 nile remove 2                             # by clip id
 nile media ls
 nile media rm 3                           # only unused assets
@@ -373,6 +387,7 @@ nile detect-edits edit.mov --append --track 2
 # One clip per detected shot; black spans become gaps. Tune with
 # --threshold/--min-shot/--black-min/--no-gaps/--video-only/--fps/--force.
 nile export -o final.mp4                   # balanced: x264 fast CRF 22
+nile export --sequence 2 -o vertical.mp4   # render a non-active timeline too
 nile export -o fast.mp4 --preset preview   # hardware 6M: VideoToolbox/VAAPI
 nile export -o master.mp4 --preset max     # x265 medium CRF 20
 # Preview uses VideoToolbox on macOS and the first /dev/dri/renderD* on

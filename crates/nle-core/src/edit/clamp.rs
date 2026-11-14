@@ -211,3 +211,22 @@ pub fn clamp_project(project: &mut Project) -> Vec<String> {
         .flat_map(|t| clamp_to_media(t, &duration, fps))
         .collect()
 }
+
+/// Clamp every sequence, not only the active one, and restore the cursor.
+/// `Document::save` uses this so a switch cannot leave another timeline with
+/// a clip reading past EOF (its stored state is still written to the file).
+pub fn clamp_project_all(project: &mut Project) -> Vec<String> {
+    let active = project.active_id();
+    let ids: Vec<u32> = project.sequences.iter().map(|s| s.id).collect();
+    let mut notes = Vec::new();
+    for id in ids {
+        project
+            .select_sequence(id)
+            .expect("id came from the sequence list");
+        notes.extend(clamp_project(project));
+    }
+    project
+        .select_sequence(active)
+        .expect("the active sequence still exists");
+    notes
+}

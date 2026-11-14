@@ -326,6 +326,36 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
     }
 }
 
+/// Switch the active sequence and its undo stack. Session state, not an
+/// action: the project's `active` field is saved with the playhead, the
+/// target sequence's stored playhead becomes the session cursor, and the
+/// monitor reloads the new timeline. Tracks are per sequence, so the active
+/// track resets to the first rather than pointing into another timeline.
+pub(crate) fn select_sequence(app: &mut App, player: &dyn Mpv, id: u32) -> Option<String> {
+    if let Err(e) = app.project.select_sequence(id) {
+        let msg = e.to_string();
+        app.fail(&msg);
+        return None;
+    }
+    app.active_track = 0;
+    app.playhead = secs(&app.project.playhead);
+    app.save_session_state();
+    let sequence = app.project.active_sequence();
+    let fps = sequence
+        .fps
+        .map(|fps| format!("{}/{} fps", fps.numer(), fps.denom()))
+        .unwrap_or_else(|| "no fps".into());
+    let video = sequence
+        .video
+        .as_ref()
+        .map(|v| format!("{}×{}", v.width, v.height))
+        .unwrap_or_else(|| "no size".into());
+    let note = format!("sequence #{id} {} · {fps} · {video}", sequence.name);
+    persist_and_refresh(app, player);
+    app.set_message(&note);
+    Some(note)
+}
+
 pub(crate) fn edit_delete(app: &mut App, player: &dyn Mpv) {
     edit_yank(app, player); // dd yanks first (vim: dd fills the register)
     run_action(
