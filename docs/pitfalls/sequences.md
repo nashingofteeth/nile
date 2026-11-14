@@ -23,8 +23,10 @@ The media pool is shared; `fps`, `video`, `timeline` and `playhead` belong to a
 
 ## Save and validation span sequences
 
-- `Project::validate` walks every sequence and checks unique ids plus a valid
-  `active`. Loading rejects a project with no sequences.
+- `Project::validate` walks every sequence and checks unique ids, a valid
+  `active`, and a positive `fps`. `parse_fps_arg` and `Document::add_sequence`
+  reject `--fps 0` before it can reach `grid_time` (which divides by the rate).
+  Loading rejects a project with no sequences.
 - `History::apply` clamps the edited sequence. `Document::save` uses
   `clamp_project_all`, so a sequence that is not active is still clamped
   before the file is written.
@@ -39,6 +41,8 @@ The media pool is shared; `fps`, `video`, `timeline` and `playhead` belong to a
   and rebuilds the monitor.
 - CLI: `nile sequence ls|add|use`; `--sequence N` on `show`, `edl` and
   `export` reads/renders that timeline without changing the stored active one.
+  `show --json` always prints the whole project, so it refuses `--sequence`
+  rather than rewriting `active` in the machine-readable output.
 - The status row names the active sequence only when there is more than one,
   so single-sequence output is unchanged.
 

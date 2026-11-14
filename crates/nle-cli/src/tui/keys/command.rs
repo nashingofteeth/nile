@@ -666,8 +666,13 @@ pub(crate) fn sequence_command(
             if let Err(e) = f.finish(USAGE) {
                 return Some(e.to_string());
             }
-            let id = app.project.add_sequence(name.clone(), fps, video);
-            persist_and_refresh(app, player);
+            let id = match app.project.add_sequence(name.clone(), fps, video) {
+                Ok(id) => id,
+                Err(e) => return Some(e.to_string()),
+            };
+            if !persist_and_refresh(app, player) {
+                return None;
+            }
             Some(format!(
                 "sequence #{id} {name} added (not active — `:sequence use {id}`)"
             ))
