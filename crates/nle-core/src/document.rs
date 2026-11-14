@@ -58,7 +58,7 @@ impl Document {
     /// print; the project is already corrected either way.
     pub fn rebuild(project: Project) -> (Self, Vec<String>) {
         let mut doc = Self::new(project);
-        let notes = edit::clamp_project(&mut doc.project);
+        let notes = edit::clamp_project_all(&mut doc.project);
         doc.project.bump_revision();
         (doc, notes)
     }
@@ -110,6 +110,20 @@ impl Document {
         self.project.select_sequence(id)?;
         self.histories.ensure(id);
         Ok(())
+    }
+
+    /// Add an empty sequence (not active) and bump the model revision. A new
+    /// sequence is a whole-project change, but it is not undoable.
+    pub fn add_sequence(
+        &mut self,
+        name: impl Into<String>,
+        fps: Option<Seconds>,
+        video: Option<VideoSettings>,
+    ) -> u32 {
+        let id = self.project.add_sequence(name, fps, video);
+        self.histories.ensure(id);
+        self.project.bump_revision();
+        id
     }
 
     pub fn into_parts(self) -> (Project, Histories) {
@@ -226,7 +240,7 @@ impl Document {
     /// repaired the model is a model write, so it bumps the revision; a clean
     /// save — the normal case, and every playhead-only one — leaves it alone.
     pub fn save(&mut self, path: &Path) -> Result<(), ProjectError> {
-        if !edit::clamp_project(&mut self.project).is_empty() {
+        if !edit::clamp_project_all(&mut self.project).is_empty() {
             self.project.bump_revision();
         }
         self.project.save(path)
@@ -309,6 +323,40 @@ mod tests {
             "saved {} s of a 4 s asset",
             crate::time::format_seconds(&seg.duration())
         );
+    }
+
+    #[test]
+    fn save_clamps_sequences_that_are_not_active() {
+        let mut doc = document();
+        let second = second_sequence(&mut doc);
+        doc.select_sequence(1).unwrap();
+        if let Segment::Clip(c) = &mut doc
+            .project
+            .sequence_mut(second)
+            .unwrap()
+            .timeline
+            .video_track_mut()
+            .unwrap()
+            .segments[0]
+        {
+            c.asset_out = Seconds::from_integer(9);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.json");
+        doc.save(&path).unwrap();
+        let loaded = Project::load(&path).unwrap();
+        let seg = &loaded
+            .sequence(second)
+            .unwrap()
+            .timeline
+            .video_track()
+            .unwrap()
+            .segments[0];
+        assert!(
+            seg.duration() <= Seconds::from_integer(4),
+            "clamped to media"
+        );
+        assert_eq!(loaded.active_id(), 1, "saving kept the active sequence");
     }
 
     #[test]

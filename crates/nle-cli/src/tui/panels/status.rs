@@ -106,6 +106,14 @@ pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {
             style.add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!(" {name} · "), style),
+    ];
+    if app.project.sequences.len() > 1 {
+        spans.push(Span::styled(
+            format!("[{}] ", app.project.active_sequence().name),
+            style.add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.extend([
         Span::styled(
             fmt_timecode(app.playhead, app.project.fps.as_ref()),
             style.add_modifier(Modifier::BOLD),
@@ -115,7 +123,7 @@ pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {
             total_style,
         ),
         Span::styled(format!("{icon} · {mode}{count}"), style),
-    ];
+    ]);
     if let Some(p) = app.preview_progress
         && app
             .preview

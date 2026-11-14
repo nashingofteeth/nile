@@ -373,6 +373,9 @@ enum Cmd {
         /// Print the raw project JSON
         #[arg(long)]
         json: bool,
+        /// Report this sequence instead of the active one
+        #[arg(long, value_name = "ID")]
+        sequence: Option<u32>,
     },
     /// Show or move the stored playhead (shared with the TUI)
     Seek {
@@ -389,6 +392,11 @@ enum Cmd {
     Track {
         #[command(subcommand)]
         action: TrackCmd,
+    },
+    /// Sequences: list, add, switch the active one
+    Sequence {
+        #[command(subcommand)]
+        action: SequenceCmd,
     },
     /// On-disk caches: prune old proxy renders (explicit, never automatic)
     Cache {
@@ -513,6 +521,9 @@ enum Cmd {
         /// Force N chunked-export workers; omit to stay single-worker
         #[arg(long)]
         parallel: Option<usize>,
+        /// Export this sequence instead of the active one
+        #[arg(long, value_name = "ID")]
+        sequence: Option<u32>,
     },
     /// Interactive editor: TUI dashboard + mpv monitor, vim keys
     #[cfg(feature = "tui")]
@@ -535,6 +546,9 @@ enum Cmd {
         /// (1-based)
         #[arg(long)]
         track: Option<usize>,
+        /// Print this sequence instead of the active one
+        #[arg(long, value_name = "ID")]
+        sequence: Option<u32>,
     },
 
     /// Serve the project over JSON-RPC 2.0 on stdio (one object per line)
@@ -639,6 +653,32 @@ enum TrackKindArg {
     Audio,
 }
 
+/// Sequence subcommands.
+#[derive(Debug, Subcommand)]
+enum SequenceCmd {
+    /// List sequences (id, name, settings, active marker)
+    Ls,
+    /// Add an empty sequence (not active)
+    Add {
+        /// Display name
+        name: String,
+        /// Output width in pixels (must accompany --height)
+        #[arg(long)]
+        width: Option<u32>,
+        /// Output height in pixels (must accompany --width)
+        #[arg(long)]
+        height: Option<u32>,
+        /// Output frame rate (e.g. 30000/1001, 29.97, 24)
+        #[arg(long, value_name = "RATE")]
+        fps: Option<String>,
+    },
+    /// Make a sequence active (edits and undo follow it)
+    Use {
+        /// Sequence id (from `nile sequence ls`)
+        id: u32,
+    },
+}
+
 /// CLI spelling of the encoder choices (clap needs ValueEnum to build
 /// an argument parser from it).
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -673,8 +713,8 @@ use cmd::media::{cmd_probe, cmd_trim};
 #[cfg(feature = "tui")]
 use cmd::project::cmd_edit;
 use cmd::project::{
-    cmd_add, cmd_cache, cmd_default, cmd_edl, cmd_init, cmd_media_ls, cmd_seek, cmd_show,
-    cmd_track_ls,
+    cmd_add, cmd_cache, cmd_default, cmd_edl, cmd_init, cmd_media_ls, cmd_seek, cmd_sequence,
+    cmd_show, cmd_track_ls,
 };
 use cmd::{run_cli_action, to_action};
 
@@ -713,7 +753,7 @@ fn main() -> Result<()> {
             dump_size,
             dump_keys,
         } => return cmd_edit(&project, *dump, dump_size, dump_keys),
-        Cmd::Edl { track } => return cmd_edl(&project, *track),
+        Cmd::Edl { track, sequence } => return cmd_edl(&project, *track, *sequence),
         Cmd::Serve { stdio } => return serve::cmd_serve(&project, *stdio),
         Cmd::Init { force } => return cmd_init(&project, *force),
         Cmd::Import { files } => return cmd_import(&project, files),
@@ -733,11 +773,12 @@ fn main() -> Result<()> {
                 out_point.as_deref(),
             );
         }
-        Cmd::Show { json } => return cmd_show(&project, *json),
+        Cmd::Show { json, sequence } => return cmd_show(&project, *json, *sequence),
         Cmd::Seek { at } => return cmd_seek(&project, at.as_deref()),
         Cmd::Track {
             action: TrackCmd::Ls,
         } => return cmd_track_ls(&project),
+        Cmd::Sequence { action } => return cmd_sequence(&project, action),
         Cmd::Cache { action } => return cmd_cache(&project, action),
         Cmd::Media {
             action: MediaCmd::Ls,
@@ -817,6 +858,7 @@ fn main() -> Result<()> {
             encoder_preset,
             bitrate,
             parallel,
+            sequence,
         } => {
             let options = ExportOptions {
                 preset: *preset,
@@ -827,7 +869,7 @@ fn main() -> Result<()> {
                 parallel: *parallel,
                 use_cache: true,
             };
-            return cmd_export(&project, output, &options);
+            return cmd_export(&project, output, *sequence, &options);
         }
         Cmd::Probe { file, json } => return cmd_probe(file, *json),
         Cmd::Trim {
@@ -864,7 +906,7 @@ fn main() -> Result<()> {
 // ------------------------------------------------------------ project cmds
 
 /// `--fps` accepts `n/d`, a decimal NTSC rate, or a whole number.
-fn parse_fps_arg(s: &str) -> Result<Seconds> {
+pub(crate) fn parse_fps_arg(s: &str) -> Result<Seconds> {
     if let Some(r) = parse_rate(s) {
         return Ok(r);
     }
@@ -1298,7 +1340,7 @@ mod tests {
         let path = dir.join("p.json");
         Project::new().save(&path).unwrap();
 
-        let err = cmd_edl(&path, Some(0)).unwrap_err().to_string();
+        let err = cmd_edl(&path, Some(0), None).unwrap_err().to_string();
         assert!(err.contains("1-based"), "{err}");
         let err = cmd_add(&path, Path::new("nope.mp4"), 0, None, None, None)
             .unwrap_err()
@@ -1307,11 +1349,11 @@ mod tests {
         // …and the valid paths still work (the composite has nothing to play
         // on an empty timeline either).
         assert!(
-            cmd_edl(&path, Some(1)).is_err(),
+            cmd_edl(&path, Some(1), None).is_err(),
             "an empty timeline has no EDL"
         );
         assert!(
-            cmd_edl(&path, None).is_err(),
+            cmd_edl(&path, None, None).is_err(),
             "an empty timeline has no EDL"
         );
     }

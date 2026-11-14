@@ -241,6 +241,10 @@ impl Project {
         self.sequences.iter().find(|sequence| sequence.id == id)
     }
 
+    pub fn sequence_mut(&mut self, id: u32) -> Option<&mut Sequence> {
+        self.sequences.iter_mut().find(|sequence| sequence.id == id)
+    }
+
     /// Make `id` the active sequence. Callers that own a per-sequence undo
     /// history must switch that too.
     pub fn select_sequence(&mut self, id: u32) -> Result<(), ProjectError> {

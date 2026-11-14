@@ -29,6 +29,64 @@ fn track_command_adds_mutes_and_removes() {
 }
 
 #[test]
+fn sequence_command_switches_undo_and_adds() {
+    let path = temp_project_path("sequence-command");
+    let mut p = asset_project();
+    let second = p.add_sequence(
+        "Vertical",
+        Some(Seconds::new(30, 1)),
+        Some(nle_core::VideoSettings {
+            width: 1080,
+            height: 1920,
+        }),
+    );
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+
+    assert!(cmd(&mut app, "split --at 1").contains("split"));
+    assert_eq!(app.project.depth(), 1, "the edit landed on sequence 1");
+
+    let switched = cmd(&mut app, &format!("sequence {second}"));
+    assert!(switched.contains("Vertical"), "{switched}");
+    assert_eq!(app.project.active_id(), second, "the active sequence moved");
+    assert_eq!(app.project.depth(), 0, "and so did undo");
+    assert_eq!(app.active_track, 0, "tracks are per sequence");
+
+    let refused = cmd(&mut app, "undo");
+    assert!(refused.contains("nothing to undo"), "{refused}");
+    assert_eq!(
+        app.project.depth(),
+        0,
+        "sequence 1's undo did not replay here"
+    );
+
+    assert!(cmd(&mut app, "sequence use 1").contains("Sequence 1"));
+    assert_eq!(app.project.depth(), 1, "sequence 1 kept its edit");
+    assert!(cmd(&mut app, "undo").contains("split"));
+    assert_eq!(app.project.depth(), 0);
+
+    let added = cmd(
+        &mut app,
+        "sequence add Square --width 720 --height 720 --fps 24",
+    );
+    assert!(added.contains("added"), "{added}");
+    assert_eq!(app.project.sequences.len(), 3);
+    let square = app.project.sequences.last().unwrap();
+    assert_eq!(square.name, "Square");
+    assert_eq!(
+        square.video,
+        Some(nle_core::VideoSettings {
+            width: 720,
+            height: 720
+        })
+    );
+    assert_eq!(square.fps, Some(Seconds::from_integer(24)));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
 fn import_command_reports_usage_and_parses_quoted_paths() {
     let mut app = App::new(asset_project(), temp_project_path("import-cmd"));
     assert!(import_command(&mut app, "import").contains("usage"));
