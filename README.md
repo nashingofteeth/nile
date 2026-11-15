@@ -427,11 +427,13 @@ nile serve --stdio
 
 `nile serve` exposes the loaded project over JSON-RPC 2.0 on stdin/stdout, one
 object per line. Call `hello` first, then `project.show`, `timeline.edl`,
-`action.preview`, `action.apply`, `undo`, or `redo`:
+`sequence.list|use|add`, `action.preview`, `action.apply`, `undo`, or `redo`.
+Actions apply to the active sequence; call `sequence.use` to switch it:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"hello"}
-{"jsonrpc":"2.0","id":2,"method":"action.apply","params":{"base_revision":4,"action":{"action":"split","track":0,"at":1.0},"from":"1/2"}}
+{"jsonrpc":"2.0","id":2,"method":"sequence.use","params":{"id":2}}
+{"jsonrpc":"2.0","id":3,"method":"action.apply","params":{"base_revision":4,"action":{"action":"split","track":0,"at":1.0},"from":"1/2"}}
 ```
 
 The wire is pre-1.0 and may change. It is a single-writer interface: close the
