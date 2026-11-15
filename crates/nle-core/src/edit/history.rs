@@ -327,6 +327,31 @@ impl History {
         Ok(outcome)
     }
 
+    /// Wrap the newest `count` changes in one `Change::Group`, so a batch of
+    /// actions undoes as a single step. The group's anchor is the caller's
+    /// batch `from`; its provenance is the session's current actor.
+    pub(crate) fn group_newest(
+        &mut self,
+        count: usize,
+        desc: String,
+        playhead: i64,
+    ) -> Result<(), EditError> {
+        if count < 2 || count > self.done.len() {
+            return Err(EditError::History(format!(
+                "cannot group {count} history entries"
+            )));
+        }
+        let changes = self.done.split_off(self.done.len() - count);
+        let provenance = self.provenance();
+        self.done.push(Change::Group(GroupChange {
+            changes,
+            desc,
+            playhead,
+            provenance,
+        }));
+        Ok(())
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.done.is_empty()
     }
@@ -570,6 +595,7 @@ pub enum Change {
     Track(TrackChange),
     Tracks(TracksChange),
     Assets(AssetChange),
+    Group(GroupChange),
 }
 
 impl Change {
@@ -578,6 +604,7 @@ impl Change {
             Change::Track(c) => &c.desc,
             Change::Tracks(c) => &c.desc,
             Change::Assets(c) => &c.desc,
+            Change::Group(c) => &c.desc,
         }
     }
 
@@ -586,6 +613,7 @@ impl Change {
             Change::Track(c) => c.playhead,
             Change::Tracks(c) => c.playhead,
             Change::Assets(c) => c.playhead,
+            Change::Group(c) => c.playhead,
         }
     }
 
@@ -594,6 +622,7 @@ impl Change {
             Change::Track(c) => &c.provenance,
             Change::Tracks(c) => &c.provenance,
             Change::Assets(c) => &c.provenance,
+            Change::Group(c) => &c.provenance,
         }
     }
 }
@@ -627,13 +656,24 @@ pub struct TracksChange {
     pub provenance: Provenance,
 }
 
-/// A media-pool edit: the whole pool before and after (probes included).
-/// Only removals are recorded today. Undo verifies the pool matches the
-/// recorded side, so an out-of-band change refuses loudly.
+/// Several changes applied by one call, so one undo step restores the whole
+/// batch. Undo runs the children in reverse, redo in order; each child still
+/// verifies its own recorded side.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssetChange {
     pub before: Vec<Asset>,
     pub after: Vec<Asset>,
+    pub desc: String,
+    pub playhead: i64,
+    pub provenance: Provenance,
+}
+
+/// A batch of changes recorded as one undo step. The children are replayed
+/// in the order they happened (redo) or reversed (undo).
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupChange {
+    pub changes: Vec<Change>,
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
@@ -745,6 +785,17 @@ fn substitute(project: &mut Project, change: &Change, forward: bool) -> Result<(
         Change::Track(c) => substitute_topology(project, c, forward)?,
         Change::Tracks(c) => substitute_tracks(project, c, forward)?,
         Change::Assets(c) => substitute_assets(project, c, forward)?,
+        Change::Group(c) => {
+            if forward {
+                for change in &c.changes {
+                    substitute(project, change, true)?;
+                }
+            } else {
+                for change in c.changes.iter().rev() {
+                    substitute(project, change, false)?;
+                }
+            }
+        }
     }
     project.validate().map_err(EditError::from)
 }

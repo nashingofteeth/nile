@@ -34,7 +34,7 @@ fn protocol_server_round_trip() {
     let mut serve = sandbox.serve();
 
     let hello = call(&mut serve, 1, "hello", None);
-    assert_eq!(hello["result"]["protocol"], 3);
+    assert_eq!(hello["result"]["protocol"], 4);
     assert_eq!(hello["result"]["project_version"], 11);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
@@ -63,7 +63,7 @@ fn protocol_server_round_trip() {
         "action.preview",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "split", "track": 0, "at": 1.0},
+            "actions": [{"action": "split", "track": 0, "at": 1.0}],
             "from": "1/2"
         })),
     );
@@ -88,7 +88,7 @@ fn protocol_server_round_trip() {
         "action.apply",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "split", "track": 0, "at": 1.0},
+            "actions": [{"action": "split", "track": 0, "at": 1.0}],
             "from": "1/2"
         })),
     );
@@ -129,7 +129,7 @@ fn protocol_server_round_trip() {
         "action.apply",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "split", "track": 0, "at": 2.0}
+            "actions": [{"action": "split", "track": 0, "at": 2.0}]
         })),
     );
     assert_eq!(stale["error"]["code"], -32001);
@@ -140,13 +140,13 @@ fn protocol_server_round_trip() {
         "action.apply",
         Some(json!({
             "base_revision": after + 1,
-            "action": {
+            "actions": [{
                 "action": "paste",
                 "track": 0,
                 "at": 1.0,
                 "ripple": false,
                 "segmnt": {}
-            }
+            }]
         })),
     );
     assert_eq!(bad["error"]["code"], -32602);
@@ -334,7 +334,7 @@ fn protocol_undo_is_scoped_to_the_active_sequence() {
         "action.apply",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "split", "track": 0, "at": 1.0}
+            "actions": [{"action": "split", "track": 0, "at": 1.0}]
         })),
     );
     let after_split = split["result"]["revision"].as_u64().expect("revision");
@@ -555,6 +555,136 @@ fn media_add_is_atomic_and_refuses_bad_input() {
 }
 
 #[test]
+fn batched_actions_are_one_undo_step() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    let preview = call(
+        &mut serve,
+        2,
+        "action.preview",
+        Some(json!({
+            "base_revision": revision,
+            "actions": [
+                {"action": "split", "track": 0, "at": 1.0},
+                {"action": "split", "track": 0, "at": 1.5}
+            ]
+        })),
+    );
+    assert_eq!(preview["result"]["revision"], revision);
+    assert_eq!(preview["result"]["changed"], true);
+    assert!(
+        preview["result"]["desc"]
+            .as_str()
+            .unwrap()
+            .starts_with("batch:")
+    );
+
+    let applied = call(
+        &mut serve,
+        3,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "actions": [
+                {"action": "split", "track": 0, "at": 1.0},
+                {"action": "split", "track": 0, "at": 1.5}
+            ]
+        })),
+    );
+    let after = applied["result"]["revision"].as_u64().expect("revision");
+    assert_eq!(after, revision + 2, "each action bumps the model revision");
+    assert_eq!(applied["result"]["changed"], true);
+    assert!(
+        applied["result"]["desc"]
+            .as_str()
+            .unwrap()
+            .starts_with("batch:")
+    );
+    assert_eq!(serve.read()["method"], "project.changed");
+
+    let show = call(&mut serve, 4, "project.show", None);
+    assert_eq!(
+        active(&show["result"])["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5,
+        "two cuts became four clips around the original three"
+    );
+
+    let undone = call(&mut serve, 5, "undo", Some(json!({"base_revision": after})));
+    assert_eq!(undone["result"]["revision"], after + 1);
+    assert_eq!(undone["result"]["changed"], true);
+    let _ = serve.read(); // project.changed
+    let _ = serve.read(); // playhead
+    let show = call(&mut serve, 6, "project.show", None);
+    assert_eq!(
+        active(&show["result"])["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "one undo reverses both actions"
+    );
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn a_failed_batch_leaves_no_trace() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    for (id, actions) in [
+        (
+            2,
+            json!([
+                {"action": "split", "track": 0, "at": 1.0},
+                {"action": "split", "track": 0, "at": 99.0}
+            ]),
+        ),
+        (3, json!([])),
+        (
+            4,
+            json!([
+                {"action": "undo"},
+                {"action": "split", "track": 0, "at": 1.0}
+            ]),
+        ),
+    ] {
+        let failed = call(
+            &mut serve,
+            id,
+            "action.apply",
+            Some(json!({"base_revision": revision, "actions": actions})),
+        );
+        assert_eq!(failed["error"]["code"], -32602, "{failed}");
+    }
+
+    let show = call(&mut serve, 5, "project.show", None);
+    assert_eq!(show["result"]["revision"], revision);
+    assert_eq!(
+        active(&show["result"])["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "the failed first action was rolled back"
+    );
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
 fn edl_track_is_zero_based() {
     let sandbox = Sandbox::new();
     sandbox.base();
@@ -584,7 +714,7 @@ fn action_apply_accepts_undo_as_an_alias() {
         "action.apply",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "split", "track": 0, "at": 1.0},
+            "actions": [{"action": "split", "track": 0, "at": 1.0}],
             "from": "1/2"
         })),
     );
@@ -598,7 +728,7 @@ fn action_apply_accepts_undo_as_an_alias() {
         "action.apply",
         Some(json!({
             "base_revision": after,
-            "action": {"action": "undo"},
+            "actions": [{"action": "undo"}],
             "from": "3/1"
         })),
     );
@@ -628,7 +758,7 @@ fn yank_and_paste_share_the_register_across_the_server() {
         "action.apply",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "yank", "track": 0, "target": {"clip": 1}}
+            "actions": [{"action": "yank", "track": 0, "target": {"clip": 1}}]
         })),
     );
     assert_eq!(
@@ -643,7 +773,7 @@ fn yank_and_paste_share_the_register_across_the_server() {
         "action.apply",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "paste", "track": 0, "at": 6.0, "ripple": false}
+            "actions": [{"action": "paste", "track": 0, "at": 6.0, "ripple": false}]
         })),
     );
     assert_eq!(pasted["result"]["revision"], revision + 1);
@@ -716,7 +846,7 @@ fn serve_reanchors_the_playhead_like_the_tui() {
         "action.apply",
         Some(json!({
             "base_revision": revision,
-            "action": {"action": "trim_out", "track": 0, "at": 1.0, "ripple": false},
+            "actions": [{"action": "trim_out", "track": 0, "at": 1.0, "ripple": false}],
             "from": "3/2"
         })),
     );
