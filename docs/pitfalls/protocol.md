@@ -23,11 +23,13 @@ the served methods.
 the normal path: timeline-mutating actions produce one undo entry,
 `Yank`/`YankRange` only change the register, and `Action::Undo`/`Redo` are the
 undo operations themselves. A multi-action batch is atomic and one undo
-entry: every action runs against a snapshot, a failure restores the project,
-histories and register, and undo/redo inside a batch is refused. The batch
+entry: a failure restores the pre-batch snapshot of the project, histories
+and register, and undo/redo inside a batch is refused. The batch
 plays back on undo in reverse and redo in order (`Change::Group`). Its final
 playhead is the last action's explicit position, else the cursor is clamped;
-the single-action media reanchor does not apply to a batch.
+the single-action media reanchor does not apply to a batch. A batch's `desc`
+is `batch: <child> · <child>…`, so clients can identify it without parsing
+each child.
 
 `base_revision` is compare-and-swap: a stale value returns `-32001` with
 `{expected, actual}`. Protocol v4 changed `action` to the `actions` list.
