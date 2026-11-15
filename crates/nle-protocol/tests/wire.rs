@@ -50,21 +50,21 @@ impl Handler for Fake {
             Call::TimelineEdl { track } => Ok(Reply::Edl(format!("TITLE: fake {track:?}"))),
             Call::ActionPreview {
                 base_revision,
-                action,
+                actions,
                 from,
             } => {
                 self.check(*base_revision)?;
                 self.last_from = *from;
                 Ok(Reply::Outcome(Outcome {
                     revision: self.revision,
-                    desc: format!("preview {}", action.slot()),
+                    desc: format!("preview {}", actions.first().map_or(0, Action::slot)),
                     changed: true,
                     playhead: None,
                 }))
             }
             Call::ActionApply {
                 base_revision,
-                action,
+                actions,
                 from,
             } => {
                 self.check(*base_revision)?;
@@ -80,7 +80,7 @@ impl Handler for Fake {
                 self.events.push(Event::Playhead { at: playhead });
                 Ok(Reply::Outcome(Outcome {
                     revision: self.revision,
-                    desc: format!("applied {}", action.slot()),
+                    desc: format!("applied {}", actions.first().map_or(0, Action::slot)),
                     changed: true,
                     playhead: Some(playhead),
                 }))
@@ -218,12 +218,12 @@ fn all_calls() -> Vec<Call> {
         Call::TimelineEdl { track: None },
         Call::ActionPreview {
             base_revision: 0,
-            action: action.clone(),
+            actions: vec![action.clone()],
             from: None,
         },
         Call::ActionApply {
             base_revision: 0,
-            action,
+            actions: vec![action],
             from: None,
         },
         Call::Undo { base_revision: 0 },
@@ -282,7 +282,7 @@ fn apply_moves_the_revision_and_preview_does_not() {
         &mut fake,
         Call::ActionPreview {
             base_revision: 7,
-            action: Action::Split { track: 0, at: 1.5 },
+            actions: vec![Action::Split { track: 0, at: 1.5 }],
             from: None,
         },
     );
@@ -300,7 +300,7 @@ fn apply_moves_the_revision_and_preview_does_not() {
         &mut fake,
         Call::ActionApply {
             base_revision: 7,
-            action: Action::Split { track: 0, at: 1.5 },
+            actions: vec![Action::Split { track: 0, at: 1.5 }],
             from: None,
         },
     );
@@ -322,7 +322,7 @@ fn the_anchor_is_an_input_and_the_playhead_is_the_result() {
         &mut fake,
         Call::ActionApply {
             base_revision: 7,
-            action: Action::Split { track: 0, at: 1.5 },
+            actions: vec![Action::Split { track: 0, at: 1.5 }],
             from: Some(Seconds::new(3, 2)),
         },
     );
@@ -349,7 +349,7 @@ fn a_stale_base_revision_is_a_typed_conflict() {
         &mut Fake::new(7),
         Call::ActionApply {
             base_revision: 3,
-            action: Action::Split { track: 0, at: 1.5 },
+            actions: vec![Action::Split { track: 0, at: 1.5 }],
             from: None,
         },
     );
@@ -396,7 +396,7 @@ fn undo_and_redo_share_the_outcome_shape() {
 fn golden_action_apply_request() {
     let call = Call::ActionApply {
         base_revision: 7,
-        action: Action::Split { track: 0, at: 1.5 },
+        actions: vec![Action::Split { track: 0, at: 1.5 }],
         from: None,
     };
     let request = Request::new(
@@ -406,7 +406,7 @@ fn golden_action_apply_request() {
     );
     assert_eq!(
         serde_json::to_string(&request).expect("serialize"),
-        r#"{"jsonrpc":"2.0","id":1,"method":"action.apply","params":{"action":{"action":"split","at":1.5,"track":0},"base_revision":7}}"#
+        r#"{"jsonrpc":"2.0","id":1,"method":"action.apply","params":{"actions":[{"action":"split","at":1.5,"track":0}],"base_revision":7}}"#
     );
 }
 
@@ -414,7 +414,7 @@ fn golden_action_apply_request() {
 fn the_anchor_is_rational_on_the_wire() {
     let call = Call::ActionApply {
         base_revision: 7,
-        action: Action::Split { track: 0, at: 1.5 },
+        actions: vec![Action::Split { track: 0, at: 1.5 }],
         from: Some(Seconds::new(3, 2)),
     };
     let params = call.params().expect("params");
@@ -538,7 +538,7 @@ fn every_action_slot_walks_the_protocol() {
         assert_eq!(action.slot(), slot, "samples follow Action::slot");
         let call = Call::ActionApply {
             base_revision: 0,
-            action,
+            actions: vec![action],
             from: None,
         };
         let params = call.params().expect("encode");
@@ -625,7 +625,7 @@ fn the_server_writes_the_response_before_its_events() {
         &mut Fake::new(7),
         Call::ActionApply {
             base_revision: 7,
-            action: Action::Split { track: 0, at: 1.5 },
+            actions: vec![Action::Split { track: 0, at: 1.5 }],
             from: None,
         },
     );
@@ -647,7 +647,7 @@ fn the_server_writes_the_response_before_its_events() {
     client
         .call(Call::ActionApply {
             base_revision: 7,
-            action: Action::Split { track: 0, at: 1.5 },
+            actions: vec![Action::Split { track: 0, at: 1.5 }],
             from: None,
         })
         .expect("apply");
@@ -1010,7 +1010,7 @@ fn undo_and_redo_are_accepted_as_apply_actions() {
     for action in [Action::Undo, Action::Redo] {
         let call = Call::ActionApply {
             base_revision: 1,
-            action,
+            actions: vec![action],
             from: None,
         };
         let params = call.params().expect("params");
@@ -1072,15 +1072,15 @@ fn the_client_writes_one_request_per_call_and_numbers_them() {
 fn catalog_actions_survive_the_call_encoding() {
     let call = Call::ActionApply {
         base_revision: 3,
-        action: Action::SetSpeed {
+        actions: vec![Action::SetSpeed {
             track: 0,
             clip: 2,
             rate: Seconds::new(30000, 1001),
-        },
+        }],
         from: Some(Seconds::new(1, 2)),
     };
     let params = call.params().expect("params");
-    assert_eq!(params["action"]["rate"], "30000/1001");
+    assert_eq!(params["actions"][0]["rate"], "30000/1001");
     assert_eq!(params["from"], "1/2");
     assert_eq!(Call::decode(call.method(), params).expect("decode"), call);
 }
@@ -1099,12 +1099,12 @@ fn timeline_edl_is_a_plain_string_reply() {
 fn a_transition_action_crosses_the_wire() {
     let call = Call::ActionApply {
         base_revision: 0,
-        action: Action::Transition {
+        actions: vec![Action::Transition {
             track: 0,
             at: 4.0,
             kind: TransitionKind::Dissolve,
             len: TransitionLen::Frames(12),
-        },
+        }],
         from: None,
     };
     let params = call.params().expect("params");

@@ -19,10 +19,18 @@ the served methods.
 
 ## Actions
 
-`action.preview`/`apply` take one catalog `Action`. Timeline-mutating actions
-produce one undo entry; `Yank`/`YankRange` only change the register, and
-`Action::Undo`/`Redo` are the undo operations themselves. `base_revision` is
-compare-and-swap: a stale value returns `-32001` with `{expected, actual}`.
+`action.preview`/`apply` take an `actions` list. A single-element list keeps
+the normal path: timeline-mutating actions produce one undo entry,
+`Yank`/`YankRange` only change the register, and `Action::Undo`/`Redo` are the
+undo operations themselves. A multi-action batch is atomic and one undo
+entry: every action runs against a snapshot, a failure restores the project,
+histories and register, and undo/redo inside a batch is refused. The batch
+plays back on undo in reverse and redo in order (`Change::Group`). Its final
+playhead is the last action's explicit position, else the cursor is clamped;
+the single-action media reanchor does not apply to a batch.
+
+`base_revision` is compare-and-swap: a stale value returns `-32001` with
+`{expected, actual}`. Protocol v4 changed `action` to the `actions` list.
 
 `from` is the optional rational undo anchor; absent means the shared
 `Project.playhead`. It is an **input**: the returned `Outcome.playhead` is the

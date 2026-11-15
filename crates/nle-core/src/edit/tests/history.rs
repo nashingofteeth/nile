@@ -130,6 +130,49 @@ fn a_v16_sidecar_is_rejected_not_misread() {
 }
 
 #[test]
+fn a_group_undoes_and_redoes_as_one_step() {
+    let mut p = fixture();
+    let before = p.clone();
+    let mut h = History::default();
+    let batch = split(&p, 4.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let batch = trim_in(&p, 1.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let after = p.clone();
+
+    h.group_newest(2, "batch: split + trim".into(), 0).unwrap();
+    assert_eq!(h.depth(), 1, "the two entries became one");
+
+    let undone = h.undo(&mut p).unwrap();
+    assert_eq!(undone.desc, "batch: split + trim");
+    assert_eq!(without_revision(&p), without_revision(&before));
+    assert!(h.can_redo());
+
+    h.redo(&mut p).unwrap();
+    assert_eq!(without_revision(&p), without_revision(&after));
+}
+
+#[test]
+fn a_group_round_trips_through_the_sidecar() {
+    let mut p = fixture();
+    let before = p.clone();
+    let mut h = History::default();
+    let batch = split(&p, 4.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let batch = trim_in(&p, 1.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    h.group_newest(2, "batch".into(), 0).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nle.history.json");
+    save(&h, &path);
+    let mut loaded = load(&path);
+    assert_eq!(loaded.depth(), 1);
+    loaded.undo(&mut p).unwrap();
+    assert_eq!(without_revision(&p), without_revision(&before));
+}
+
+#[test]
 fn history_stores_and_returns_the_playhead_frame() {
     let mut p = fixture();
     let mut h = History::default();
