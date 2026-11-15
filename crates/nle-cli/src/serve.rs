@@ -173,12 +173,18 @@ impl ServeHandler {
     /// opens on the same sequence. The adopted playhead is reported.
     fn sequence_use(&mut self, id: u32) -> Result<Reply, RpcError> {
         self.ensure_writable()?;
+        let before_id = self.session.project().active_id();
         let before = self.session.project().playhead;
         if let Err(e) = self.session.select_sequence(id) {
             return Err(RpcError::invalid_params(e.to_string()));
         }
         let after = self.session.project().playhead;
-        self.save_project_or_poison()?;
+        if let Err(error) = self.save_project_or_poison() {
+            // The call failed, so reads must keep reporting the sequence the
+            // client was already editing. The server remains poisoned.
+            let _ = self.session.select_sequence(before_id);
+            return Err(error);
+        }
         let revision = self.session.revision();
         let active = self.session.project().active_id();
         let sequence = SequenceSummary::of(self.session.project().active_sequence());
