@@ -492,9 +492,9 @@ shared by the TUI and agents — with no clipgen code present.
   sequences and media: `action.preview`, `action.apply` (batched),
   `undo/redo`, `sequence.*`, `media.*`, `job.*`.
 - Landed so far: `sequence.*`, `media.*`, typed client helpers, the
-  golden/action-slot contract tests, and batched `action.apply`
-  (`Change::Group`, history v18). Remaining: preview diff/warnings, the
-  socket/single-writer lock, and TUI attach.
+  golden/action-slot contract tests, batched `action.apply`
+  (`Change::Group`, history v18), and the preview diff/warnings reply.
+  Remaining: the socket/single-writer lock and TUI attach.
 - `action.preview` applies a batch to a cloned `Document` and returns the
   diff + warnings; `action.apply` is atomic and returns the new revision.
   A mismatched `base_revision` is a typed conflict with the diff.
