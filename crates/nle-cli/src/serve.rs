@@ -1,10 +1,12 @@
 //! `nile serve --stdio`: the protocol handler over a loaded project.
 //!
 //! The server state is a [`Session`] — project, history, register, and path —
-//! plus the queued events and the save-failure poison. Every mutation goes
-//! through [`ServeHandler::apply`], so compare-and-swap, the edit, playhead
-//! conversion, persistence, and event emission cannot drift between
-//! `action.apply` and the dedicated `undo`/`redo` aliases.
+//! plus the queued events and the save-failure poison. Every action mutation
+//! goes through [`ServeHandler::apply`], so compare-and-swap, the edit,
+//! playhead conversion, persistence, and event emission cannot drift between
+//! `action.apply` and the dedicated `undo`/`redo` aliases. Sequence writes are
+//! separate model paths, but they use the same writeability, revision and
+//! save/poison helpers; a failed save still poisons every later write.
 //!
 //! stdout is the protocol channel. Nothing here may `say!` or print; errors
 //! leave through the JSON-RPC response, and `main` sends command failures to

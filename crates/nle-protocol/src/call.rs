@@ -16,8 +16,9 @@ use serde_json::Value;
 use crate::rpc::RpcError;
 
 /// The wire schema version, independent of the `nile.json` project version
-/// and the crate version. Bump it for any breaking method, field, or unit
-/// change; `hello` lets a client fail clearly instead of guessing.
+/// and the crate version. Bump it for a breaking method, field, or unit change
+/// or a new capability surface clients may gate on; `hello` reports it, and
+/// `hello.methods` remains the fine-grained list.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 wire_catalog! {
