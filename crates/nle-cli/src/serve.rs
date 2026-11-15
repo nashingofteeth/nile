@@ -20,13 +20,12 @@ use anyhow::{Context, Result};
 
 use nle_core::edit::Actor;
 use nle_core::{
-    Action, Asset, EditError, Outcome as ActionOutcome, Project, Seconds, TrackKind, frame_of,
-    frames_to_seconds, secs_f64,
+    Action, Asset, EditError, Project, Seconds, TrackKind, frame_of, frames_to_seconds, secs_f64,
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
-    Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage, Outcome as WireOutcome, Reply,
-    RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
+    Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage, Outcome as WireOutcome,
+    Preview, Reply, RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
 };
 
 use crate::session::{Session, playhead};
@@ -160,15 +159,6 @@ impl ServeHandler {
         match self.session.project().fps.as_ref() {
             Some(fps) => frames_to_seconds(frame, *fps),
             None => Seconds::from_integer(frame),
-        }
-    }
-
-    fn wire_outcome(&self, outcome: ActionOutcome, revision: u64) -> WireOutcome {
-        WireOutcome {
-            revision,
-            desc: outcome.desc,
-            changed: outcome.changed,
-            playhead: outcome.playhead.map(|frame| self.frame_seconds(frame)),
         }
     }
 
@@ -335,14 +325,22 @@ impl ServeHandler {
     ) -> Result<Reply, RpcError> {
         self.check_revision(base_revision)?;
         let from = self.anchor_seconds(from);
-        let outcome = match actions {
+        let preview = match actions {
             [action] => self.session.preview(action, from),
             _ => self.session.preview_actions(actions, from),
         }
         .map_err(edit_rpc)?;
-        Ok(Reply::Outcome(
-            self.wire_outcome(outcome, self.session.revision()),
-        ))
+        Ok(Reply::Preview(Preview {
+            revision: self.session.revision(),
+            desc: preview.outcome.desc,
+            changed: preview.outcome.changed,
+            playhead: preview
+                .outcome
+                .playhead
+                .map(|frame| self.frame_seconds(frame)),
+            diff: preview.diff,
+            warnings: preview.warnings,
+        }))
     }
 
     /// The only action mutation path: CAS, edit, playhead, save, events.
@@ -366,7 +364,8 @@ impl ServeHandler {
         let outcome = self
             .session
             .apply_actions(actions, self.anchor_seconds(from))
-            .map_err(edit_rpc)?;
+            .map_err(edit_rpc)?
+            .outcome;
 
         // A single action keeps the media-frame reanchor policy. A batch has
         // no one edge to follow, so it lands on its last explicit playhead or

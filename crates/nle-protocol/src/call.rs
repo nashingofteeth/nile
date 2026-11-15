@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use nle_core::{Action, Project, Seconds, Sequence, VideoSettings};
+use nle_core::{Action, Project, ProjectDiff, Seconds, Sequence, VideoSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -21,7 +21,7 @@ use crate::rpc::RpcError;
 /// and the crate version. Bump it for a breaking method, field, or unit
 /// change. Additive methods and events stay on the current version;
 /// `hello.methods` is the fine-grained capability list.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 wire_catalog! {
     /// A typed request. `base_revision` is the compare-and-swap token: the
@@ -177,6 +177,7 @@ pub enum Reply {
     Sequences(SequenceList),
     Sequence(SequenceReply),
     Media(MediaList),
+    Preview(Preview),
 }
 
 impl Reply {
@@ -189,6 +190,7 @@ impl Reply {
             Reply::Sequences(_) => "sequences",
             Reply::Sequence(_) => "sequence",
             Reply::Media(_) => "media",
+            Reply::Preview(_) => "preview",
         }
     }
 
@@ -213,12 +215,11 @@ impl Reply {
                     RpcError::internal(format!("media reply is not serializable: {e}"))
                 })
             }
+            (Reply::Preview(preview), Call::ActionPreview { .. }) => serde_json::to_value(preview)
+                .map_err(|e| RpcError::internal(format!("preview is not serializable: {e}"))),
             (
                 Reply::Outcome(outcome),
-                Call::ActionPreview { .. }
-                | Call::ActionApply { .. }
-                | Call::Undo { .. }
-                | Call::Redo { .. },
+                Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. },
             ) => serde_json::to_value(outcome)
                 .map_err(|e| RpcError::internal(format!("outcome is not serializable: {e}"))),
             (reply, call) => Err(RpcError::internal(format!(
@@ -243,10 +244,10 @@ impl Reply {
             Call::MediaList | Call::MediaAdd { .. } => {
                 serde_json::from_value(result).map(Reply::Media)
             }
-            Call::ActionPreview { .. }
-            | Call::ActionApply { .. }
-            | Call::Undo { .. }
-            | Call::Redo { .. } => serde_json::from_value(result).map(Reply::Outcome),
+            Call::ActionPreview { .. } => serde_json::from_value(result).map(Reply::Preview),
+            Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {
+                serde_json::from_value(result).map(Reply::Outcome)
+            }
         }
     }
 }
@@ -378,4 +379,22 @@ pub struct MediaAsset {
 pub struct MediaList {
     pub revision: u64,
     pub assets: Vec<MediaAsset>,
+}
+
+/// `action.preview` result: the would-be outcome, a structural diff and the
+/// clamp warnings a real apply would have to repair.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Preview {
+    pub revision: u64,
+    pub desc: String,
+    pub changed: bool,
+    #[serde(
+        default,
+        with = "nle_core::time::rational_ser::opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub playhead: Option<Seconds>,
+    pub diff: ProjectDiff,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }

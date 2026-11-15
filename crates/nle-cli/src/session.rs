@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 
 use nle_core::edit::{Actor, EditError, Histories, History};
 use nle_core::{
-    Action, Document, Outcome as ActionOutcome, Project, ProjectError, Register, load_register,
-    save_register,
+    Action, BatchOutcome, Document, Outcome as ActionOutcome, PreviewOutcome, Project,
+    ProjectError, Register, load_register, save_register,
 };
 
 /// A session file failure. The project loader's own errors pass through
@@ -104,7 +104,7 @@ impl Session {
         &mut self,
         actions: &[Action],
         from: f64,
-    ) -> Result<ActionOutcome, EditError> {
+    ) -> Result<BatchOutcome, EditError> {
         self.document
             .edit_actions(actions, from, &mut self.register)
     }
@@ -112,7 +112,7 @@ impl Session {
     /// Run one action against a copy. The clone includes the history, so an
     /// undo/redo preview is real, and the cloned register keeps a preview yank
     /// away from the live clipboard.
-    pub fn preview(&self, action: &Action, from: f64) -> Result<ActionOutcome, EditError> {
+    pub fn preview(&self, action: &Action, from: f64) -> Result<PreviewOutcome, EditError> {
         self.preview_actions(std::slice::from_ref(action), from)
     }
 
@@ -122,13 +122,17 @@ impl Session {
         &self,
         actions: &[Action],
         from: f64,
-    ) -> Result<ActionOutcome, EditError> {
-        let mut document = Document::with_histories(
-            self.document.project().clone(),
-            self.document.histories().clone(),
-        );
+    ) -> Result<PreviewOutcome, EditError> {
+        let before = self.document.project().clone();
+        let mut document =
+            Document::with_histories(before.clone(), self.document.histories().clone());
         let mut register = self.register.clone();
-        document.edit_actions(actions, from, &mut register)
+        let batch = document.edit_actions(actions, from, &mut register)?;
+        Ok(PreviewOutcome {
+            outcome: batch.outcome,
+            diff: before.diff(document.project()),
+            warnings: batch.warnings,
+        })
     }
 
     /// Save project, history, and register. This is the CLI's one-shot path.
@@ -243,7 +247,7 @@ mod tests {
                 0.0,
             )
             .expect("preview");
-        assert!(outcome.changed, "the preview reports the change");
+        assert!(outcome.outcome.changed, "the preview reports the change");
         assert_eq!(session.project(), &before, "the live project is untouched");
         let reloaded = Session::load(&path).expect("reload");
         assert_eq!(

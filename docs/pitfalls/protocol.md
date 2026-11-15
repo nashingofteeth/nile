@@ -24,15 +24,23 @@ the normal path: timeline-mutating actions produce one undo entry,
 `Yank`/`YankRange` only change the register, and `Action::Undo`/`Redo` are the
 undo operations themselves. A multi-action batch is atomic and one undo
 entry: a failure restores the pre-batch snapshot of the project, histories
-and register, and undo/redo inside a batch is refused. The batch
+and register, and undo/redo inside a batch is refused. A preview returns
+`diff` and `warnings`; see below. The batch
 plays back on undo in reverse and redo in order (`Change::Group`). Its final
 playhead is the last action's explicit position, else the cursor is clamped;
 the single-action media reanchor does not apply to a batch. A batch's `desc`
 is `batch: <child> · <child>…`, so clients can identify it without parsing
 each child.
 
+`action.preview` returns the outcome fields plus `diff` and `warnings`.
+`diff` names changed sequences/tracks (segment counts, kind/mute flags),
+added/removed sequences, and added/removed/changed assets; `warnings` carries
+the clamp notes the real apply would produce (for example, an out-point
+pulled back to the media end). `action.apply` keeps the plain outcome.
+
 `base_revision` is compare-and-swap: a stale value returns `-32001` with
-`{expected, actual}`. Protocol v4 changed `action` to the `actions` list.
+`{expected, actual}`. Protocol v4 changed `action` to the `actions` list; v5
+gave `action.preview` its `diff`/`warnings` reply.
 
 `from` is the optional rational undo anchor; absent means the shared
 `Project.playhead`. It is an **input**: the returned `Outcome.playhead` is the

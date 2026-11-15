@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use nle_core::{Action, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
-use crate::call::{Call, Hello, MediaList, Outcome, Reply, SequenceList, SequenceReply};
+use crate::call::{Call, Hello, MediaList, Outcome, Preview, Reply, SequenceList, SequenceReply};
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
 use crate::rpc::{Id, Notification, Request, Response, RpcError};
@@ -227,12 +227,15 @@ impl<R: BufRead, W: Write> Client<R, W> {
         base_revision: u64,
         actions: Vec<Action>,
         from: Option<Seconds>,
-    ) -> Result<Outcome, ClientError> {
-        outcome(self.call(Call::ActionPreview {
+    ) -> Result<Preview, ClientError> {
+        match self.call(Call::ActionPreview {
             base_revision,
             actions,
             from,
-        }))
+        })? {
+            Reply::Preview(preview) => Ok(preview),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
     }
 
     pub fn apply(

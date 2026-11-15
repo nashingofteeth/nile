@@ -34,7 +34,7 @@ fn protocol_server_round_trip() {
     let mut serve = sandbox.serve();
 
     let hello = call(&mut serve, 1, "hello", None);
-    assert_eq!(hello["result"]["protocol"], 4);
+    assert_eq!(hello["result"]["protocol"], 5);
     assert_eq!(hello["result"]["project_version"], 11);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
@@ -631,6 +631,51 @@ fn batched_actions_are_one_undo_step() {
         3,
         "one undo reverses both actions"
     );
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn preview_reports_clamp_warnings() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let preview = call(
+        &mut serve,
+        2,
+        "action.preview",
+        Some(json!({
+            "base_revision": revision,
+            "actions": [{
+                "action": "paste",
+                "track": 0,
+                "at": 6.0,
+                "ripple": false,
+                "segment": {"Clip": {
+                    "id": 99,
+                    "asset": 1,
+                    "asset_in": "0/1",
+                    "asset_out": "99/1",
+                    "speed": "1/1",
+                    "effects": []
+                }}
+            }]
+        })),
+    );
+    assert_eq!(preview["result"]["changed"], true);
+    let warnings = preview["result"]["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|s| s.contains("out 99"))),
+        "{warnings:?}"
+    );
+    assert_eq!(preview["result"]["revision"], revision);
+    let show = call(&mut serve, 3, "project.show", None);
+    assert_eq!(show["result"]["revision"], revision, "preview did not save");
 
     assert!(serve.finish().success(), "serve exits cleanly");
 }
