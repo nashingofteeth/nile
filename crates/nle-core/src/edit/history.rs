@@ -72,6 +72,9 @@ pub struct History {
     /// Session-only: a batch keeps its changes contiguous even at the cap, so
     /// `depth()` counts what the batch produced. `end_batch` trims once.
     defer_cap: bool,
+    /// Clamp notes from the most recent action(s), drained by the preview
+    /// path. Session-only: the sidecar stores changes, not transient notes.
+    warnings: Vec<String>,
 }
 
 impl History {
@@ -93,16 +96,19 @@ impl History {
         let touched = batch_tracks(&batch);
         if touched.len() > 1 {
             let before = project.timeline.tracks.clone();
-            if let Err(e) = apply_batch(project, &batch.ops).map(|_| {
-                clamp_project(project);
-            }) {
+            let warnings = self.warnings.len();
+            if let Err(e) = apply_batch(project, &batch.ops) {
                 project.timeline.tracks = before;
+                self.warnings.truncate(warnings);
                 return Err(e);
             }
+            let notes = clamp_project(project);
             if let Err(e) = project.validate() {
                 project.timeline.tracks = before;
+                self.warnings.truncate(warnings);
                 return Err(e.into());
             }
+            self.warnings.extend(notes);
             self.push_change(Change::Tracks(TracksChange {
                 before,
                 after: project.timeline.tracks.clone(),
@@ -117,19 +123,22 @@ impl History {
         let track = batch_track(&batch, project)?;
         let before = snapshot_track(&project.timeline.tracks[track]);
         let saved = project.timeline.tracks[track].segments.clone();
+        let warnings = self.warnings.len();
         // Clamp before snapshotting: the recorded `after` must be the state
         // undo restores, so a batch can never leave a clip reading past EOF
         // or a sub-frame sliver behind.
-        if let Err(e) = apply_batch(project, &batch.ops).map(|_| {
-            clamp_project(project);
-        }) {
+        if let Err(e) = apply_batch(project, &batch.ops) {
             project.timeline.tracks[track].segments = saved;
+            self.warnings.truncate(warnings);
             return Err(e);
         }
+        let notes = clamp_project(project);
         if let Err(e) = project.validate() {
             project.timeline.tracks[track].segments = saved;
+            self.warnings.truncate(warnings);
             return Err(e.into());
         }
+        self.warnings.extend(notes);
         let after = snapshot_track(&project.timeline.tracks[track]);
         self.push_change(Change::Track(TrackChange {
             track,
@@ -274,6 +283,14 @@ impl History {
         self.actor = actor;
     }
 
+    pub(crate) fn clear_warnings(&mut self) {
+        self.warnings.clear();
+    }
+
+    pub(crate) fn drain_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
     pub fn actor(&self) -> &Actor {
         &self.actor
     }
@@ -414,6 +431,7 @@ impl History {
             undone,
             actor: Actor::Human,
             defer_cap: false,
+            warnings: Vec::new(),
         }
     }
 }
