@@ -9,6 +9,8 @@
 //! and a known method with a bad field is *invalid-params* — the two
 //! failures a client needs to tell apart.
 
+use std::path::PathBuf;
+
 use nle_core::{Action, Project, Seconds, Sequence, VideoSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -80,6 +82,13 @@ wire_catalog! {
             #[serde(default, skip_serializing_if = "Option::is_none")]
             video: Option<VideoSettings>,
         } = "sequence.add";
+        /// The media pool, summarized for a client.
+        MediaList = "media.list";
+        /// Probe and add files to the shared media pool as one undo step.
+        MediaAdd {
+            base_revision: u64,
+            paths: Vec<PathBuf>,
+        } = "media.add";
     }
 }
 
@@ -166,6 +175,7 @@ pub enum Reply {
     Outcome(Outcome),
     Sequences(SequenceList),
     Sequence(SequenceReply),
+    Media(MediaList),
 }
 
 impl Reply {
@@ -177,6 +187,7 @@ impl Reply {
             Reply::Outcome(_) => "outcome",
             Reply::Sequences(_) => "sequences",
             Reply::Sequence(_) => "sequence",
+            Reply::Media(_) => "media",
         }
     }
 
@@ -194,6 +205,11 @@ impl Reply {
             (Reply::Sequence(sequence), Call::SequenceUse { .. } | Call::SequenceAdd { .. }) => {
                 serde_json::to_value(sequence).map_err(|e| {
                     RpcError::internal(format!("sequence reply is not serializable: {e}"))
+                })
+            }
+            (Reply::Media(media), Call::MediaList | Call::MediaAdd { .. }) => {
+                serde_json::to_value(media).map_err(|e| {
+                    RpcError::internal(format!("media reply is not serializable: {e}"))
                 })
             }
             (
@@ -222,6 +238,9 @@ impl Reply {
             Call::SequenceList => serde_json::from_value(result).map(Reply::Sequences),
             Call::SequenceUse { .. } | Call::SequenceAdd { .. } => {
                 serde_json::from_value(result).map(Reply::Sequence)
+            }
+            Call::MediaList | Call::MediaAdd { .. } => {
+                serde_json::from_value(result).map(Reply::Media)
             }
             Call::ActionPreview { .. }
             | Call::ActionApply { .. }
@@ -317,4 +336,37 @@ pub struct SequenceReply {
     pub revision: u64,
     pub active: u32,
     pub sequence: SequenceSummary,
+}
+
+/// One pooled asset as the protocol reports it. `used_by` spans every
+/// sequence, matching `Project::asset_usage`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaAsset {
+    pub id: u32,
+    pub path: PathBuf,
+    #[serde(
+        default,
+        with = "nle_core::time::rational_ser::opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub duration: Option<Seconds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(
+        default,
+        with = "nle_core::time::rational_ser::opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fps: Option<Seconds>,
+    pub audio: bool,
+    pub used_by: Vec<u32>,
+}
+
+/// The media pool after `media.list` or `media.add`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaList {
+    pub revision: u64,
+    pub assets: Vec<MediaAsset>,
 }
