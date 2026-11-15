@@ -7,7 +7,8 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 ## Catalog
 
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
-`undo`, `redo`. The internal `wire_catalog!` macro
+`undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`. The internal
+`wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a method to the invocation, then
 a sample to `all_calls()`; the `METHODS.len()` assertion fails until the sample
@@ -34,6 +35,20 @@ parallel DTO. `crates/nle-core/src/action/tests/wire.rs` pins every slot.
 Both go through one handler function so the revision check and event
 emission cannot drift. `from` is ignored for undo/redo: the history restores
 its own playhead.
+
+## Sequences
+
+`sequence.list` returns every sequence summary plus the active id.
+`sequence.use` switches the edit scope: it saves `active` and the project file
+but does not bump the revision (session state, like the playhead), then emits
+`sequence.changed` and, when the stored cursor differs, `playhead`.
+`sequence.add` is a model write: it takes `base_revision`, bumps the revision,
+persists, and emits `project.changed` then `sequence.changed`. It does not
+switch.
+
+Actions apply to the active sequence. A client that wants another timeline
+calls `sequence.use` first; there is deliberately no per-call sequence field,
+so one request has one unambiguous scope. Undo is the active sequence's stack.
 
 ## Time
 
@@ -108,5 +123,6 @@ say to restart); reads continue. `timeline.edl` returns the `edl://` URL that
 `crates/nle-protocol/tests/wire.rs` covers the envelopes, every call/event,
 ordering, error codes, notifications, omitted params, and failed-call events.
 The line cap is unit-tested in `transport.rs`
-(`the_line_cap_accepts_the_limit_and_rejects_one_more`).
+(`the_line_cap_accepts_the_limit_and_rejects_one_more`). `wire.rs` also pins
+the golden `sequence.*` request and `sequence.changed` event.
 `crates/nle-core/src/action/tests/wire.rs` covers every action slot.

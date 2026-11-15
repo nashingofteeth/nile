@@ -19,7 +19,10 @@ use nle_core::edit::Actor;
 use nle_core::{
     Action, EditError, Outcome as ActionOutcome, Seconds, TrackKind, frames_to_seconds, secs_f64,
 };
-use nle_protocol::{Call, Event, Handler, Hello, Outcome as WireOutcome, Reply, RpcError, Server};
+use nle_protocol::{
+    Call, Event, Handler, Hello, Outcome as WireOutcome, Reply, RpcError, SequenceList,
+    SequenceReply, SequenceSummary, Server,
+};
 
 use crate::session::{Session, playhead};
 
@@ -66,6 +69,14 @@ impl Handler for ServeHandler {
             } => self.apply(*base_revision, action, *from),
             Call::Undo { base_revision } => self.apply(*base_revision, &Action::Undo, None),
             Call::Redo { base_revision } => self.apply(*base_revision, &Action::Redo, None),
+            Call::SequenceList => self.sequence_list(),
+            Call::SequenceUse { id } => self.sequence_use(*id),
+            Call::SequenceAdd {
+                base_revision,
+                name,
+                fps,
+                video,
+            } => self.sequence_add(*base_revision, name, *fps, video.clone()),
         }
     }
 
@@ -98,6 +109,35 @@ impl ServeHandler {
         }
     }
 
+    fn ensure_writable(&self) -> Result<(), RpcError> {
+        match &self.poisoned {
+            Some(reason) => Err(RpcError::internal(format!(
+                "server is read-only after a failed save: {reason}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn poison(&mut self, error: impl std::fmt::Display) -> RpcError {
+        let message = error.to_string();
+        self.poisoned = Some(message.clone());
+        RpcError::internal(format!("save failed: {message}"))
+    }
+
+    fn save_or_poison(&mut self, changed: bool, playhead_moved: bool) -> Result<(), RpcError> {
+        if let Err(e) = self.session.save_if(changed, playhead_moved) {
+            return Err(self.poison(e));
+        }
+        Ok(())
+    }
+
+    fn save_project_or_poison(&mut self) -> Result<(), RpcError> {
+        if let Err(e) = self.session.save_project() {
+            return Err(self.poison(e));
+        }
+        Ok(())
+    }
+
     /// The undo anchor: the request's `from`, or the shared playhead.
     fn anchor_seconds(&self, from: Option<Seconds>) -> f64 {
         from.map(|t| secs_f64(&t))
@@ -120,6 +160,69 @@ impl ServeHandler {
             changed: outcome.changed,
             playhead: outcome.playhead.map(|frame| self.frame_seconds(frame)),
         }
+    }
+
+    fn sequence_list(&self) -> Result<Reply, RpcError> {
+        Ok(Reply::Sequences(SequenceList::of(self.session.project())))
+    }
+
+    /// Switch the edit scope. `active` is session state: the revision does
+    /// not move, but the project file is written so a later CLI/TUI session
+    /// opens on the same sequence. The adopted playhead is reported.
+    fn sequence_use(&mut self, id: u32) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
+        let before = self.session.project().playhead;
+        if let Err(e) = self.session.select_sequence(id) {
+            return Err(RpcError::invalid_params(e.to_string()));
+        }
+        let after = self.session.project().playhead;
+        self.save_project_or_poison()?;
+        let revision = self.session.revision();
+        let active = self.session.project().active_id();
+        let sequence = SequenceSummary::of(self.session.project().active_sequence());
+        self.events
+            .push(Event::SequenceChanged { active, revision });
+        if after != before {
+            self.events.push(Event::Playhead { at: after });
+        }
+        Ok(Reply::Sequence(SequenceReply {
+            revision,
+            active,
+            sequence,
+        }))
+    }
+
+    /// Add an empty sequence. A model write: CAS, revision bump, save.
+    fn sequence_add(
+        &mut self,
+        base_revision: u64,
+        name: &str,
+        fps: Option<Seconds>,
+        video: Option<nle_core::VideoSettings>,
+    ) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
+        self.check_revision(base_revision)?;
+        let id = self
+            .session
+            .add_sequence(name, fps, video)
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        self.save_or_poison(true, false)?;
+        let revision = self.session.revision();
+        let active = self.session.project().active_id();
+        let sequence = SequenceSummary::of(
+            self.session
+                .project()
+                .sequence(id)
+                .expect("the sequence was just added"),
+        );
+        self.events.push(Event::ProjectChanged { revision });
+        self.events
+            .push(Event::SequenceChanged { active, revision });
+        Ok(Reply::Sequence(SequenceReply {
+            revision,
+            active,
+            sequence,
+        }))
     }
 
     fn edl(&self, track: Option<usize>) -> Result<Reply, RpcError> {
@@ -167,11 +270,7 @@ impl ServeHandler {
         action: &Action,
         from: Option<Seconds>,
     ) -> Result<Reply, RpcError> {
-        if let Some(reason) = &self.poisoned {
-            return Err(RpcError::internal(format!(
-                "server is read-only after a failed save: {reason}"
-            )));
-        }
+        self.ensure_writable()?;
         self.check_revision(base_revision)?;
 
         // Match the TUI's media-frame policy on the base video track: an edit
@@ -208,10 +307,7 @@ impl ServeHandler {
         }
         let playhead = landed;
 
-        if let Err(e) = self.session.save_if(outcome.changed, playhead.is_some()) {
-            self.poisoned = Some(e.to_string());
-            return Err(RpcError::internal(format!("save failed: {e}")));
-        }
+        self.save_or_poison(outcome.changed, playhead.is_some())?;
 
         let revision = self.session.revision();
         if outcome.changed {
