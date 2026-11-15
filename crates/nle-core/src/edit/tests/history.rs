@@ -173,6 +173,34 @@ fn a_group_round_trips_through_the_sidecar() {
 }
 
 #[test]
+fn clamp_notes_are_collected_for_preview() {
+    let mut p = fixture();
+    let mut h = History::default();
+    let batch = Batch {
+        ops: vec![EditOp::Insert {
+            track: 0,
+            index: 0,
+            segment: Segment::Clip(Clip {
+                id: 99,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(99),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            }),
+        }],
+        desc: "paste long clip".into(),
+    };
+    h.apply(&mut p, batch, 0).unwrap();
+    let warnings = h.drain_warnings();
+    assert!(
+        warnings.iter().any(|w| w.contains("clip #99")),
+        "{warnings:?}"
+    );
+    assert!(h.drain_warnings().is_empty(), "draining is one-shot");
+}
+
+#[test]
 fn history_stores_and_returns_the_playhead_frame() {
     let mut p = fixture();
     let mut h = History::default();

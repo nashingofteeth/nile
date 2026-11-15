@@ -510,6 +510,121 @@ impl Project {
     }
 }
 
+/// A structural before/after diff for previews. Actions cannot add or
+/// remove a sequence today, but the fields keep the type useful if they do.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ProjectDiff {
+    pub sequences: Vec<SequenceDiff>,
+    pub sequences_added: Vec<u32>,
+    pub sequences_removed: Vec<u32>,
+    pub assets_added: Vec<u32>,
+    pub assets_removed: Vec<u32>,
+    pub assets_changed: Vec<u32>,
+}
+
+impl ProjectDiff {
+    pub fn is_empty(&self) -> bool {
+        self.sequences.is_empty()
+            && self.sequences_added.is_empty()
+            && self.sequences_removed.is_empty()
+            && self.assets_added.is_empty()
+            && self.assets_removed.is_empty()
+            && self.assets_changed.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SequenceDiff {
+    pub id: u32,
+    pub settings_changed: bool,
+    pub tracks_added: Vec<usize>,
+    pub tracks_removed: Vec<usize>,
+    pub tracks: Vec<TrackDiff>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TrackDiff {
+    pub index: usize,
+    pub before_segments: usize,
+    pub after_segments: usize,
+    pub segments_changed: bool,
+    pub kind_changed: bool,
+    pub muted_changed: bool,
+}
+
+impl Project {
+    /// Compare two project snapshots for `action.preview`. The comparison is
+    /// structural: sequence settings, track topology/mute/kind, and the media
+    /// pool. It deliberately ignores `revision` and `playhead`, which are
+    /// session bookkeeping rather than the edit's content.
+    pub fn diff(&self, after: &Project) -> ProjectDiff {
+        let mut diff = ProjectDiff::default();
+        for before in &self.sequences {
+            match after.sequence(before.id) {
+                Some(after) => {
+                    let mut sequence = SequenceDiff {
+                        id: before.id,
+                        settings_changed: before.name != after.name
+                            || before.fps != after.fps
+                            || before.video != after.video,
+                        ..Default::default()
+                    };
+                    let before_tracks = &before.timeline.tracks;
+                    let after_tracks = &after.timeline.tracks;
+                    let common = before_tracks.len().min(after_tracks.len());
+                    for i in 0..common {
+                        let b = &before_tracks[i];
+                        let a = &after_tracks[i];
+                        if b != a {
+                            sequence.tracks.push(TrackDiff {
+                                index: i,
+                                before_segments: b.segments.len(),
+                                after_segments: a.segments.len(),
+                                segments_changed: b.segments != a.segments,
+                                kind_changed: b.kind != a.kind,
+                                muted_changed: b.muted != a.muted,
+                            });
+                        }
+                    }
+                    sequence.tracks_removed.extend(common..before_tracks.len());
+                    sequence.tracks_added.extend(common..after_tracks.len());
+                    if sequence.settings_changed
+                        || !sequence.tracks_added.is_empty()
+                        || !sequence.tracks_removed.is_empty()
+                        || !sequence.tracks.is_empty()
+                    {
+                        diff.sequences.push(sequence);
+                    }
+                }
+                None => diff.sequences_removed.push(before.id),
+            }
+        }
+        for after in &after.sequences {
+            if self.sequence(after.id).is_none() {
+                diff.sequences_added.push(after.id);
+            }
+        }
+
+        let before_assets: std::collections::BTreeMap<u32, &Asset> =
+            self.media.iter().map(|a| (a.id, a)).collect();
+        let after_assets: std::collections::BTreeMap<u32, &Asset> =
+            after.media.iter().map(|a| (a.id, a)).collect();
+        for (id, asset) in &before_assets {
+            match after_assets.get(id) {
+                Some(after) if *asset != *after => diff.assets_changed.push(*id),
+                Some(_) => {}
+                None => diff.assets_removed.push(*id),
+            }
+        }
+        for id in after_assets.keys() {
+            if !before_assets.contains_key(id) {
+                diff.assets_added.push(*id);
+            }
+        }
+        diff
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +977,39 @@ mod tests {
             Seconds::from_integer(1),
         ))];
         assert_eq!(p.asset_usage(1).len(), before + 1);
+    }
+
+    #[test]
+    fn project_diff_reports_tracks_assets_and_sequences() {
+        let before = sample_project();
+        let mut after = before.clone();
+        after.timeline.video_track_mut().unwrap().segments.pop();
+        let diff = before.diff(&after);
+        assert_eq!(diff.sequences.len(), 1);
+        assert_eq!(diff.sequences[0].id, 1);
+        let track = &diff.sequences[0].tracks[0];
+        assert_eq!(track.index, 0);
+        assert_eq!(track.before_segments, 2);
+        assert_eq!(track.after_segments, 1);
+        assert!(track.segments_changed);
+        assert!(!diff.is_empty());
+
+        let mut after = before.clone();
+        let (asset, _) = after.add_asset(
+            "/media/new.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        let diff = before.diff(&after);
+        assert_eq!(diff.assets_added, vec![asset]);
+        assert!(
+            diff.sequences.is_empty(),
+            "the pool edit touched no timeline"
+        );
+
+        let mut with_sequence = before.clone();
+        let id = with_sequence.add_sequence("Second", None, None);
+        let diff = before.diff(&with_sequence);
+        assert_eq!(diff.sequences_added, vec![id]);
     }
 
     #[test]

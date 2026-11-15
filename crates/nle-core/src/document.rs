@@ -19,7 +19,7 @@ use std::path::Path;
 
 use crate::action::{self, Action, Outcome, Register};
 use crate::edit::{self, Actor, Batch, EditError, Histories, History, UndoOutcome};
-use crate::project::{Project, ProjectError, VideoSettings};
+use crate::project::{Project, ProjectDiff, ProjectError, VideoSettings};
 use crate::time::{Seconds, frame_of};
 
 /// A project plus one undo stack per sequence. Undo acts on the active
@@ -29,6 +29,23 @@ use crate::time::{Seconds, frame_of};
 pub struct Document {
     project: Project,
     histories: Histories,
+}
+
+/// What a batch produced: the normal action outcome plus any clamp notes
+/// collected while applying it. Warnings are session-only and preview-only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchOutcome {
+    pub outcome: Outcome,
+    pub warnings: Vec<String>,
+}
+
+/// What a preview produced: the hypothetical outcome, a structural diff and
+/// the clamp warnings the real apply would have to repair. Nothing is saved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewOutcome {
+    pub outcome: Outcome,
+    pub diff: ProjectDiff,
+    pub warnings: Vec<String>,
 }
 
 impl Default for Document {
@@ -163,8 +180,22 @@ impl Document {
         }
     }
 
-    /// Run one catalog action, recording it in the history.
+    /// Run one catalog action, recording it in the history. Clamp notes are
+    /// discarded here; the preview path drains them through
+    /// [`Document::edit_actions`].
     pub fn edit(
+        &mut self,
+        action: &Action,
+        from: f64,
+        register: &mut Option<Register>,
+    ) -> Result<Outcome, EditError> {
+        self.clear_warnings();
+        let outcome = self.edit_action(action, from, register);
+        self.clear_warnings();
+        outcome
+    }
+
+    fn edit_action(
         &mut self,
         action: &Action,
         from: f64,
@@ -173,6 +204,16 @@ impl Document {
         let active = self.project.active_id();
         let history = self.histories.get_mut(active);
         action::run_action(&mut self.project, history, register, action, from)
+    }
+
+    fn clear_warnings(&mut self) {
+        let active = self.project.active_id();
+        self.histories.get_mut(active).clear_warnings();
+    }
+
+    fn drain_warnings(&mut self) -> Vec<String> {
+        let active = self.project.active_id();
+        self.histories.get_mut(active).drain_warnings()
     }
 
     /// Apply a prepared batch (an extend commit builds one before committing).
@@ -191,16 +232,14 @@ impl Document {
         actions: &[Action],
         from: f64,
         register: &mut Option<Register>,
-    ) -> Result<Outcome, EditError> {
+    ) -> Result<BatchOutcome, EditError> {
         if actions.is_empty() {
             return Err(EditError::EmptyBatch);
         }
-        if actions.len() == 1 {
-            return self.edit(&actions[0], from, register);
-        }
-        if actions
-            .iter()
-            .any(|action| matches!(action, Action::Undo | Action::Redo))
+        if actions.len() > 1
+            && actions
+                .iter()
+                .any(|action| matches!(action, Action::Undo | Action::Redo))
         {
             return Err(EditError::BatchUndoRedo);
         }
@@ -210,12 +249,19 @@ impl Document {
         let saved_register = register.clone();
         let active = self.project.active_id();
         let depth = self.depth();
+        self.histories.get_mut(active).clear_warnings();
+        if actions.len() == 1 {
+            let outcome = self.edit_action(&actions[0], from, register)?;
+            let warnings = self.drain_warnings();
+            return Ok(BatchOutcome { outcome, warnings });
+        }
+
         self.histories.get_mut(active).begin_batch();
         let mut descs = Vec::with_capacity(actions.len());
         let mut changed = false;
         let mut playhead = None;
         for action in actions {
-            match self.edit(action, from, register) {
+            match self.edit_action(action, from, register) {
                 Ok(outcome) => {
                     changed |= outcome.changed;
                     if let Some(frame) = outcome.playhead {
@@ -246,17 +292,25 @@ impl Document {
                 return Err(e);
             }
             self.histories.get_mut(active).end_batch();
-            return Ok(Outcome {
-                desc,
-                changed,
-                playhead,
+            let warnings = self.drain_warnings();
+            return Ok(BatchOutcome {
+                outcome: Outcome {
+                    desc,
+                    changed,
+                    playhead,
+                },
+                warnings,
             });
         }
         self.histories.get_mut(active).end_batch();
-        Ok(Outcome {
-            desc: descs.join(" · "),
-            changed,
-            playhead,
+        let warnings = self.drain_warnings();
+        Ok(BatchOutcome {
+            outcome: Outcome {
+                desc: descs.join(" · "),
+                changed,
+                playhead,
+            },
+            warnings,
         })
     }
 

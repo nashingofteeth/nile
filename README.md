@@ -440,8 +440,10 @@ then switch to it:
 {"jsonrpc":"2.0","id":5,"method":"action.apply","params":{"base_revision":6,"actions":[{"action":"split","track":0,"at":1.0}],"from":"1/2"}}
 ```
 
-The wire is pre-1.0 and may change. It is a single-writer interface: close the
-TUI and other editing commands while it runs. `stdout` is protocol-only; logs
+`action.preview` additionally returns a structural `diff` and clamp
+`warnings`; `action.apply` returns the plain outcome. The wire is pre-1.0 and
+may change. It is a single-writer interface: close the TUI and other editing
+commands while it runs. `stdout` is protocol-only; logs
 go to stderr or `NLE_LOG`. The full contract, including the error codes and
 the event order, is in [docs/pitfalls/protocol.md](docs/pitfalls/protocol.md).
 
