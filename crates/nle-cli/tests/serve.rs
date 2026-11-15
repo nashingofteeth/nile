@@ -34,7 +34,7 @@ fn protocol_server_round_trip() {
     let mut serve = sandbox.serve();
 
     let hello = call(&mut serve, 1, "hello", None);
-    assert_eq!(hello["result"]["protocol"], 1);
+    assert_eq!(hello["result"]["protocol"], 2);
     assert_eq!(hello["result"]["project_version"], 11);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
@@ -185,6 +185,166 @@ fn protocol_server_round_trip() {
             .len(),
         before
     );
+}
+
+#[test]
+fn sequence_list_use_and_add_round_trip() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    let list = call(&mut serve, 2, "sequence.list", None);
+    assert_eq!(list["result"]["revision"], revision);
+    assert_eq!(list["result"]["active"], 1);
+    assert_eq!(list["result"]["sequences"].as_array().unwrap().len(), 1);
+    assert_eq!(list["result"]["sequences"][0]["name"], "Sequence 1");
+    assert_eq!(list["result"]["sequences"][0]["clips"], 3);
+
+    // Add: a model write, so CAS and a revision bump.
+    let added = call(
+        &mut serve,
+        3,
+        "sequence.add",
+        Some(json!({
+            "base_revision": revision,
+            "name": "Vertical",
+            "fps": "30/1",
+            "video": {"width": 1080, "height": 1920}
+        })),
+    );
+    let after_add = added["result"]["revision"].as_u64().expect("revision");
+    assert_eq!(after_add, revision + 1);
+    assert_eq!(added["result"]["active"], 1, "add does not switch");
+    assert_eq!(added["result"]["sequence"]["id"], 2);
+    assert_eq!(added["result"]["sequence"]["name"], "Vertical");
+    assert_eq!(added["result"]["sequence"]["clips"], 0);
+    assert_eq!(added["result"]["sequence"]["video"]["width"], 1080);
+    assert_eq!(serve.read()["method"], "project.changed");
+    let event = serve.read();
+    assert_eq!(event["method"], "sequence.changed");
+    assert_eq!(event["params"]["active"], 1);
+
+    // Use: session state, so the revision does not move.
+    let used = call(&mut serve, 4, "sequence.use", Some(json!({"id": 2})));
+    assert_eq!(used["result"]["revision"], after_add);
+    assert_eq!(used["result"]["active"], 2);
+    assert_eq!(used["result"]["sequence"]["id"], 2);
+    let event = serve.read();
+    assert_eq!(event["method"], "sequence.changed");
+    assert_eq!(event["params"]["active"], 2);
+    assert_eq!(event["params"]["revision"], after_add);
+
+    let list = call(&mut serve, 5, "sequence.list", None);
+    assert_eq!(list["result"]["active"], 2);
+    assert_eq!(list["result"]["sequences"].as_array().unwrap().len(), 2);
+
+    // Refusals keep serving.
+    let bad_id = call(&mut serve, 6, "sequence.use", Some(json!({"id": 99})));
+    assert_eq!(bad_id["error"]["code"], -32602);
+    let bad_fps = call(
+        &mut serve,
+        7,
+        "sequence.add",
+        Some(json!({
+            "base_revision": after_add,
+            "name": "Zero",
+            "fps": "0/1"
+        })),
+    );
+    assert_eq!(bad_fps["error"]["code"], -32602);
+    let stale = call(
+        &mut serve,
+        8,
+        "sequence.add",
+        Some(json!({"base_revision": revision, "name": "Stale"})),
+    );
+    assert_eq!(stale["error"]["code"], -32001);
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn sequence_use_reports_the_adopted_playhead() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    sandbox.ok(&["sequence", "add", "Second"]);
+    sandbox.ok(&["sequence", "use", "2"]);
+    sandbox.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    sandbox.ok(&["seek", "1.5"]);
+    sandbox.ok(&["sequence", "use", "1"]);
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    call(&mut serve, 2, "sequence.use", Some(json!({"id": 2})));
+    let event = serve.read();
+    assert_eq!(event["method"], "sequence.changed");
+    assert_eq!(event["params"]["revision"], revision);
+    let event = serve.read();
+    assert_eq!(event["method"], "playhead");
+    assert_eq!(event["params"]["at"], "3/2");
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn protocol_undo_is_scoped_to_the_active_sequence() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    let split = call(
+        &mut serve,
+        2,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "action": {"action": "split", "track": 0, "at": 1.0}
+        })),
+    );
+    let after_split = split["result"]["revision"].as_u64().expect("revision");
+    let _ = serve.read(); // project.changed
+
+    let added = call(
+        &mut serve,
+        3,
+        "sequence.add",
+        Some(json!({"base_revision": after_split, "name": "Second"})),
+    );
+    let after_add = added["result"]["revision"].as_u64().expect("revision");
+    let _ = serve.read(); // project.changed
+    let _ = serve.read(); // sequence.changed
+
+    call(&mut serve, 4, "sequence.use", Some(json!({"id": 2})));
+    let _ = serve.read(); // sequence.changed
+
+    let refused = call(
+        &mut serve,
+        5,
+        "undo",
+        Some(json!({"base_revision": after_add})),
+    );
+    assert_eq!(refused["error"]["code"], -32600, "nothing to undo on 2");
+
+    call(&mut serve, 6, "sequence.use", Some(json!({"id": 1})));
+    let _ = serve.read(); // sequence.changed
+    let undone = call(
+        &mut serve,
+        7,
+        "undo",
+        Some(json!({"base_revision": after_add})),
+    );
+    assert_eq!(undone["result"]["changed"], true);
+    let _ = serve.read(); // project.changed
+    let _ = serve.read(); // playhead
+
+    assert!(serve.finish().success(), "serve exits cleanly");
 }
 
 #[test]

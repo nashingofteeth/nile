@@ -8,7 +8,8 @@ use nle_core::{Action, Project, Seconds, TransitionKind, TransitionLen};
 use nle_protocol::{
     Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Id,
     METHOD_NOT_FOUND, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, REVISION_CONFLICT,
-    Reply, Request, Response, RevisionConflict, RpcError, Server,
+    Reply, Request, Response, RevisionConflict, RpcError, SequenceList, SequenceReply,
+    SequenceSummary, Server,
 };
 use serde_json::{Value, json};
 
@@ -103,6 +104,29 @@ impl Handler for Fake {
                     playhead: None,
                 }))
             }
+            Call::SequenceList => Ok(Reply::Sequences(SequenceList {
+                revision: self.revision,
+                active: 1,
+                sequences: vec![summary(1, "Sequence 1")],
+            })),
+            Call::SequenceUse { id } => Ok(Reply::Sequence(SequenceReply {
+                revision: self.revision,
+                active: *id,
+                sequence: summary(*id, "Sequence 2"),
+            })),
+            Call::SequenceAdd {
+                base_revision,
+                name,
+                ..
+            } => {
+                self.check(*base_revision)?;
+                self.revision += 1;
+                Ok(Reply::Sequence(SequenceReply {
+                    revision: self.revision,
+                    active: 1,
+                    sequence: summary(2, name),
+                }))
+            }
         }
     }
 
@@ -139,6 +163,17 @@ fn responses(input: &str, handler: &mut impl Handler) -> Vec<Response> {
         .collect()
 }
 
+fn summary(id: u32, name: &str) -> SequenceSummary {
+    SequenceSummary {
+        id,
+        name: name.to_string(),
+        fps: Some(Seconds::from_integer(30)),
+        video: None,
+        playhead: Seconds::new(3, 2),
+        clips: 2,
+    }
+}
+
 fn all_calls() -> Vec<Call> {
     let action = Action::Undo;
     vec![
@@ -157,6 +192,14 @@ fn all_calls() -> Vec<Call> {
         },
         Call::Undo { base_revision: 0 },
         Call::Redo { base_revision: 0 },
+        Call::SequenceList,
+        Call::SequenceUse { id: 2 },
+        Call::SequenceAdd {
+            base_revision: 0,
+            name: "Vertical".into(),
+            fps: Some(Seconds::from_integer(30)),
+            video: None,
+        },
     ]
 }
 
@@ -339,6 +382,38 @@ fn the_anchor_is_rational_on_the_wire() {
 }
 
 #[test]
+fn golden_sequence_calls_and_events() {
+    let call = Call::SequenceAdd {
+        base_revision: 7,
+        name: "Vertical".into(),
+        fps: Some(Seconds::from_integer(30)),
+        video: None,
+    };
+    let request = Request::new(
+        Id::from(1u64),
+        call.method(),
+        call.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"sequence.add","params":{"base_revision":7,"fps":"30/1","name":"Vertical"}}"#
+    );
+    assert_eq!(
+        Call::decode(call.method(), call.params().expect("params")).expect("decode"),
+        call
+    );
+
+    let event = Event::SequenceChanged {
+        active: 2,
+        revision: 4,
+    };
+    assert_eq!(
+        serde_json::to_string(&event.notification().expect("notification")).expect("serialize"),
+        r#"{"jsonrpc":"2.0","method":"sequence.changed","params":{"active":2,"revision":4}}"#
+    );
+}
+
+#[test]
 fn golden_response_and_error_envelopes() {
     let ok = Response::Result {
         id: Id::from(1u64),
@@ -391,6 +466,10 @@ fn events_round_trip_through_notifications() {
         Event::ProjectChanged { revision: 4 },
         Event::Playhead {
             at: Seconds::new(30000, 1001),
+        },
+        Event::SequenceChanged {
+            active: 2,
+            revision: 4,
         },
     ];
     assert_eq!(nle_protocol::EVENTS.len(), events.len());
