@@ -244,8 +244,9 @@ impl Action {
 pub const SLOTS: usize = 23;
 
 /// One representative action per [`Action::slot`], in slot order. Shared by
-/// the CLI/TUI parity tests and the protocol's wire walk, so a new variant
-/// cannot be covered in one place and missed in the other.
+/// the core wire test and the protocol's wire walk, so a new variant cannot be
+/// covered in one place and missed in the other. The CLI/`:cmd` parity tests
+/// keep their own command lists because they test a different spelling.
 #[doc(hidden)]
 pub fn sample_actions() -> Vec<Action> {
     let gap = Segment::Gap(Gap {

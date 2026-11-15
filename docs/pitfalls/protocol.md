@@ -12,8 +12,10 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a method to the invocation, then
 a sample to `all_calls()`; the `METHODS.len()` assertion fails until the sample
-exists. `hello` reports `PROTOCOL_VERSION` (bump on any breaking wire change),
-the `nile.json` version, the model revision, and the served methods.
+exists. `hello` reports `PROTOCOL_VERSION` (bump only for a breaking method,
+field or unit change; additive methods stay on the current version and are
+listed in `hello.methods`), the `nile.json` version, the model revision, and
+the served methods.
 
 ## Actions
 
@@ -53,13 +55,18 @@ so one request has one unambiguous scope. Undo is the active sequence's stack.
 ## Media
 
 `media.list` returns the shared pool summarized per asset: path, duration,
-picture size/fps, audio, and the clip ids that use it across every sequence.
+picture size/fps, audio, and scoped usage pairs `{sequence, segment}` across
+every sequence. A segment id is a clip or a transition, and is only unique
+within its sequence.
 `media.add` takes `{base_revision, paths}` and probes every file before
 mutating, so one bad path leaves the pool untouched. New files are one undo
 entry (`action.apply`/`undo` sees it); already-pooled paths are returned
 without a change and do not bump the revision. Removal is the catalog action
 `AssetRm`, not a separate `media.*` method. Directories are not expanded here;
 the CLI/picker owns that.
+
+The `used_by` shape changed in protocol v3: it is a list of `{sequence,
+segment}` pairs, because clip ids repeat across sequences.
 
 ## Time
 
@@ -117,8 +124,8 @@ register, then serves one connection. It is a **single-writer** interface:
 close the TUI and other edits while it runs; foreign-change adoption is not
 implemented yet. Action mutations go through one `apply`, which owns CAS, the
 edit, playhead conversion, saving, and events. `sequence.use`/`sequence.add`
-are separate model paths, but they use the same writeability, revision and
-save/poison helpers. A failed save poisons every later write; reads reflect
+and `media.add` are separate model paths, but they use the same writeability,
+revision and save/poison helpers. A failed save poisons every later write; reads reflect
 the in-memory model.
 
 The server shares the TUI's media-frame playhead anchor on the base video
@@ -140,5 +147,6 @@ say to restart); reads continue. `timeline.edl` returns the `edl://` URL that
 ordering, error codes, notifications, omitted params, and failed-call events.
 The line cap is unit-tested in `transport.rs`
 (`the_line_cap_accepts_the_limit_and_rejects_one_more`). `wire.rs` also pins
-the golden `sequence.*` request and `sequence.changed` event.
+the golden `sequence.*` and `media.add` requests and the `sequence.changed`
+event.
 `crates/nle-core/src/action/tests/wire.rs` covers every action slot.
