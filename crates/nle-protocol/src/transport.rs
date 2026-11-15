@@ -15,10 +15,10 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
-use nle_core::{Action, Project, Seconds};
+use nle_core::{Action, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
-use crate::call::{Call, Hello, Outcome, Reply};
+use crate::call::{Call, Hello, Outcome, Reply, SequenceList, SequenceReply};
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
 use crate::rpc::{Id, Notification, Request, Response, RpcError};
@@ -253,6 +253,38 @@ impl<R: BufRead, W: Write> Client<R, W> {
 
     pub fn redo(&mut self, base_revision: u64) -> Result<Outcome, ClientError> {
         outcome(self.call(Call::Redo { base_revision }))
+    }
+
+    pub fn sequences(&mut self) -> Result<SequenceList, ClientError> {
+        match self.call(Call::SequenceList)? {
+            Reply::Sequences(list) => Ok(list),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn use_sequence(&mut self, id: u32) -> Result<SequenceReply, ClientError> {
+        match self.call(Call::SequenceUse { id })? {
+            Reply::Sequence(reply) => Ok(reply),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn add_sequence(
+        &mut self,
+        base_revision: u64,
+        name: impl Into<String>,
+        fps: Option<Seconds>,
+        video: Option<VideoSettings>,
+    ) -> Result<SequenceReply, ClientError> {
+        match self.call(Call::SequenceAdd {
+            base_revision,
+            name: name.into(),
+            fps,
+            video,
+        })? {
+            Reply::Sequence(reply) => Ok(reply),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
     }
 }
 

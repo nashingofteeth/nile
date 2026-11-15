@@ -414,6 +414,46 @@ fn golden_sequence_calls_and_events() {
 }
 
 #[test]
+fn typed_sequence_helpers_match_their_calls() {
+    let (_, output) = exchange(&mut Fake::new(7), Call::SequenceList);
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let list = client.sequences().expect("sequence list");
+    assert_eq!(list.active, 1);
+    assert_eq!(list.sequences.len(), 1);
+
+    let (_, output) = exchange(&mut Fake::new(7), Call::SequenceUse { id: 2 });
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let used = client.use_sequence(2).expect("sequence use");
+    assert_eq!(used.active, 2);
+    assert_eq!(used.sequence.id, 2);
+
+    let (_, output) = exchange(
+        &mut Fake::new(7),
+        Call::SequenceAdd {
+            base_revision: 7,
+            name: "Vertical".into(),
+            fps: Some(Seconds::from_integer(30)),
+            video: None,
+        },
+    );
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let added = client
+        .add_sequence(7, "Vertical", Some(Seconds::from_integer(30)), None)
+        .expect("sequence add");
+    assert_eq!(added.revision, 8);
+    assert_eq!(added.sequence.id, 2);
+
+    let summary = SequenceSummary {
+        video: None,
+        fps: None,
+        ..summary(1, "Sequence 1")
+    };
+    let value = serde_json::to_value(summary).expect("summary");
+    assert!(value.get("video").is_none(), "{value}");
+    assert!(value.get("fps").is_none(), "{value}");
+}
+
+#[test]
 fn golden_response_and_error_envelopes() {
     let ok = Response::Result {
         id: Id::from(1u64),
