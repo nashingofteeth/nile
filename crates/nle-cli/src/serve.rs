@@ -64,16 +64,16 @@ impl Handler for ServeHandler {
             Call::TimelineEdl { track } => self.edl(*track),
             Call::ActionPreview {
                 base_revision,
-                action,
+                actions,
                 from,
-            } => self.preview(*base_revision, action, *from),
+            } => self.preview(*base_revision, actions, *from),
             Call::ActionApply {
                 base_revision,
-                action,
+                actions,
                 from,
-            } => self.apply(*base_revision, action, *from),
-            Call::Undo { base_revision } => self.apply(*base_revision, &Action::Undo, None),
-            Call::Redo { base_revision } => self.apply(*base_revision, &Action::Redo, None),
+            } => self.apply(*base_revision, actions, *from),
+            Call::Undo { base_revision } => self.apply(*base_revision, &[Action::Undo], None),
+            Call::Redo { base_revision } => self.apply(*base_revision, &[Action::Redo], None),
             Call::SequenceList => self.sequence_list(),
             Call::SequenceUse { id } => self.sequence_use(*id),
             Call::SequenceAdd {
@@ -323,31 +323,33 @@ impl ServeHandler {
         Ok(Reply::Edl(text))
     }
 
-    /// Run one action against a copy. `Session::preview` clones the history
-    /// so an undo/redo preview is real, and the register so a preview yank
-    /// cannot touch the live clipboard. Nothing is saved and no events are
-    /// queued.
+    /// Run actions against a copy. `Session::preview_actions` clones the
+    /// history so an undo/redo preview is real, and the register so a preview
+    /// yank cannot touch the live clipboard. Nothing is saved and no events
+    /// are queued.
     fn preview(
         &self,
         base_revision: u64,
-        action: &Action,
+        actions: &[Action],
         from: Option<Seconds>,
     ) -> Result<Reply, RpcError> {
         self.check_revision(base_revision)?;
-        let outcome = self
-            .session
-            .preview(action, self.anchor_seconds(from))
-            .map_err(edit_rpc)?;
+        let from = self.anchor_seconds(from);
+        let outcome = match actions {
+            [action] => self.session.preview(action, from),
+            _ => self.session.preview_actions(actions, from),
+        }
+        .map_err(edit_rpc)?;
         Ok(Reply::Outcome(
             self.wire_outcome(outcome, self.session.revision()),
         ))
     }
 
-    /// The only mutation path: CAS, edit, playhead, save, events.
+    /// The only action mutation path: CAS, edit, playhead, save, events.
     fn apply(
         &mut self,
         base_revision: u64,
-        action: &Action,
+        actions: &[Action],
         from: Option<Seconds>,
     ) -> Result<Reply, RpcError> {
         self.ensure_writable()?;
@@ -363,15 +365,19 @@ impl ServeHandler {
 
         let outcome = self
             .session
-            .apply_action(action, self.anchor_seconds(from))
+            .apply_actions(actions, self.anchor_seconds(from))
             .map_err(edit_rpc)?;
 
+        // A single action keeps the media-frame reanchor policy. A batch has
+        // no one edge to follow, so it lands on its last explicit playhead or
+        // clamps the cursor into the new length.
+        let single = (actions.len() == 1).then(|| &actions[0]);
         let mut landed = None;
         if let Some(frame) = outcome.playhead {
             let at = self.frame_seconds(frame);
             self.session.set_playhead(secs_f64(&at));
             landed = Some(self.session.project().playhead);
-        } else if outcome.changed && playhead::reanchors(action) {
+        } else if outcome.changed && single.is_some_and(playhead::reanchors) {
             let pos = playhead::reanchor(self.session.project(), current, track, anchor);
             self.session.set_playhead(pos);
             if self.session.project().playhead != before {
@@ -485,9 +491,9 @@ mod tests {
         let error = handler
             .apply(
                 0,
-                &Action::TrackAdd {
+                &[Action::TrackAdd {
                     kind: nle_core::TrackKind::Audio,
-                },
+                }],
                 None,
             )
             .expect_err("the save must fail");
@@ -497,9 +503,9 @@ mod tests {
         let error = handler
             .apply(
                 1,
-                &Action::TrackAdd {
+                &[Action::TrackAdd {
                     kind: nle_core::TrackKind::Audio,
-                },
+                }],
                 None,
             )
             .expect_err("poisoned");

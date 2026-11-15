@@ -20,7 +20,7 @@ use std::path::Path;
 use crate::action::{self, Action, Outcome, Register};
 use crate::edit::{self, Actor, Batch, EditError, Histories, History, UndoOutcome};
 use crate::project::{Project, ProjectError, VideoSettings};
-use crate::time::Seconds;
+use crate::time::{Seconds, frame_of};
 
 /// A project plus one undo stack per sequence. Undo acts on the active
 /// sequence only, so a switch can never replay a change recorded against a
@@ -182,6 +182,81 @@ impl Document {
         history.apply(&mut self.project, batch, playhead)
     }
 
+    /// Run several catalog actions as one undo step. The project, every
+    /// history stack and the register are snapshotted first: a failure in any
+    /// action restores all three, so a refused batch leaves no trace. A
+    /// one-action batch is the normal [`Document::edit`] path.
+    pub fn edit_actions(
+        &mut self,
+        actions: &[Action],
+        from: f64,
+        register: &mut Option<Register>,
+    ) -> Result<Outcome, EditError> {
+        if actions.is_empty() {
+            return Err(EditError::EmptyBatch);
+        }
+        if actions.len() == 1 {
+            return self.edit(&actions[0], from, register);
+        }
+        if actions
+            .iter()
+            .any(|action| matches!(action, Action::Undo | Action::Redo))
+        {
+            return Err(EditError::BatchUndoRedo);
+        }
+
+        let project = self.project.clone();
+        let histories = self.histories.clone();
+        let saved_register = register.clone();
+        let depth = self.depth();
+        let mut descs = Vec::with_capacity(actions.len());
+        let mut changed = false;
+        let mut playhead = None;
+        for action in actions {
+            match self.edit(action, from, register) {
+                Ok(outcome) => {
+                    changed |= outcome.changed;
+                    if let Some(frame) = outcome.playhead {
+                        playhead = Some(frame);
+                    }
+                    descs.push(outcome.desc);
+                }
+                Err(e) => {
+                    self.project = project;
+                    self.histories = histories;
+                    *register = saved_register;
+                    return Err(e);
+                }
+            }
+        }
+        let added = self.depth().saturating_sub(depth);
+        if added > 1 {
+            let desc = format!("batch: {}", descs.join(" · "));
+            let anchor = frame_of(self.project.fps.as_ref(), from);
+            let active = self.project.active_id();
+            if let Err(e) = self
+                .histories
+                .get_mut(active)
+                .group_newest(added, desc.clone(), anchor)
+            {
+                self.project = project;
+                self.histories = histories;
+                *register = saved_register;
+                return Err(e);
+            }
+            return Ok(Outcome {
+                desc,
+                changed,
+                playhead,
+            });
+        }
+        Ok(Outcome {
+            desc: descs.join(" · "),
+            changed,
+            playhead,
+        })
+    }
+
     pub fn undo(&mut self) -> Result<UndoOutcome, EditError> {
         let active = self.project.active_id();
         let history = self.histories.get_mut(active);
@@ -301,6 +376,15 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    fn without_revision(p: &Project) -> Project {
+        let mut p = p.clone();
+        p.revision = 0;
+        for sequence in &mut p.sequences {
+            sequence.manual_edits = 0;
+        }
+        p
     }
 
     fn document() -> Document {
@@ -511,6 +595,63 @@ mod tests {
         assert_eq!(reloaded.depth(), 1);
         reloaded.undo().unwrap();
         assert_eq!(reloaded.depth(), 0);
+    }
+
+    #[test]
+    fn a_batch_is_one_undo_step_and_rolls_back_on_failure() {
+        let mut doc = document();
+        let before = doc.project().clone();
+        let before_revision = doc.revision();
+        doc.edit_actions(
+            &[
+                Action::Split { track: 0, at: 1.0 },
+                Action::Split { track: 0, at: 1.5 },
+            ],
+            0.0,
+            &mut None,
+        )
+        .expect("batch");
+        assert_eq!(doc.depth(), 1, "the batch is one undo entry");
+        assert_eq!(doc.timeline.video_track().unwrap().segments.len(), 3);
+        assert!(doc.revision() > before_revision);
+
+        doc.undo().unwrap();
+        assert_eq!(without_revision(doc.project()), without_revision(&before));
+
+        doc.redo().unwrap();
+        assert_eq!(doc.timeline.video_track().unwrap().segments.len(), 3);
+
+        let revision = doc.revision();
+        let depth = doc.depth();
+        let failed = doc.edit_actions(
+            &[
+                Action::Split { track: 0, at: 1.0 },
+                Action::Split { track: 0, at: 99.0 },
+            ],
+            0.0,
+            &mut None,
+        );
+        assert!(failed.is_err(), "the second action must fail");
+        assert_eq!(doc.revision(), revision, "a failed batch does not bump");
+        assert_eq!(doc.depth(), depth, "a failed batch records nothing");
+        assert_eq!(
+            doc.timeline.video_track().unwrap().segments.len(),
+            3,
+            "a failed batch restores the first action"
+        );
+
+        assert!(matches!(
+            doc.edit_actions(&[], 0.0, &mut None),
+            Err(EditError::EmptyBatch)
+        ));
+        assert!(matches!(
+            doc.edit_actions(
+                &[Action::Undo, Action::Split { track: 0, at: 1.0 }],
+                0.0,
+                &mut None
+            ),
+            Err(EditError::BatchUndoRedo)
+        ));
     }
 
     #[test]

@@ -13,7 +13,8 @@ The media pool is shared; `fps`, `video`, `timeline` and `playhead` belong to a
 - `Document` owns `Histories` keyed by sequence id and routes every edit,
   asset change, undo and redo through `project.active_id()`. Switching
   sequences switches undo; never share one stack across timelines.
-- History sidecars are v17 (`stacks` keyed by id). Pool edits are recorded in
+- History sidecars are v18 (`stacks` keyed by id, plus grouped changes). Pool
+  edits are recorded in
   the sequence active at the time; undoing one still validates against every
   sequence, so an asset used elsewhere refuses loudly.
 - `Project::select_sequence` is model-only. Use `Document::select_sequence` in

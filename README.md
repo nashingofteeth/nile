@@ -437,7 +437,7 @@ then switch to it:
 {"jsonrpc":"2.0","id":2,"method":"media.add","params":{"base_revision":4,"paths":["footage/take2.mp4"]}}
 {"jsonrpc":"2.0","id":3,"method":"sequence.add","params":{"base_revision":5,"name":"Vertical","fps":"30/1","video":{"width":1080,"height":1920}}}
 {"jsonrpc":"2.0","id":4,"method":"sequence.use","params":{"id":2}}
-{"jsonrpc":"2.0","id":5,"method":"action.apply","params":{"base_revision":6,"action":{"action":"split","track":0,"at":1.0},"from":"1/2"}}
+{"jsonrpc":"2.0","id":5,"method":"action.apply","params":{"base_revision":6,"actions":[{"action":"split","track":0,"at":1.0}],"from":"1/2"}}
 ```
 
 The wire is pre-1.0 and may change. It is a single-writer interface: close the
@@ -493,7 +493,7 @@ Every timeline edit is one `Action` in `nle-core`, executed by one runner:
 | TUI keys | frequent actions | `s`, `dd`, `p`, `e`/`E`, `u` |
 | TUI `:` line | every action | `:delete --at 3 --ripple` |
 | CLI | every action | `nile delete --at 3 --ripple` |
-| Protocol server | agents and scripts | `action.apply` with `{"action":"split",…}` |
+| Protocol server | agents and scripts | `action.apply` with `{"actions":[{"action":"split",…}]}` |
 
 Edits made in any front-end share undo history, the playhead, and the yank
 register. Commands that need processes (`:import`, `:export`, `:detect`,
