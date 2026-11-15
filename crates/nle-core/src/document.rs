@@ -208,7 +208,9 @@ impl Document {
         let project = self.project.clone();
         let histories = self.histories.clone();
         let saved_register = register.clone();
+        let active = self.project.active_id();
         let depth = self.depth();
+        self.histories.get_mut(active).begin_batch();
         let mut descs = Vec::with_capacity(actions.len());
         let mut changed = false;
         let mut playhead = None;
@@ -233,7 +235,6 @@ impl Document {
         if added > 1 {
             let desc = format!("batch: {}", descs.join(" · "));
             let anchor = frame_of(self.project.fps.as_ref(), from);
-            let active = self.project.active_id();
             if let Err(e) = self
                 .histories
                 .get_mut(active)
@@ -244,12 +245,14 @@ impl Document {
                 *register = saved_register;
                 return Err(e);
             }
+            self.histories.get_mut(active).end_batch();
             return Ok(Outcome {
                 desc,
                 changed,
                 playhead,
             });
         }
+        self.histories.get_mut(active).end_batch();
         Ok(Outcome {
             desc: descs.join(" · "),
             changed,
@@ -652,6 +655,52 @@ mod tests {
             ),
             Err(EditError::BatchUndoRedo)
         ));
+    }
+
+    #[test]
+    fn a_batch_is_one_step_even_at_the_history_cap() {
+        for start in [crate::edit::MAX_HISTORY - 1, crate::edit::MAX_HISTORY] {
+            let mut doc = document();
+            let active = doc.project.active_id();
+            for i in 0..start {
+                doc.histories.get_mut(active).add_asset(
+                    &mut doc.project,
+                    format!("/media/{i}.mp4").into(),
+                    probe("2"),
+                    0,
+                );
+            }
+            assert_eq!(doc.depth(), start);
+
+            let before = doc.project().clone();
+            doc.edit_actions(
+                &[
+                    Action::Split { track: 0, at: 1.0 },
+                    Action::Split { track: 0, at: 1.5 },
+                ],
+                0.0,
+                &mut None,
+            )
+            .expect("batch");
+            assert_eq!(
+                doc.depth(),
+                crate::edit::MAX_HISTORY,
+                "the cap still holds after grouping"
+            );
+
+            let undone = doc.undo().unwrap();
+            assert!(
+                undone.desc.starts_with("batch:"),
+                "the batch survived the cap: {}",
+                undone.desc
+            );
+            assert_eq!(
+                doc.timeline.video_track().unwrap().segments.len(),
+                1,
+                "one undo reversed both actions at start {start}"
+            );
+            assert_eq!(without_revision(doc.project()), without_revision(&before));
+        }
     }
 
     #[test]

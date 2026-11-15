@@ -830,7 +830,7 @@ fn unknown_method_and_bad_params_are_distinct() {
     let input = concat!(
         r#"{"jsonrpc":"2.0","id":2,"method":"timeline.rewind"}"#,
         "\n",
-        r#"{"jsonrpc":"2.0","id":3,"method":"action.apply","params":{"base_revision":"x","action":{"action":"undo"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"action.apply","params":{"base_revision":"x","actions":[{"action":"undo"}]}}"#,
         "\n"
     );
     let responses = responses(input, &mut fake);
