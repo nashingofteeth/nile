@@ -7,8 +7,8 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 ## Catalog
 
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
-`undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`. The internal
-`wire_catalog!` macro
+`undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`, `media.list`,
+`media.add`. The internal `wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a method to the invocation, then
 a sample to `all_calls()`; the `METHODS.len()` assertion fails until the sample
@@ -49,6 +49,17 @@ switch.
 Actions apply to the active sequence. A client that wants another timeline
 calls `sequence.use` first; there is deliberately no per-call sequence field,
 so one request has one unambiguous scope. Undo is the active sequence's stack.
+
+## Media
+
+`media.list` returns the shared pool summarized per asset: path, duration,
+picture size/fps, audio, and the clip ids that use it across every sequence.
+`media.add` takes `{base_revision, paths}` and probes every file before
+mutating, so one bad path leaves the pool untouched. New files are one undo
+entry (`action.apply`/`undo` sees it); already-pooled paths are returned
+without a change and do not bump the revision. Removal is the catalog action
+`AssetRm`, not a separate `media.*` method. Directories are not expanded here;
+the CLI/picker owns that.
 
 ## Time
 
