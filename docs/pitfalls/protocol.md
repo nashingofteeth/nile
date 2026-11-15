@@ -74,8 +74,10 @@ That is the no-parallel-DTO tradeoff. Normalizing it would change persisted
 
 ## Events
 
-`project.changed` and `playhead` are notifications: no id, no response. The
-server writes a successful response before its events; the client buffers
+`project.changed`, `playhead` and `sequence.changed` are notifications: no
+id, no response. `sequence.changed` carries the active id and the current
+revision (unchanged by a pure switch, bumped by `sequence.add`). The server
+writes a successful response before its events; the client buffers
 events seen before a response and `next_event()` reads those after it.
 Unknown or malformed notifications are skipped and counted
 (`Client::skipped()`); a malformed **response** is fatal. Current events are
@@ -102,8 +104,11 @@ handler queued.
 `nile serve --stdio` loads the project, its history sidecar, and the yank
 register, then serves one connection. It is a **single-writer** interface:
 close the TUI and other edits while it runs; foreign-change adoption is not
-implemented yet. Mutations go through one `apply`, which owns CAS, the edit,
-playhead conversion, saving, and events.
+implemented yet. Action mutations go through one `apply`, which owns CAS, the
+edit, playhead conversion, saving, and events. `sequence.use`/`sequence.add`
+are separate model paths, but they use the same writeability, revision and
+save/poison helpers. A failed save poisons every later write; reads reflect
+the in-memory model.
 
 The server shares the TUI's media-frame playhead anchor on the base video
 track: a media edit keeps the same source frame, falls back to the seam when

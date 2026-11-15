@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::Sandbox;
+use common::{P, Sandbox};
 use serde_json::{Value, json};
 
 fn active(project: &Value) -> &Value {
@@ -286,6 +286,35 @@ fn sequence_use_reports_the_adopted_playhead() {
     let event = serve.read();
     assert_eq!(event["method"], "playhead");
     assert_eq!(event["params"]["at"], "3/2");
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn a_failed_sequence_use_does_not_change_the_reported_active_sequence() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    sandbox.ok(&["sequence", "add", "Second"]);
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    // Make the project path unwritable: the switch cannot be persisted.
+    let path = sandbox.file(P);
+    std::fs::remove_file(&path).expect("remove the project");
+    std::fs::create_dir(&path).expect("replace it with a directory");
+
+    let failed = call(&mut serve, 2, "sequence.use", Some(json!({"id": 2})));
+    assert_eq!(failed["error"]["code"], -32603, "{failed}");
+
+    let list = call(&mut serve, 3, "sequence.list", None);
+    assert_eq!(
+        list["result"]["active"], 1,
+        "the failed switch was rolled back"
+    );
+    assert_eq!(list["result"]["revision"], revision);
+    assert_eq!(list["result"]["sequences"].as_array().unwrap().len(), 2);
 
     assert!(serve.finish().success(), "serve exits cleanly");
 }
