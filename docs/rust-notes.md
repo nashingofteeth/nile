@@ -33,3 +33,6 @@ list, read when the compiler or clippy pushes back.
   build warns "unused import" and `-D warnings` fails it.
 - Two glob imports (`super::*` and `super::super::*`) make a same-named helper
   ambiguous only at its use site; rename the fixture or import it explicitly.
+- A recursive enum variant (`Change::Group(Vec<Change>)`) is safe to add when
+  every `match` on the enum is exhaustive: the compiler named each missing
+  `desc`/`playhead`/`provenance`/`substitute` arm.
