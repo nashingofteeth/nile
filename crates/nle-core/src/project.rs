@@ -438,22 +438,39 @@ impl Project {
         self.media.iter().find(|a| a.path == path)
     }
 
-    /// Clip ids across all tracks that reference asset `id`.
-    pub fn asset_usage(&self, id: u32) -> Vec<u32> {
-        self.sequences
-            .iter()
-            .flat_map(|sequence| &sequence.timeline.tracks)
-            .flat_map(|t| t.segments.iter())
-            .filter_map(|s| match s {
-                Segment::Clip(c) if c.asset == id => Some(c.id),
-                // A transition owns its source spans, so it uses the asset
-                // too — otherwise `remove_asset` would drop it out from
-                // under the transition.
-                Segment::Transition(t) if t.a.asset() == Some(id) || t.b.asset() == Some(id) => {
-                    Some(t.id)
+    /// `(sequence id, segment id)` pairs for every clip or transition that
+    /// references asset `id`. Segment ids are only unique within a sequence,
+    /// so protocol clients need the qualifier.
+    pub fn asset_usage_scoped(&self, id: u32) -> Vec<(u32, u32)> {
+        let mut used = Vec::new();
+        for sequence in &self.sequences {
+            for track in &sequence.timeline.tracks {
+                for segment in &track.segments {
+                    match segment {
+                        Segment::Clip(c) if c.asset == id => used.push((sequence.id, c.id)),
+                        // A transition owns its source spans, so it uses the
+                        // asset too — otherwise `remove_asset` would drop it
+                        // out from under the transition.
+                        Segment::Transition(t)
+                            if t.a.asset() == Some(id) || t.b.asset() == Some(id) =>
+                        {
+                            used.push((sequence.id, t.id));
+                        }
+                        _ => {}
+                    }
                 }
-                _ => None,
-            })
+            }
+        }
+        used
+    }
+
+    /// Segment ids across every sequence that reference asset `id`. Flat
+    /// because the in-model consumers (`remove_asset`, the TUI) only need to
+    /// know whether anything uses it.
+    pub fn asset_usage(&self, id: u32) -> Vec<u32> {
+        self.asset_usage_scoped(id)
+            .into_iter()
+            .map(|(_, segment)| segment)
             .collect()
     }
 
@@ -1049,6 +1066,7 @@ mod tests {
                 b: TransitionSource::Black,
             }));
         assert_eq!(p.asset_usage(spare), vec![99]);
+        assert_eq!(p.asset_usage_scoped(spare), vec![(1, 99)]);
         assert!(
             matches!(p.remove_asset(spare), Err(ProjectError::AssetInUse(id, ref v)) if id == spare && v == &vec![99])
         );

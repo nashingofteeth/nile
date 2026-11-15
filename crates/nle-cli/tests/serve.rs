@@ -34,7 +34,7 @@ fn protocol_server_round_trip() {
     let mut serve = sandbox.serve();
 
     let hello = call(&mut serve, 1, "hello", None);
-    assert_eq!(hello["result"]["protocol"], 2);
+    assert_eq!(hello["result"]["protocol"], 3);
     assert_eq!(hello["result"]["project_version"], 11);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
@@ -390,11 +390,8 @@ fn media_list_and_add_round_trip() {
     assert_eq!(list["result"]["revision"], revision);
     assert_eq!(list["result"]["assets"].as_array().unwrap().len(), 3);
     assert_eq!(
-        list["result"]["assets"][0]["used_by"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        list["result"]["assets"][0]["used_by"],
+        json!([{"sequence": 1, "segment": 1}])
     );
 
     let added = call(
@@ -446,6 +443,51 @@ fn media_list_and_add_round_trip() {
 }
 
 #[test]
+fn media_usage_is_scoped_per_sequence() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    // Yank red from sequence 1 and paste it into sequence 2: the same asset
+    // id, the same clip id, different sequences.
+    sandbox.ok(&["yank", "--clip", "1"]);
+    sandbox.ok(&["sequence", "add", "Second"]);
+    sandbox.ok(&["sequence", "use", "2"]);
+    sandbox.ok(&["paste", "--at", "0"]);
+    sandbox.ok(&["sequence", "use", "1"]);
+    let mut serve = sandbox.serve();
+
+    let list = call(&mut serve, 1, "media.list", None);
+    let red = list["result"]["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| {
+            asset["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("red.mp4"))
+        })
+        .expect("red in the pool");
+    let mut usage: Vec<(u64, u64)> = red["used_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| {
+            (
+                u["sequence"].as_u64().expect("sequence"),
+                u["segment"].as_u64().expect("segment"),
+            )
+        })
+        .collect();
+    usage.sort();
+    assert_eq!(
+        usage,
+        vec![(1, 1), (2, 1)],
+        "same clip id, different sequences"
+    );
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
 fn media_add_is_atomic_and_refuses_bad_input() {
     let sandbox = Sandbox::new();
     sandbox.base();
@@ -477,13 +519,30 @@ fn media_add_is_atomic_and_refuses_bad_input() {
         })),
     );
     assert_eq!(partial["error"]["code"], -32602, "{partial}");
-    let list = call(&mut serve, 4, "media.list", None);
+
+    // Exists, but fails to probe: the probe loop must also run before any
+    // mutation.
+    let probe_fail = call(
+        &mut serve,
+        4,
+        "media.add",
+        Some(json!({
+            "base_revision": revision,
+            "paths": [
+                sandbox.file("extra.mp4").display().to_string(),
+                sandbox.file("notmedia.txt").display().to_string()
+            ]
+        })),
+    );
+    assert_eq!(probe_fail["error"]["code"], -32602, "{probe_fail}");
+
+    let list = call(&mut serve, 5, "media.list", None);
     assert_eq!(list["result"]["assets"].as_array().unwrap().len(), 3);
     assert_eq!(list["result"]["revision"], revision);
 
     let stale = call(
         &mut serve,
-        5,
+        6,
         "media.add",
         Some(json!({
             "base_revision": revision.saturating_sub(1),

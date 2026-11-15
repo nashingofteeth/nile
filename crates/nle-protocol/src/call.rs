@@ -18,10 +18,10 @@ use serde_json::Value;
 use crate::rpc::RpcError;
 
 /// The wire schema version, independent of the `nile.json` project version
-/// and the crate version. Bump it for a breaking method, field, or unit change
-/// or a new capability surface clients may gate on; `hello` reports it, and
-/// `hello.methods` remains the fine-grained list.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// and the crate version. Bump it for a breaking method, field, or unit
+/// change. Additive methods and events stay on the current version;
+/// `hello.methods` is the fine-grained capability list.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 wire_catalog! {
     /// A typed request. `base_revision` is the compare-and-swap token: the
@@ -338,8 +338,16 @@ pub struct SequenceReply {
     pub sequence: SequenceSummary,
 }
 
+/// One place an asset is used. Segment ids are only unique within a sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaUsage {
+    pub sequence: u32,
+    /// A clip or transition id, as stored in that sequence.
+    pub segment: u32,
+}
+
 /// One pooled asset as the protocol reports it. `used_by` spans every
-/// sequence, matching `Project::asset_usage`.
+/// sequence and includes both clips and transition sources.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaAsset {
     pub id: u32,
@@ -361,10 +369,10 @@ pub struct MediaAsset {
     )]
     pub fps: Option<Seconds>,
     pub audio: bool,
-    pub used_by: Vec<u32>,
+    pub used_by: Vec<MediaUsage>,
 }
 
-/// The media pool after `media.list` or `media.add`.
+/// The pool after `media.list`, or the affected assets after `media.add`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaList {
     pub revision: u64,
