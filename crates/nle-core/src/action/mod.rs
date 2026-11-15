@@ -17,7 +17,7 @@ use crate::edit::{self, EditError, EditOp, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
 use crate::time::{Seconds, frame_of, grid_time, secs_f64};
-use crate::timeline::{Effect, Segment, Track, TrackKind, TransitionKind};
+use crate::timeline::{Effect, Gap, Segment, Track, TrackKind, TransitionKind};
 
 /// Default crossfade length, in project frames.
 pub const DEFAULT_TRANSITION_FRAMES: i64 = 12;
@@ -242,6 +242,103 @@ impl Action {
 /// How many slots the catalog has — the coverage tests assert exactly
 /// this many are reachable from each spelling.
 pub const SLOTS: usize = 23;
+
+/// One representative action per [`Action::slot`], in slot order. Shared by
+/// the CLI/TUI parity tests and the protocol's wire walk, so a new variant
+/// cannot be covered in one place and missed in the other.
+#[doc(hidden)]
+pub fn sample_actions() -> Vec<Action> {
+    let gap = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    vec![
+        Action::TrimIn {
+            track: 0,
+            at: 1.0,
+            ripple: false,
+        },
+        Action::TrimOut {
+            track: 0,
+            at: 1.0,
+            ripple: true,
+        },
+        Action::Split { track: 0, at: 1.5 },
+        Action::InsertGap {
+            track: 0,
+            at: 2.0,
+            len: GapLen::Frames(12),
+        },
+        Action::Delete {
+            track: 0,
+            target: Target::At(1.0),
+            ripple: false,
+        },
+        Action::Yank {
+            track: 0,
+            target: Target::Clip(1),
+        },
+        Action::Paste {
+            track: 0,
+            at: 3.0,
+            ripple: false,
+            segment: Some(gap),
+        },
+        Action::SetSpeed {
+            track: 0,
+            clip: 1,
+            rate: Seconds::new(30000, 1001),
+        },
+        Action::Extend {
+            track: 0,
+            target: Target::Segment(1),
+            edge: Edge::Out,
+            to: 4.0,
+            ripple: false,
+        },
+        Action::PurgeStumps { track: None },
+        Action::TrackAdd {
+            kind: TrackKind::Video,
+        },
+        Action::TrackMute { track: 0 },
+        Action::TrackRm { track: 1 },
+        Action::AssetRm { id: 1 },
+        Action::Undo,
+        Action::Redo,
+        Action::Transition {
+            track: 0,
+            at: 2.0,
+            kind: TransitionKind::Dissolve,
+            len: TransitionLen::Frames(12),
+        },
+        Action::AddEffect {
+            track: 0,
+            clip: 1,
+            effect: Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            },
+            index: None,
+        },
+        Action::RemoveEffect {
+            track: 0,
+            clip: 1,
+            index: Some(0),
+        },
+        Action::ClearEffects { track: 0, clip: 1 },
+        Action::DeleteRange {
+            track: 0,
+            start: 0,
+            end: 1,
+        },
+        Action::YankRange {
+            track: 0,
+            start: 0,
+            end: 1,
+        },
+        Action::PasteRange { track: 0, at: 3.0 },
+    ]
+}
 
 /// What running an action produced. `changed` tells the caller whether
 /// the project needs persisting (a yank only writes the register).

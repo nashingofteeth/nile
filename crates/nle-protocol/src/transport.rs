@@ -14,11 +14,12 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 
 use nle_core::{Action, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
-use crate::call::{Call, Hello, Outcome, Reply, SequenceList, SequenceReply};
+use crate::call::{Call, Hello, MediaList, Outcome, Reply, SequenceList, SequenceReply};
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
 use crate::rpc::{Id, Notification, Request, Response, RpcError};
@@ -283,6 +284,27 @@ impl<R: BufRead, W: Write> Client<R, W> {
             video,
         })? {
             Reply::Sequence(reply) => Ok(reply),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn media_list(&mut self) -> Result<MediaList, ClientError> {
+        match self.call(Call::MediaList)? {
+            Reply::Media(media) => Ok(media),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn add_media(
+        &mut self,
+        base_revision: u64,
+        paths: Vec<PathBuf>,
+    ) -> Result<MediaList, ClientError> {
+        match self.call(Call::MediaAdd {
+            base_revision,
+            paths,
+        })? {
+            Reply::Media(media) => Ok(media),
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }
