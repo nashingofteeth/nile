@@ -4,9 +4,10 @@
 //! plus the queued events and the save-failure poison. Every action mutation
 //! goes through [`ServeHandler::apply`], so compare-and-swap, the edit,
 //! playhead conversion, persistence, and event emission cannot drift between
-//! `action.apply` and the dedicated `undo`/`redo` aliases. Sequence writes are
-//! separate model paths, but they use the same writeability, revision and
-//! save/poison helpers; a failed save still poisons every later write.
+//! `action.apply` and the dedicated `undo`/`redo` aliases. Sequence and media
+//! writes are separate model paths, but they use the same writeability,
+//! revision and save/poison helpers; a failed save still poisons every later
+//! write.
 //!
 //! stdout is the protocol channel. Nothing here may `say!` or print; errors
 //! leave through the JSON-RPC response, and `main` sends command failures to
@@ -24,8 +25,8 @@ use nle_core::{
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
-    Call, Event, Handler, Hello, MediaAsset, MediaList, Outcome as WireOutcome, Reply, RpcError,
-    SequenceList, SequenceReply, SequenceSummary, Server,
+    Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage, Outcome as WireOutcome, Reply,
+    RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
 };
 
 use crate::session::{Session, playhead};
@@ -417,7 +418,11 @@ fn media_asset(project: &Project, asset: &Asset) -> MediaAsset {
         height,
         fps: asset.fps(),
         audio: asset.probe.has_audio(),
-        used_by: project.asset_usage(asset.id),
+        used_by: project
+            .asset_usage_scoped(asset.id)
+            .into_iter()
+            .map(|(sequence, segment)| MediaUsage { sequence, segment })
+            .collect(),
     }
 }
 

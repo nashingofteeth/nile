@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use nle_core::{Action, Project, Seconds, TransitionKind, TransitionLen};
 use nle_protocol::{
     Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Id,
-    METHOD_NOT_FOUND, MediaAsset, MediaList, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION,
-    REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError, SequenceList,
-    SequenceReply, SequenceSummary, Server,
+    METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage, Notification, Outcome, PARSE_ERROR,
+    PROTOCOL_VERSION, REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError,
+    SequenceList, SequenceReply, SequenceSummary, Server,
 };
 use serde_json::{Value, json};
 
@@ -192,7 +192,10 @@ fn media(id: u32, path: &str) -> MediaAsset {
         height: Some(240),
         fps: Some(Seconds::from_integer(30)),
         audio: true,
-        used_by: vec![1],
+        used_by: vec![MediaUsage {
+            sequence: 1,
+            segment: 1,
+        }],
     }
 }
 
