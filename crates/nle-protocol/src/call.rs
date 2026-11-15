@@ -264,7 +264,7 @@ pub struct SequenceSummary {
         skip_serializing_if = "Option::is_none"
     )]
     pub fps: Option<Seconds>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoSettings>,
     #[serde(with = "nle_core::time::rational_ser")]
     pub playhead: Seconds,
