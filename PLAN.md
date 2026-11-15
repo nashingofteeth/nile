@@ -49,7 +49,7 @@ nile (process)                       mpv window (child)
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v17 |
+| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v18 (grouped batches) |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
@@ -478,9 +478,9 @@ shared by the TUI and agents — with no clipgen code present.
 - `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
   land now; derived sequences come later but must be traceable from day one.
 - Export takes a sequence; proxy/export caches key per sequence.
-- Landed: v11 projects with shared media, v17 per-sequence histories,
-  `nile sequence ls|add|use`, `:sequence`, and `--sequence` on
-  `show`/`edl`/`export` (it reads another timeline without switching). The
+- Landed: v11 projects with shared media, v18 per-sequence histories with
+  grouped batches, `nile sequence ls|add|use`, `:sequence`, and `--sequence`
+  on `show`/`edl`/`export` (it reads another timeline without switching). The
   protocol resolves the sequence in step 2 (`sequence.*`).
 - **Gate (met):** demo + EDL/OTIO builds `sequences[0]`; two sequences with
   different sizes export; the TUI switches and undo is isolated.
@@ -491,6 +491,10 @@ shared by the TUI and agents — with no clipgen code present.
   the action catalog plus reads (`project.show`, `timeline.edl`), jobs,
   sequences and media: `action.preview`, `action.apply` (batched),
   `undo/redo`, `sequence.*`, `media.*`, `job.*`.
+- Landed so far: `sequence.*`, `media.*`, typed client helpers, the
+  golden/action-slot contract tests, and batched `action.apply`
+  (`Change::Group`, history v18). Remaining: preview diff/warnings, the
+  socket/single-writer lock, and TUI attach.
 - `action.preview` applies a batch to a cloned `Document` and returns the
   diff + warnings; `action.apply` is atomic and returns the new revision.
   A mismatched `base_revision` is a typed conflict with the diff.

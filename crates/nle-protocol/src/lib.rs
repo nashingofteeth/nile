@@ -7,7 +7,7 @@
 //! on direct method calls for now.
 //!
 //! ```text
-//! {"jsonrpc":"2.0","id":1,"method":"action.apply","params":{"base_revision":7,"action":{"action":"split","track":0,"at":1.5}}}
+//! {"jsonrpc":"2.0","id":1,"method":"action.apply","params":{"base_revision":7,"actions":[{"action":"split","track":0,"at":1.5}]}}
 //! {"jsonrpc":"2.0","id":1,"result":{"revision":8,"desc":"split clip #1 at f45","changed":true,"playhead":"3/2"}}
 //! ```
 //!
@@ -19,9 +19,9 @@
 //!   line with both (or neither), so the transport never inspects a
 //!   half-valid envelope.
 //!
-//! The action catalog is the wire DTO: one `action.apply` is one catalog
-//! action and one undo step. All model positions (`playhead`, `from`, event
-//! `at`) are rational seconds.
+//! The action catalog is the wire DTO: one `action.apply` carries one or more
+//! catalog actions, applied atomically as one undo step. All model positions
+//! (`playhead`, `from`, event `at`) are rational seconds.
 //!
 //! [`Document`]: nle_core::Document
 

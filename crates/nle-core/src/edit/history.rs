@@ -69,6 +69,9 @@ pub struct History {
     /// Session-only actor applied to new entries; the sidecar stores the
     /// actor on each change, not a current value.
     actor: Actor,
+    /// Session-only: a batch keeps its changes contiguous even at the cap, so
+    /// `depth()` counts what the batch produced. `end_batch` trims once.
+    defer_cap: bool,
 }
 
 impl History {
@@ -279,14 +282,34 @@ impl History {
         Provenance::now(&self.actor)
     }
 
-    /// Push onto `done`, clear redo, and enforce the depth cap.
+    /// Push onto `done`, clear redo, and enforce the depth cap unless a
+    /// batch is open.
     fn push_change(&mut self, change: Change) {
         self.done.push(change);
         self.undone.clear();
+        if !self.defer_cap {
+            self.trim();
+        }
+    }
+
+    fn trim(&mut self) {
         if self.done.len() > MAX_HISTORY {
             let excess = self.done.len() - MAX_HISTORY;
             self.done.drain(0..excess);
         }
+    }
+
+    /// Keep every change a batch records until it can be grouped, even when
+    /// the stack is already at `MAX_HISTORY`.
+    pub(crate) fn begin_batch(&mut self) {
+        self.defer_cap = true;
+    }
+
+    /// Close a batch and re-apply the depth cap. The newest group survives;
+    /// only older entries are discarded.
+    pub(crate) fn end_batch(&mut self) {
+        self.defer_cap = false;
+        self.trim();
     }
 
     pub fn undo(&mut self, project: &mut Project) -> Result<UndoOutcome, EditError> {
@@ -390,6 +413,7 @@ impl History {
             done,
             undone,
             actor: Actor::Human,
+            defer_cap: false,
         }
     }
 }
@@ -656,9 +680,9 @@ pub struct TracksChange {
     pub provenance: Provenance,
 }
 
-/// Several changes applied by one call, so one undo step restores the whole
-/// batch. Undo runs the children in reverse, redo in order; each child still
-/// verifies its own recorded side.
+/// A media-pool edit: the whole pool before and after (probes included).
+/// Undo verifies the pool matches the recorded side, so an out-of-band change
+/// refuses loudly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssetChange {
     pub before: Vec<Asset>,
@@ -668,9 +692,9 @@ pub struct AssetChange {
     pub provenance: Provenance,
 }
 
-/// A batch of changes recorded as one undo step. The children are replayed
-/// in the order they happened (redo) or reversed (undo).
-
+/// Several changes applied by one call, so one undo step restores the whole
+/// batch. Undo runs the children in reverse, redo in order; each child still
+/// verifies its own recorded side.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupChange {
     pub changes: Vec<Change>,
