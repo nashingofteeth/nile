@@ -13,17 +13,19 @@
 //! stderr.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use nle_core::edit::Actor;
 use nle_core::{
-    Action, EditError, Outcome as ActionOutcome, Seconds, TrackKind, frames_to_seconds, secs_f64,
+    Action, Asset, EditError, Outcome as ActionOutcome, Project, Seconds, TrackKind, frame_of,
+    frames_to_seconds, secs_f64,
 };
+use nle_ffmpeg::probe;
 use nle_protocol::{
-    Call, Event, Handler, Hello, Outcome as WireOutcome, Reply, RpcError, SequenceList,
-    SequenceReply, SequenceSummary, Server,
+    Call, Event, Handler, Hello, MediaAsset, MediaList, Outcome as WireOutcome, Reply, RpcError,
+    SequenceList, SequenceReply, SequenceSummary, Server,
 };
 
 use crate::session::{Session, playhead};
@@ -79,6 +81,11 @@ impl Handler for ServeHandler {
                 fps,
                 video,
             } => self.sequence_add(*base_revision, name, *fps, video.clone()),
+            Call::MediaList => Ok(Reply::Media(self.media_list())),
+            Call::MediaAdd {
+                base_revision,
+                paths,
+            } => self.media_add(*base_revision, paths),
         }
     }
 
@@ -233,6 +240,70 @@ impl ServeHandler {
         }))
     }
 
+    fn media_list(&self) -> MediaList {
+        let project = self.session.project();
+        MediaList {
+            revision: project.revision,
+            assets: project
+                .media
+                .iter()
+                .map(|asset| media_asset(project, asset))
+                .collect(),
+        }
+    }
+
+    /// Probe and pool files as one undo step. Everything is validated and
+    /// probed before the first mutation, so one bad path leaves the pool
+    /// untouched. Already-pooled paths are returned without another add.
+    fn media_add(&mut self, base_revision: u64, paths: &[PathBuf]) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
+        self.check_revision(base_revision)?;
+        if paths.is_empty() {
+            return Err(RpcError::invalid_params(
+                "media.add needs at least one path",
+            ));
+        }
+        let mut canonical: Vec<PathBuf> = Vec::new();
+        for raw in paths {
+            let expanded = crate::cmd::import::expand_tilde(raw);
+            let path = std::fs::canonicalize(&expanded)
+                .map_err(|e| RpcError::invalid_params(format!("{}: {e}", expanded.display())))?;
+            if !canonical.contains(&path) {
+                canonical.push(path);
+            }
+        }
+        let mut fresh = Vec::new();
+        for path in &canonical {
+            if self.session.project().asset_by_path(path).is_some() {
+                continue;
+            }
+            let report = probe(path)
+                .map_err(|e| RpcError::invalid_params(format!("{}: {e}", path.display())))?;
+            fresh.push((path.clone(), report));
+        }
+        let playhead = frame_of(
+            self.session.project().fps.as_ref(),
+            secs_f64(&self.session.project().playhead),
+        );
+        let ids = self.session.add_assets(fresh, playhead);
+        if !ids.is_empty() {
+            self.save_or_poison(true, false)?;
+            self.events.push(Event::ProjectChanged {
+                revision: self.session.revision(),
+            });
+        }
+        let project = self.session.project();
+        let assets = canonical
+            .iter()
+            .filter_map(|path| project.asset_by_path(path))
+            .map(|asset| media_asset(project, asset))
+            .collect();
+        Ok(Reply::Media(MediaList {
+            revision: project.revision,
+            assets,
+        }))
+    }
+
     fn edl(&self, track: Option<usize>) -> Result<Reply, RpcError> {
         let text = match track {
             Some(ti) => {
@@ -330,6 +401,23 @@ impl ServeHandler {
             changed: outcome.changed,
             playhead,
         }))
+    }
+}
+
+fn media_asset(project: &Project, asset: &Asset) -> MediaAsset {
+    let (width, height) = match asset.video_size() {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
+    MediaAsset {
+        id: asset.id,
+        path: asset.path.clone(),
+        duration: asset.duration(),
+        width,
+        height,
+        fps: asset.fps(),
+        audio: asset.probe.has_audio(),
+        used_by: project.asset_usage(asset.id),
     }
 }
 

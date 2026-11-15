@@ -3,13 +3,14 @@
 //! broken envelope or a typed call that cannot survive encoding fails here.
 
 use std::io::Cursor;
+use std::path::PathBuf;
 
 use nle_core::{Action, Project, Seconds, TransitionKind, TransitionLen};
 use nle_protocol::{
     Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Id,
-    METHOD_NOT_FOUND, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, REVISION_CONFLICT,
-    Reply, Request, Response, RevisionConflict, RpcError, SequenceList, SequenceReply,
-    SequenceSummary, Server,
+    METHOD_NOT_FOUND, MediaAsset, MediaList, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION,
+    REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError, SequenceList,
+    SequenceReply, SequenceSummary, Server,
 };
 use serde_json::{Value, json};
 
@@ -127,6 +128,25 @@ impl Handler for Fake {
                     sequence: summary(2, name),
                 }))
             }
+            Call::MediaList => Ok(Reply::Media(MediaList {
+                revision: self.revision,
+                assets: vec![media(1, "/media/red.mp4")],
+            })),
+            Call::MediaAdd {
+                base_revision,
+                paths,
+            } => {
+                self.check(*base_revision)?;
+                self.revision += 1;
+                Ok(Reply::Media(MediaList {
+                    revision: self.revision,
+                    assets: paths
+                        .iter()
+                        .enumerate()
+                        .map(|(i, path)| media(i as u32 + 2, &path.display().to_string()))
+                        .collect(),
+                }))
+            }
         }
     }
 
@@ -161,6 +181,19 @@ fn responses(input: &str, handler: &mut impl Handler) -> Vec<Response> {
         .lines()
         .map(|line| serde_json::from_str(line).expect("a response envelope"))
         .collect()
+}
+
+fn media(id: u32, path: &str) -> MediaAsset {
+    MediaAsset {
+        id,
+        path: PathBuf::from(path),
+        duration: Some(Seconds::from_integer(6)),
+        width: Some(320),
+        height: Some(240),
+        fps: Some(Seconds::from_integer(30)),
+        audio: true,
+        used_by: vec![1],
+    }
 }
 
 fn summary(id: u32, name: &str) -> SequenceSummary {
@@ -199,6 +232,11 @@ fn all_calls() -> Vec<Call> {
             name: "Vertical".into(),
             fps: Some(Seconds::from_integer(30)),
             video: None,
+        },
+        Call::MediaList,
+        Call::MediaAdd {
+            base_revision: 0,
+            paths: vec![PathBuf::from("/media/red.mp4")],
         },
     ]
 }
@@ -443,6 +481,25 @@ fn typed_sequence_helpers_match_their_calls() {
     assert_eq!(added.revision, 8);
     assert_eq!(added.sequence.id, 2);
 
+    let (_, output) = exchange(&mut Fake::new(7), Call::MediaList);
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let list = client.media_list().expect("media list");
+    assert_eq!(list.assets[0].id, 1);
+
+    let (_, output) = exchange(
+        &mut Fake::new(7),
+        Call::MediaAdd {
+            base_revision: 7,
+            paths: vec![PathBuf::from("/media/extra.mp4")],
+        },
+    );
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let added = client
+        .add_media(7, vec![PathBuf::from("/media/extra.mp4")])
+        .expect("media add");
+    assert_eq!(added.revision, 8);
+    assert_eq!(added.assets[0].id, 2);
+
     let summary = SequenceSummary {
         video: None,
         fps: None,
@@ -451,6 +508,41 @@ fn typed_sequence_helpers_match_their_calls() {
     let value = serde_json::to_value(summary).expect("summary");
     assert!(value.get("video").is_none(), "{value}");
     assert!(value.get("fps").is_none(), "{value}");
+}
+
+#[test]
+fn golden_media_add_request() {
+    let call = Call::MediaAdd {
+        base_revision: 7,
+        paths: vec![PathBuf::from("/media/red.mp4")],
+    };
+    let request = Request::new(
+        Id::from(1u64),
+        call.method(),
+        call.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"media.add","params":{"base_revision":7,"paths":["/media/red.mp4"]}}"#
+    );
+}
+
+#[test]
+fn every_action_slot_walks_the_protocol() {
+    let actions = nle_core::action::sample_actions();
+    assert_eq!(actions.len(), nle_core::action::SLOTS);
+    for (slot, action) in actions.into_iter().enumerate() {
+        assert_eq!(action.slot(), slot, "samples follow Action::slot");
+        let call = Call::ActionApply {
+            base_revision: 0,
+            action,
+            from: None,
+        };
+        let params = call.params().expect("encode");
+        assert_eq!(Call::decode(call.method(), params).expect("decode"), call);
+        let (reply, _) = exchange(&mut Fake::new(0), call.clone());
+        assert!(matches!(reply, Ok(Reply::Outcome(_))), "slot {slot}");
+    }
 }
 
 #[test]

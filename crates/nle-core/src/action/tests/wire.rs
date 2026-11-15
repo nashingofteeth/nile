@@ -153,101 +153,6 @@ fn an_unknown_action_name_is_refused() {
     assert!(err.is_err(), "unknown actions must not deserialize");
 }
 
-/// One sample per [`Action::slot`], in slot order. A new catalog variant
-/// forces `SLOTS` up, and this list fails until the new shape is covered.
-fn all_actions() -> Vec<Action> {
-    let gap = Segment::Gap(Gap {
-        duration: Seconds::from_integer(1),
-    });
-    vec![
-        Action::TrimIn {
-            track: 0,
-            at: 1.0,
-            ripple: false,
-        },
-        Action::TrimOut {
-            track: 0,
-            at: 1.0,
-            ripple: true,
-        },
-        Action::Split { track: 0, at: 1.5 },
-        Action::InsertGap {
-            track: 0,
-            at: 2.0,
-            len: GapLen::Frames(12),
-        },
-        Action::Delete {
-            track: 0,
-            target: Target::At(1.0),
-            ripple: false,
-        },
-        Action::Yank {
-            track: 0,
-            target: Target::Clip(1),
-        },
-        Action::Paste {
-            track: 0,
-            at: 3.0,
-            ripple: false,
-            segment: Some(gap),
-        },
-        Action::SetSpeed {
-            track: 0,
-            clip: 1,
-            rate: Seconds::new(30000, 1001),
-        },
-        Action::Extend {
-            track: 0,
-            target: Target::Segment(1),
-            edge: Edge::Out,
-            to: 4.0,
-            ripple: false,
-        },
-        Action::PurgeStumps { track: None },
-        Action::TrackAdd {
-            kind: TrackKind::Video,
-        },
-        Action::TrackMute { track: 0 },
-        Action::TrackRm { track: 1 },
-        Action::AssetRm { id: 1 },
-        Action::Undo,
-        Action::Redo,
-        Action::Transition {
-            track: 0,
-            at: 2.0,
-            kind: TransitionKind::Dissolve,
-            len: TransitionLen::Frames(12),
-        },
-        Action::AddEffect {
-            track: 0,
-            clip: 1,
-            effect: Effect::Eq {
-                brightness: 0.0,
-                contrast: 1.0,
-                saturation: 1.0,
-            },
-            index: None,
-        },
-        Action::RemoveEffect {
-            track: 0,
-            clip: 1,
-            index: Some(0),
-        },
-        Action::ClearEffects { track: 0, clip: 1 },
-        Action::DeleteRange {
-            track: 0,
-            start: 0,
-            end: 1,
-        },
-        Action::YankRange {
-            track: 0,
-            start: 0,
-            end: 1,
-        },
-        Action::PasteRange { track: 0, at: 3.0 },
-    ]
-}
-
 #[test]
 fn unknown_action_fields_are_refused() {
     let typo = serde_json::json!({
@@ -265,7 +170,7 @@ fn unknown_action_fields_are_refused() {
 
 #[test]
 fn every_catalog_slot_has_a_wire_form() {
-    let actions = all_actions();
+    let actions = crate::action::sample_actions();
     assert_eq!(
         actions.len(),
         crate::action::SLOTS,

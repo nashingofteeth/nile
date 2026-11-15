@@ -377,6 +377,125 @@ fn protocol_undo_is_scoped_to_the_active_sequence() {
 }
 
 #[test]
+fn media_list_and_add_round_trip() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    std::fs::copy(sandbox.file("red.mp4"), sandbox.file("extra.mp4")).expect("copy media");
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    let list = call(&mut serve, 2, "media.list", None);
+    assert_eq!(list["result"]["revision"], revision);
+    assert_eq!(list["result"]["assets"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        list["result"]["assets"][0]["used_by"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let added = call(
+        &mut serve,
+        3,
+        "media.add",
+        Some(json!({
+            "base_revision": revision,
+            "paths": [sandbox.file("extra.mp4").display().to_string()]
+        })),
+    );
+    let after_add = added["result"]["revision"].as_u64().expect("revision");
+    assert_eq!(after_add, revision + 1);
+    let assets = added["result"]["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0]["id"], 4);
+    assert_eq!(assets[0]["audio"], true);
+    assert!(assets[0]["duration"].is_string(), "{}", assets[0]);
+    let event = serve.read();
+    assert_eq!(event["method"], "project.changed");
+
+    // The same path is not pooled twice and does not bump the revision.
+    let again = call(
+        &mut serve,
+        4,
+        "media.add",
+        Some(json!({
+            "base_revision": after_add,
+            "paths": [sandbox.file("extra.mp4").display().to_string()]
+        })),
+    );
+    assert_eq!(again["result"]["revision"], after_add);
+    assert_eq!(again["result"]["assets"][0]["id"], 4);
+
+    // The import is one undo entry: the CLI sees the same history.
+    let undone = call(
+        &mut serve,
+        5,
+        "undo",
+        Some(json!({"base_revision": after_add})),
+    );
+    assert_eq!(undone["result"]["changed"], true);
+    let _ = serve.read(); // project.changed
+    let _ = serve.read(); // playhead
+    let list = call(&mut serve, 6, "media.list", None);
+    assert_eq!(list["result"]["assets"].as_array().unwrap().len(), 3);
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn media_add_is_atomic_and_refuses_bad_input() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    std::fs::copy(sandbox.file("red.mp4"), sandbox.file("extra.mp4")).expect("copy media");
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    let empty = call(
+        &mut serve,
+        2,
+        "media.add",
+        Some(json!({"base_revision": revision, "paths": []})),
+    );
+    assert_eq!(empty["error"]["code"], -32602);
+
+    // One good path, one missing: nothing is pooled.
+    let partial = call(
+        &mut serve,
+        3,
+        "media.add",
+        Some(json!({
+            "base_revision": revision,
+            "paths": [
+                sandbox.file("extra.mp4").display().to_string(),
+                sandbox.file("missing.mp4").display().to_string()
+            ]
+        })),
+    );
+    assert_eq!(partial["error"]["code"], -32602, "{partial}");
+    let list = call(&mut serve, 4, "media.list", None);
+    assert_eq!(list["result"]["assets"].as_array().unwrap().len(), 3);
+    assert_eq!(list["result"]["revision"], revision);
+
+    let stale = call(
+        &mut serve,
+        5,
+        "media.add",
+        Some(json!({
+            "base_revision": revision.saturating_sub(1),
+            "paths": [sandbox.file("extra.mp4").display().to_string()]
+        })),
+    );
+    assert_eq!(stale["error"]["code"], -32001);
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
 fn edl_track_is_zero_based() {
     let sandbox = Sandbox::new();
     sandbox.base();
