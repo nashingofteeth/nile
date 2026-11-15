@@ -9,7 +9,7 @@
 //! and a known method with a bad field is *invalid-params* — the two
 //! failures a client needs to tell apart.
 
-use nle_core::{Action, Project, Seconds};
+use nle_core::{Action, Project, Seconds, Sequence, VideoSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,7 +18,7 @@ use crate::rpc::RpcError;
 /// The wire schema version, independent of the `nile.json` project version
 /// and the crate version. Bump it for any breaking method, field, or unit
 /// change; `hello` lets a client fail clearly instead of guessing.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 wire_catalog! {
     /// A typed request. `base_revision` is the compare-and-swap token: the
@@ -62,6 +62,23 @@ wire_catalog! {
         } = "action.apply";
         Undo { base_revision: u64 } = "undo";
         Redo { base_revision: u64 } = "redo";
+        /// Every sequence in the project, with the active id.
+        SequenceList = "sequence.list";
+        /// Switch the active sequence (session state, like the playhead).
+        SequenceUse { id: u32 } = "sequence.use";
+        /// Add an empty sequence; a model write guarded by CAS.
+        SequenceAdd {
+            base_revision: u64,
+            name: String,
+            #[serde(
+                default,
+                with = "nle_core::time::rational_ser::opt",
+                skip_serializing_if = "Option::is_none"
+            )]
+            fps: Option<Seconds>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            video: Option<VideoSettings>,
+        } = "sequence.add";
     }
 }
 
@@ -146,6 +163,8 @@ pub enum Reply {
     Hello(Hello),
     Edl(String),
     Outcome(Outcome),
+    Sequences(SequenceList),
+    Sequence(SequenceReply),
 }
 
 impl Reply {
@@ -155,6 +174,8 @@ impl Reply {
             Reply::Hello(_) => "hello",
             Reply::Edl(_) => "edl",
             Reply::Outcome(_) => "outcome",
+            Reply::Sequences(_) => "sequences",
+            Reply::Sequence(_) => "sequence",
         }
     }
 
@@ -167,6 +188,13 @@ impl Reply {
             (Reply::Hello(hello), Call::Hello) => serde_json::to_value(hello)
                 .map_err(|e| RpcError::internal(format!("hello is not serializable: {e}"))),
             (Reply::Edl(text), Call::TimelineEdl { .. }) => Ok(Value::String(text)),
+            (Reply::Sequences(list), Call::SequenceList) => serde_json::to_value(list)
+                .map_err(|e| RpcError::internal(format!("sequence list is not serializable: {e}"))),
+            (Reply::Sequence(sequence), Call::SequenceUse { .. } | Call::SequenceAdd { .. }) => {
+                serde_json::to_value(sequence).map_err(|e| {
+                    RpcError::internal(format!("sequence reply is not serializable: {e}"))
+                })
+            }
             (
                 Reply::Outcome(outcome),
                 Call::ActionPreview { .. }
@@ -190,6 +218,10 @@ impl Reply {
             Call::ProjectShow => serde_json::from_value(result).map(Reply::Project),
             Call::Hello => serde_json::from_value(result).map(Reply::Hello),
             Call::TimelineEdl { .. } => serde_json::from_value(result).map(Reply::Edl),
+            Call::SequenceList => serde_json::from_value(result).map(Reply::Sequences),
+            Call::SequenceUse { .. } | Call::SequenceAdd { .. } => {
+                serde_json::from_value(result).map(Reply::Sequence)
+            }
             Call::ActionPreview { .. }
             | Call::ActionApply { .. }
             | Call::Undo { .. }
@@ -217,4 +249,71 @@ pub struct Outcome {
         skip_serializing_if = "Option::is_none"
     )]
     pub playhead: Option<Seconds>,
+}
+
+/// One sequence as the protocol reports it. `active` lives on the enclosing
+/// list/reply: exactly one sequence is the session's edit scope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SequenceSummary {
+    pub id: u32,
+    pub name: String,
+    #[serde(
+        default,
+        with = "nle_core::time::rational_ser::opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fps: Option<Seconds>,
+    #[serde(default)]
+    pub video: Option<VideoSettings>,
+    #[serde(with = "nle_core::time::rational_ser")]
+    pub playhead: Seconds,
+    /// Clips across every track, not gaps or transitions.
+    pub clips: usize,
+}
+
+impl SequenceSummary {
+    pub fn of(sequence: &Sequence) -> Self {
+        let clips = sequence
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter())
+            .filter(|segment| matches!(segment, nle_core::timeline::Segment::Clip(_)))
+            .count();
+        Self {
+            id: sequence.id,
+            name: sequence.name.clone(),
+            fps: sequence.fps,
+            video: sequence.video.clone(),
+            playhead: sequence.playhead,
+            clips,
+        }
+    }
+}
+
+/// `sequence.list` result: every sequence plus the active id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SequenceList {
+    pub revision: u64,
+    pub active: u32,
+    pub sequences: Vec<SequenceSummary>,
+}
+
+impl SequenceList {
+    pub fn of(project: &Project) -> Self {
+        Self {
+            revision: project.revision,
+            active: project.active_id(),
+            sequences: project.sequences.iter().map(SequenceSummary::of).collect(),
+        }
+    }
+}
+
+/// `sequence.use` / `sequence.add` result: the affected sequence and the
+/// active id after the call (an add does not switch; a use does).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SequenceReply {
+    pub revision: u64,
+    pub active: u32,
+    pub sequence: SequenceSummary,
 }

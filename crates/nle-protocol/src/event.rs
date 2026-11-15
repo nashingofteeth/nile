@@ -25,6 +25,9 @@ wire_catalog! {
             #[serde(with = "nle_core::time::rational_ser")]
             at: Seconds,
         } = "playhead";
+        /// The active sequence (or the sequence list) changed. `revision` is
+        /// unchanged for a pure switch and bumped by `sequence.add`.
+        SequenceChanged { active: u32, revision: u64 } = "sequence.changed";
     }
 }
 

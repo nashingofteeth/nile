@@ -34,7 +34,10 @@ pub mod event;
 pub mod rpc;
 pub mod transport;
 
-pub use call::{Call, Hello, METHODS, Outcome, PROTOCOL_VERSION, Reply};
+pub use call::{
+    Call, Hello, METHODS, Outcome, PROTOCOL_VERSION, Reply, SequenceList, SequenceReply,
+    SequenceSummary,
+};
 pub use error::{ClientError, ServerError};
 pub use event::{EVENTS, Event};
 pub use rpc::{
