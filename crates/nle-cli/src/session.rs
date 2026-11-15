@@ -98,16 +98,37 @@ impl Session {
         self.document.edit(action, from, &mut self.register)
     }
 
+    /// Run several actions as one undo step. Atomic: a failure restores the
+    /// project, histories and register.
+    pub fn apply_actions(
+        &mut self,
+        actions: &[Action],
+        from: f64,
+    ) -> Result<ActionOutcome, EditError> {
+        self.document
+            .edit_actions(actions, from, &mut self.register)
+    }
+
     /// Run one action against a copy. The clone includes the history, so an
     /// undo/redo preview is real, and the cloned register keeps a preview yank
     /// away from the live clipboard.
     pub fn preview(&self, action: &Action, from: f64) -> Result<ActionOutcome, EditError> {
+        self.preview_actions(std::slice::from_ref(action), from)
+    }
+
+    /// Preview a batch against a copy; like [`Session::preview`], nothing is
+    /// saved and the register is cloned.
+    pub fn preview_actions(
+        &self,
+        actions: &[Action],
+        from: f64,
+    ) -> Result<ActionOutcome, EditError> {
         let mut document = Document::with_histories(
             self.document.project().clone(),
             self.document.histories().clone(),
         );
         let mut register = self.register.clone();
-        document.edit(action, from, &mut register)
+        document.edit_actions(actions, from, &mut register)
     }
 
     /// Save project, history, and register. This is the CLI's one-shot path.

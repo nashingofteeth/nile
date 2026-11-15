@@ -225,12 +225,12 @@ impl<R: BufRead, W: Write> Client<R, W> {
     pub fn preview(
         &mut self,
         base_revision: u64,
-        action: Action,
+        actions: Vec<Action>,
         from: Option<Seconds>,
     ) -> Result<Outcome, ClientError> {
         outcome(self.call(Call::ActionPreview {
             base_revision,
-            action,
+            actions,
             from,
         }))
     }
@@ -238,12 +238,12 @@ impl<R: BufRead, W: Write> Client<R, W> {
     pub fn apply(
         &mut self,
         base_revision: u64,
-        action: Action,
+        actions: Vec<Action>,
         from: Option<Seconds>,
     ) -> Result<Outcome, ClientError> {
         outcome(self.call(Call::ActionApply {
             base_revision,
-            action,
+            actions,
             from,
         }))
     }

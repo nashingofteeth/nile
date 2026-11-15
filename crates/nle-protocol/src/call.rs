@@ -21,7 +21,7 @@ use crate::rpc::RpcError;
 /// and the crate version. Bump it for a breaking method, field, or unit
 /// change. Additive methods and events stay on the current version;
 /// `hello.methods` is the fine-grained capability list.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 wire_catalog! {
     /// A typed request. `base_revision` is the compare-and-swap token: the
@@ -36,10 +36,11 @@ wire_catalog! {
             #[serde(default)]
             track: Option<usize>,
         } = "timeline.edl";
-        /// Run one action against a copy and report what would change.
+        /// Run actions against a copy and report what would change. They
+        /// form one undo step but preview writes nothing.
         ActionPreview {
             base_revision: u64,
-            action: Action,
+            actions: Vec<Action>,
             /// The undo anchor for the hypothetical edit; absent means the
             /// document's shared playhead.
             #[serde(
@@ -49,12 +50,12 @@ wire_catalog! {
             )]
             from: Option<Seconds>,
         } = "action.preview";
-        /// Run one catalog action as one undo step. `Action::Undo`/`Redo` are
-        /// accepted here as aliases for the `undo`/`redo` methods; `from` is
-        /// ignored for those two (the history restores its own playhead).
+        /// Run catalog actions as one undo step. A single-element list keeps
+        /// the normal action path and `Action::Undo`/`Redo` aliases; a
+        /// multi-action batch rejects undo/redo.
         ActionApply {
             base_revision: u64,
-            action: Action,
+            actions: Vec<Action>,
             /// The undo anchor; absent means the document's shared playhead.
             #[serde(
                 default,
