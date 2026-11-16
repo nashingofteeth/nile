@@ -14,9 +14,17 @@
 //! stderr.
 
 use std::io;
+#[cfg(unix)]
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::thread;
 
 use anyhow::{Context, Result};
+
+use crate::{log, say_err};
 
 use nle_core::edit::Actor;
 use nle_core::{
@@ -31,22 +39,219 @@ use nle_protocol::{
 
 use crate::session::{Session, playhead};
 
-/// Run the blocking JSON-RPC loop on stdin/stdout.
-pub(crate) fn cmd_serve(project_path: &Path, _stdio: bool) -> Result<()> {
+/// Serve the project over the per-project Unix socket, or stdin/stdout when
+/// `--stdio` is set. The socket is the default so a TUI and an agent can
+/// share one writer; the stdio mode is for pipes and tests.
+pub(crate) fn cmd_serve(project_path: &Path, stdio: bool) -> Result<()> {
     let mut session = Session::load(project_path)?;
     session.set_actor(Actor::Agent("nile-serve".into()));
-
     let handler = ServeHandler {
         session,
         events: Vec::new(),
         poisoned: None,
     };
+    if stdio {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut server = Server::new(stdin.lock(), stdout.lock(), handler);
+        server.serve().context("serve the project protocol")?;
+        return Ok(());
+    }
+    serve_socket(project_path, handler)
+}
 
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut server = Server::new(stdin.lock(), stdout.lock(), handler);
-    server.serve().context("serve the project protocol")?;
+#[cfg(unix)]
+struct SocketGuard(PathBuf);
+
+#[cfg(unix)]
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(unix)]
+struct LockGuard(PathBuf);
+
+#[cfg(unix)]
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Serialize startup before touching the socket path. The lock's PID lets a
+/// later server distinguish a live/starting owner from a crash leftover.
+#[cfg(unix)]
+fn acquire_lock(project_path: &Path, socket: &Path, lock: &Path) -> Result<LockGuard> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+
+    for _ in 0..4 {
+        match OpenOptions::new().write(true).create_new(true).open(lock) {
+            Ok(mut file) => {
+                writeln!(file, "{}", std::process::id()).context("write the server lock")?;
+                return Ok(LockGuard(lock.to_path_buf()));
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                match UnixStream::connect(socket) {
+                    Ok(_) => anyhow::bail!(
+                        "already serving {} (socket {})",
+                        project_path.display(),
+                        socket.display()
+                    ),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        let stale = fs::read_to_string(lock)
+                            .ok()
+                            .and_then(|text| text.trim().parse::<u32>().ok());
+                        if stale.is_some_and(pid_alive) {
+                            anyhow::bail!(
+                                "serving is starting for {} (pid {})",
+                                project_path.display(),
+                                stale.unwrap_or(0)
+                            );
+                        }
+                        // Re-read before unlink so a lock re-created between
+                        // the check and removal is not the one we discard.
+                        let unchanged = fs::read_to_string(lock)
+                            .ok()
+                            .and_then(|text| text.trim().parse::<u32>().ok())
+                            == stale;
+                        if unchanged {
+                            let _ = fs::remove_file(lock);
+                        }
+                    }
+                    Err(e) => return Err(e).context("check the project socket"),
+                }
+            }
+            Err(e) => return Err(e).context("create the server lock"),
+        }
+    }
+    anyhow::bail!(
+        "could not acquire the server lock for {} ({})",
+        project_path.display(),
+        lock.display()
+    )
+}
+
+#[cfg(unix)]
+fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    let socket = nle_core::state::session_socket_path(project_path);
+    let lock = nle_core::state::session_lock_path(project_path);
+    let dir = socket
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir).context("create the project state directory")?;
+    let _lock = acquire_lock(project_path, &socket, &lock)?;
+    // With the lock held, an unconnectable socket is stale and safe to
+    // replace; a live one belongs to an older/foreign server.
+    match UnixStream::connect(&socket) {
+        Ok(_) => anyhow::bail!(
+            "already serving {} (socket {})",
+            project_path.display(),
+            socket.display()
+        ),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            let _ = fs::remove_file(&socket);
+        }
+        Err(e) => return Err(e).context("check the project socket"),
+    }
+    let listener = UnixListener::bind(&socket).context("bind the project socket")?;
+    let _guard = SocketGuard(socket.clone());
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+        .context("set socket permissions")?;
+    say_err!("serving {} on {}", project_path.display(), socket.display());
+
+    let shared = Arc::new(Mutex::new(handler));
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => spawn_connection(Arc::clone(&shared), stream),
+            Err(e) => log::line(&format!("project socket accept failed: {e}")),
+        }
+    }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn serve_socket(_project_path: &Path, _handler: ServeHandler) -> Result<()> {
+    anyhow::bail!("socket serving is Unix-only; use --stdio")
+}
+
+#[cfg(unix)]
+fn spawn_connection(shared: Arc<Mutex<ServeHandler>>, stream: std::os::unix::net::UnixStream) {
+    let reader = match stream.try_clone() {
+        Ok(reader) => reader,
+        Err(e) => {
+            log::line(&format!("project socket clone failed: {e}"));
+            return;
+        }
+    };
+    thread::spawn(move || {
+        let handler = ConnectionHandler {
+            shared,
+            events: Vec::new(),
+        };
+        let mut server = Server::new(BufReader::new(reader), stream, handler);
+        if let Err(e) = server.serve() {
+            log::line(&format!("project socket connection ended: {e}"));
+        }
+    });
+}
+
+/// One connection's event buffer. Calls serialize on the shared handler, so
+/// events cannot be routed to another client.
+#[cfg(unix)]
+struct ConnectionHandler {
+    shared: Arc<Mutex<ServeHandler>>,
+    events: Vec<Event>,
+}
+
+#[cfg(unix)]
+impl Handler for ConnectionHandler {
+    fn handle(&mut self, call: &Call) -> Result<Reply, RpcError> {
+        let mut handler = match self.shared.lock() {
+            Ok(handler) => handler,
+            Err(poisoned) => {
+                let mut handler = poisoned.into_inner();
+                handler.poisoned = Some("a connection handler panicked".into());
+                return Err(RpcError::internal(
+                    "server is read-only after a handler panic",
+                ));
+            }
+        };
+        let reply = handler.handle(call);
+        self.events.extend(handler.take_events());
+        reply
+    }
+
+    fn take_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.events)
+    }
 }
 
 /// The live server state. One instance serves one project on one connection.

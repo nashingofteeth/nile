@@ -736,6 +736,112 @@ fn a_failed_batch_leaves_no_trace() {
     assert!(serve.finish().success(), "serve exits cleanly");
 }
 
+#[cfg(unix)]
+#[test]
+fn socket_is_the_default_and_is_single_writer() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct ChildGuard(Option<Child>);
+    impl ChildGuard {
+        fn new(child: Child) -> Self {
+            Self(Some(child))
+        }
+        fn kill(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
+
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let socket = nle_core::state::session_socket_path(&sandbox.file(P));
+    let spawn = || {
+        Command::new(env!("CARGO_BIN_EXE_nile"))
+            .current_dir(sandbox.path())
+            .args(["--project", P, "serve"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn nile serve")
+    };
+    let connect = |deadline: Instant| loop {
+        match UnixStream::connect(&socket) {
+            Ok(stream) => break stream,
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("connect {}: {e}", socket.display()),
+        }
+    };
+
+    let mut first = ChildGuard::new(spawn());
+    let stream = connect(Instant::now() + Duration::from_secs(5));
+    let write = stream.try_clone().expect("clone");
+    let mut a = nle_protocol::Client::new(BufReader::new(stream), write);
+    let hello = a.hello().expect("hello");
+    assert_eq!(hello.protocol, nle_protocol::PROTOCOL_VERSION);
+
+    // A second connection sees the same handler and history: one shared
+    // session, not a per-connection clone.
+    let applied = a
+        .apply(
+            hello.revision,
+            vec![nle_core::Action::Split { track: 0, at: 1.0 }],
+            None,
+        )
+        .expect("split");
+    let after = applied.revision;
+    assert_eq!(after, hello.revision + 1);
+
+    let stream = connect(Instant::now() + Duration::from_secs(5));
+    let write = stream.try_clone().expect("clone");
+    let mut b = nle_protocol::Client::new(BufReader::new(stream), write);
+    assert_eq!(b.show().expect("show").revision, after);
+    let applied = b
+        .apply(
+            after,
+            vec![nle_core::Action::Split { track: 0, at: 0.5 }],
+            None,
+        )
+        .expect("split from the second connection");
+    assert_eq!(applied.revision, after + 1);
+    assert_eq!(a.show().expect("show").revision, after + 1);
+
+    // A second server on the same project refuses before binding.
+    let second = spawn();
+    let output = second.wait_with_output().expect("second server");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("already serving"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Killing the owner leaves its socket/lock behind; the next server
+    // recognizes the dead owner, clears both and binds.
+    drop(a);
+    drop(b);
+    first.kill();
+    assert!(socket.exists(), "a killed server leaves a stale socket");
+
+    let mut third = ChildGuard::new(spawn());
+    let _stream = connect(Instant::now() + Duration::from_secs(5));
+    third.kill();
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(nle_core::state::session_lock_path(&sandbox.file(P)));
+}
+
 #[test]
 fn edl_track_is_zero_based() {
     let sandbox = Sandbox::new();

@@ -151,10 +151,16 @@ handler queued.
 
 ## Serve
 
-`nile serve --stdio` loads the project, its history sidecar, and the yank
-register, then serves one connection. It is a **single-writer** interface:
-close the TUI and other edits while it runs; foreign-change adoption is not
-implemented yet. Action mutations go through one `apply`, which owns CAS, the
+`nile serve` loads the project, its history sidecar, and the yank register,
+then listens on `.nile/<stem>/session.sock` (or one stdin/stdout connection
+with `--stdio`). It is a **single-writer** interface: a `serve.lock` beside
+the socket serializes startup, one server owns the socket, a second server
+refuses, and multiple client connections are serialized through one handler.
+A killed owner leaves both files behind; the next start checks the lock PID
+and clears a dead owner's state. One-shot CLI edits are still file-based; do
+not run them alongside the server. Foreign-change adoption is not
+implemented yet. The socket path is `sun_path`-limited (about 108 bytes on
+Linux), so very deep project trees fail at bind. Action mutations go through one `apply`, which owns CAS, the
 edit, playhead conversion, saving, and events. `sequence.use`/`sequence.add`
 and `media.add` are separate model paths, but they use the same writeability,
 revision and save/poison helpers. A failed save poisons every later write; reads reflect
