@@ -19,7 +19,6 @@ use std::path::Path;
 
 use crate::action::{self, Action, Outcome, Register};
 use crate::edit::{self, Actor, Batch, EditError, Histories, History, UndoOutcome};
-use crate::group::MediaPart;
 use crate::project::{Project, ProjectDiff, ProjectError, VideoSettings};
 use crate::time::{Seconds, frame_of};
 
@@ -412,23 +411,7 @@ impl Document {
             .histories
             .get_mut(active)
             .add_assets(&mut self.project, assets, playhead);
-        let mut parts = Vec::with_capacity(files.len());
-        let mut start = Seconds::from_integer(0);
-        for path in files {
-            let asset = self.project.asset_by_path(&path).ok_or_else(|| {
-                EditError::MediaGroup(format!("{} is not pooled", path.display()))
-            })?;
-            let duration = asset.duration().ok_or_else(|| {
-                EditError::MediaGroup(format!("{} has no known duration", path.display()))
-            })?;
-            parts.push(MediaPart {
-                asset: asset.id,
-                group_start: start,
-                file_start: Seconds::from_integer(0),
-                duration,
-            });
-            start += duration;
-        }
+        let parts = self.project.group_parts(&files)?;
         let group =
             self.histories
                 .get_mut(active)

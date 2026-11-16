@@ -11,9 +11,9 @@ use nle_core::edit;
 use nle_core::edl::{self, EdlEvent};
 use nle_core::otio;
 use nle_core::otio::OtioItem;
-use nle_core::time::{Seconds, parse_timecode, timecode_to_frames};
+use nle_core::time::{parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Segment, TrackKind};
-use nle_core::{Document, MediaPart, Project, VideoSettings, frame_of};
+use nle_core::{Document, Project, VideoSettings, frame_of};
 use nle_ffmpeg::probe;
 
 use super::project::{save_and_reset_history, secs_f64};
@@ -209,37 +209,14 @@ fn pool_group_part(project: &mut Project, path: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-/// Turn pooled parts into one group: argument order, cumulative group starts
-/// and zero file offsets — the same construction `nile import --group` uses.
+/// Turn pooled parts into one group through the model's constructor, so
+/// `nile import --group` and the importers share one part layout.
 fn add_group_parts(project: &mut Project, spec: &GroupSpec, paths: &[PathBuf]) -> Result<u32> {
-    let mut parts = Vec::with_capacity(paths.len());
-    let mut start = Seconds::from_integer(0);
-    let mut seen = HashSet::new();
-    for path in paths {
-        let asset = project.asset_by_path(path).ok_or_else(|| {
-            anyhow::anyhow!("group {:?}: {} is not pooled", spec.name, path.display())
-        })?;
-        if !seen.insert(asset.id) {
-            bail!("group {:?}: {} is listed twice", spec.name, path.display());
-        }
-        let duration = asset.duration().ok_or_else(|| {
-            anyhow::anyhow!(
-                "group {:?}: {} has no known duration",
-                spec.name,
-                path.display()
-            )
-        })?;
-        parts.push(MediaPart {
-            asset: asset.id,
-            group_start: start,
-            file_start: Seconds::from_integer(0),
-            duration,
-        });
-        start += duration;
-    }
-    project
-        .add_group(&spec.name, parts)
-        .with_context(|| format!("group {:?}", spec.name))
+    // `ProjectError::Group` carries the id and part index, so it is already
+    // self-contained — no context to hide it behind (the TUI flattens errors
+    // with `to_string`).
+    let parts = project.group_parts(paths)?;
+    Ok(project.add_group(&spec.name, parts)?)
 }
 
 /// Expand `~`/`~/…` without a shell. `~user` is left alone: resolving
@@ -780,6 +757,7 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nle_core::Seconds;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
 
     fn probe(duration: &str) -> RawProbe {
