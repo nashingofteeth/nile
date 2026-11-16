@@ -34,10 +34,10 @@ pub(crate) fn cmd_edit(
     dump_size: &str,
     dump_keys: &str,
 ) -> Result<()> {
-    let project = Project::load(project_path)?;
     // `--dump`: render once and print the state + grid, no monitor needed —
     // the diagnostic path (a rendering or placement question needs no mpv).
     if dump {
+        let project = Project::load(project_path)?;
         let (w, h) = dump_size
             .split_once(['x', 'X'])
             .map_or((100, 30), |(w, h)| {
@@ -60,8 +60,11 @@ pub(crate) fn cmd_edit(
              `nile edit --dump` works without one"
         );
     }
+    // Attach to `nile serve` when its socket is live; otherwise load the file.
+    let session = crate::session::Session::open(project_path)?;
     // The monitor plays the composite, so any video track with a clip counts.
-    let has_clip = project
+    let has_clip = session
+        .project()
         .timeline
         .video_tracks()
         .any(|t| t.segments.iter().any(|s| matches!(s, Segment::Clip(_))));
@@ -83,7 +86,7 @@ pub(crate) fn cmd_edit(
     // The TUI builds the monitor's EDL off-thread (proxy renders can be
     // seconds), so it appears immediately with progress instead of hanging
     // here before the terminal is initialized.
-    tui::run(project, project_path.to_path_buf(), player)?;
+    tui::run(session, player)?;
     Ok(())
 }
 
