@@ -34,7 +34,7 @@ use nle_core::{
 use nle_ffmpeg::probe;
 use nle_protocol::{
     Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage, Outcome as WireOutcome,
-    Preview, Reply, RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
+    PlayheadReply, Preview, Reply, RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
 };
 
 use crate::session::{Session, playhead};
@@ -255,16 +255,20 @@ impl Handler for ConnectionHandler {
 }
 
 /// The live server state. One instance serves one project on one connection.
-struct ServeHandler {
-    session: Session,
-    events: Vec<Event>,
-    poisoned: Option<String>,
+pub(crate) struct ServeHandler {
+    pub(crate) session: Session,
+    pub(crate) events: Vec<Event>,
+    pub(crate) poisoned: Option<String>,
 }
 
 impl Handler for ServeHandler {
     fn handle(&mut self, call: &Call) -> Result<Reply, RpcError> {
         match call {
-            Call::Hello => Ok(Reply::Hello(Hello::new(self.session.revision()))),
+            Call::Hello => Ok(Reply::Hello(Hello::new(
+                self.session.revision(),
+                self.session.depth() as u64,
+                self.session.project().active_id(),
+            ))),
             Call::ProjectShow => Ok(Reply::Project(self.session.project().clone())),
             Call::TimelineEdl { track } => self.edl(*track),
             Call::ActionPreview {
@@ -292,6 +296,7 @@ impl Handler for ServeHandler {
                 base_revision,
                 paths,
             } => self.media_add(*base_revision, paths),
+            Call::PlayheadSet { at } => self.playhead_set(*at),
         }
     }
 
@@ -364,6 +369,7 @@ impl ServeHandler {
     ) -> WireOutcome {
         WireOutcome {
             revision,
+            depth: self.session.depth() as u64,
             desc: outcome.desc,
             changed: outcome.changed,
             playhead,
@@ -383,6 +389,21 @@ impl ServeHandler {
             Some(fps) => frames_to_seconds(frame, *fps),
             None => Seconds::from_integer(frame),
         }
+    }
+
+    /// Move the shared cursor. Session state: no revision/CAS, but the
+    /// project file is saved so a later CLI/TUI opens there.
+    fn playhead_set(&mut self, at: Seconds) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
+        self.session.set_playhead(secs_f64(&at));
+        self.save_project_or_poison()?;
+        let at = self.session.project().playhead;
+        self.events.push(Event::Playhead { at });
+        Ok(Reply::Playhead(PlayheadReply {
+            revision: self.session.revision(),
+            depth: self.session.depth() as u64,
+            at,
+        }))
     }
 
     fn sequence_list(&self) -> Result<Reply, RpcError> {
@@ -499,7 +520,10 @@ impl ServeHandler {
             self.session.project().fps.as_ref(),
             secs_f64(&self.session.project().playhead),
         );
-        let ids = self.session.add_assets(fresh, playhead);
+        let ids = self
+            .session
+            .add_assets(fresh, playhead)
+            .map_err(|e| RpcError::internal(e.to_string()))?;
         if !ids.is_empty() {
             self.save_or_poison(true, false)?;
             self.events.push(Event::ProjectChanged {
@@ -541,7 +565,7 @@ impl ServeHandler {
     /// yank cannot touch the live clipboard. Nothing is saved and no events
     /// are queued.
     fn preview(
-        &self,
+        &mut self,
         base_revision: u64,
         actions: &[Action],
         from: Option<Seconds>,

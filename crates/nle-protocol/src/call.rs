@@ -90,6 +90,11 @@ wire_catalog! {
             base_revision: u64,
             paths: Vec<PathBuf>,
         } = "media.add";
+        /// Move the shared playhead (session state, like sequence.use).
+        PlayheadSet {
+            #[serde(with = "nle_core::time::rational_ser")]
+            at: Seconds,
+        } = "playhead.set";
     }
 }
 
@@ -148,16 +153,22 @@ pub struct Hello {
     pub project_version: u32,
     /// The document's current model revision.
     pub revision: u64,
+    /// The active sequence's undo depth.
+    pub depth: u64,
+    /// The active sequence id.
+    pub active: u32,
     /// Every method this server serves, from the generated [`METHODS`].
     pub methods: Vec<String>,
 }
 
 impl Hello {
-    pub fn new(revision: u64) -> Self {
+    pub fn new(revision: u64, depth: u64, active: u32) -> Self {
         Self {
             protocol: PROTOCOL_VERSION,
             project_version: nle_core::project::PROJECT_VERSION,
             revision,
+            depth,
+            active,
             methods: METHODS.iter().map(|m| (*m).to_string()).collect(),
         }
     }
@@ -178,6 +189,7 @@ pub enum Reply {
     Sequence(SequenceReply),
     Media(MediaList),
     Preview(Preview),
+    Playhead(PlayheadReply),
 }
 
 impl Reply {
@@ -191,6 +203,7 @@ impl Reply {
             Reply::Sequence(_) => "sequence",
             Reply::Media(_) => "media",
             Reply::Preview(_) => "preview",
+            Reply::Playhead(_) => "playhead",
         }
     }
 
@@ -213,6 +226,11 @@ impl Reply {
             (Reply::Media(media), Call::MediaList | Call::MediaAdd { .. }) => {
                 serde_json::to_value(media).map_err(|e| {
                     RpcError::internal(format!("media reply is not serializable: {e}"))
+                })
+            }
+            (Reply::Playhead(at), Call::PlayheadSet { .. }) => {
+                serde_json::to_value(at).map_err(|e| {
+                    RpcError::internal(format!("playhead reply is not serializable: {e}"))
                 })
             }
             (Reply::Preview(preview), Call::ActionPreview { .. }) => serde_json::to_value(preview)
@@ -244,6 +262,7 @@ impl Reply {
             Call::MediaList | Call::MediaAdd { .. } => {
                 serde_json::from_value(result).map(Reply::Media)
             }
+            Call::PlayheadSet { .. } => serde_json::from_value(result).map(Reply::Playhead),
             Call::ActionPreview { .. } => serde_json::from_value(result).map(Reply::Preview),
             Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {
                 serde_json::from_value(result).map(Reply::Outcome)
@@ -258,6 +277,8 @@ pub struct Outcome {
     /// The document revision after the call. A preview reports the current
     /// revision: it did not change anything.
     pub revision: u64,
+    /// The active sequence's undo depth after the call.
+    pub depth: u64,
     /// The notice the action would show in the TUI message line.
     pub desc: String,
     /// Whether the model changed. `false` for a yank or a refused no-op.
@@ -391,4 +412,13 @@ pub struct Preview {
     pub diff: ProjectDiff,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// `playhead.set` result: where the cursor landed and the session metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayheadReply {
+    pub revision: u64,
+    pub depth: u64,
+    #[serde(with = "nle_core::time::rational_ser")]
+    pub at: Seconds,
 }

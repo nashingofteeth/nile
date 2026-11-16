@@ -105,6 +105,14 @@ pub(crate) fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<S
         Ok(v) => v,
         Err(e) => return Some(e.to_string()),
     };
+    if app.project.is_remote()
+        && matches!(
+            verb.as_str(),
+            "add" | "detect" | "edl-import" | "otio-import"
+        )
+    {
+        return Some("server owns this project — stop `nile serve` first".to_string());
+    }
     match verb.as_str() {
         "import" => Some(import_command(app, cmd)),
         "show" => Some(show_command(app)),
@@ -177,12 +185,18 @@ pub(crate) fn add_command(
         Ok(()) => {}
         Err(e) => return Some(e),
     }
+    if app.project.is_remote() {
+        return Some("server owns this project — stop `nile serve` first".to_string());
+    }
     let playhead = frame_of(app.project.fps.as_ref(), app.playhead);
     let Some(kind) = app.project.timeline.track(track).map(|t| t.kind) else {
         return Some(format!("no track #{}", track + 1));
     };
+    let Some(document) = app.project.document_mut() else {
+        return Some("server owns this project — stop `nile serve` first".to_string());
+    };
     let (scratch, imported) = match crate::cmd::project::stage_clip(
-        &mut app.project,
+        document,
         &file,
         in_point.as_deref(),
         out_point.as_deref(),

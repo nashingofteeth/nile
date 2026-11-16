@@ -94,6 +94,7 @@ fn protocol_server_round_trip() {
     );
     let after = applied["result"]["revision"].as_u64().expect("revision");
     assert_eq!(after, revision + 1);
+    assert_eq!(applied["result"]["depth"], 1);
     assert_eq!(applied["result"]["changed"], true);
     assert!(
         applied["result"].get("playhead").is_none(),
@@ -840,6 +841,27 @@ fn socket_is_the_default_and_is_single_writer() {
     third.kill();
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(nle_core::state::session_lock_path(&sandbox.file(P)));
+}
+
+#[test]
+fn playhead_set_moves_the_shared_cursor() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let reply = call(&mut serve, 2, "playhead.set", Some(json!({"at": "3/2"})));
+    assert_eq!(reply["result"]["at"], "3/2");
+    assert_eq!(reply["result"]["revision"], revision);
+    assert_eq!(reply["result"]["depth"], 0);
+    let event = serve.read();
+    assert_eq!(event["method"], "playhead");
+    assert_eq!(event["params"]["at"], "3/2");
+    let show = call(&mut serve, 3, "project.show", None);
+    assert_eq!(active(&show["result"])["playhead"], "3/2");
+
+    assert!(serve.finish().success(), "serve exits cleanly");
 }
 
 #[test]

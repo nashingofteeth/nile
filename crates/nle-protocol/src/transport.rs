@@ -19,7 +19,9 @@ use std::path::PathBuf;
 use nle_core::{Action, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
-use crate::call::{Call, Hello, MediaList, Outcome, Preview, Reply, SequenceList, SequenceReply};
+use crate::call::{
+    Call, Hello, MediaList, Outcome, PlayheadReply, Preview, Reply, SequenceList, SequenceReply,
+};
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
 use crate::rpc::{Id, Notification, Request, Response, RpcError};
@@ -157,6 +159,13 @@ impl<R: BufRead, W: Write> Client<R, W> {
     /// [`Client::call`]. A response with no pending call is an error.
     /// The server writes a response before its events, so after a successful
     /// [`Client::call`] this reads the event lines that followed it.
+    /// Events already buffered while waiting for responses. Unlike
+    /// [`Client::next_event`], this never reads the stream; a remote UI that
+    /// polls its own state can discard them without blocking.
+    pub fn drain_buffered_events(&mut self) -> Vec<Event> {
+        self.events.drain(..).collect()
+    }
+
     pub fn next_event(&mut self) -> Result<Option<Event>, ClientError> {
         loop {
             if let Some(event) = self.events.pop_front() {
@@ -308,6 +317,13 @@ impl<R: BufRead, W: Write> Client<R, W> {
             paths,
         })? {
             Reply::Media(media) => Ok(media),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn set_playhead(&mut self, at: Seconds) -> Result<PlayheadReply, ClientError> {
+        match self.call(Call::PlayheadSet { at })? {
+            Reply::Playhead(reply) => Ok(reply),
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }
