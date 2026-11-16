@@ -125,8 +125,6 @@ pub enum EditError {
     EmptyBatch,
     #[error("remote session: {0}")]
     Remote(String),
-    #[error("media group: {0}")]
-    MediaGroup(String),
     #[error("undo/redo cannot be part of a batch")]
     BatchUndoRedo,
     #[error("nothing to undo")]

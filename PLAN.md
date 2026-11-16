@@ -460,10 +460,10 @@ shared by the TUI and agents — with no clipgen code present.
   action per apply (one undo step), rational `from`/playhead times, `hello` +
   `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
   single-source `wire_catalog!` generation. The handler owns CAS, saves,
-  playhead, and events. Steps 1 (sequences) and 2 (protocol) have landed; time
-  maps are next.
+  playhead, and events. Steps 1 (sequences), 2 (protocol) and 3 (time
+  maps/groups) have landed; annotations are next.
 - **Order within step 0:** revision + provenance, the `nle-protocol` wire,
-  `nile serve`, and fixtures are done. Steps 0, 1 and 2 are complete. These
+  `nile serve`, and fixtures are done. Steps 0–3 are complete. These
   are breaking format changes: close any live TUI before testing and rebuild
   old projects.
 
@@ -512,7 +512,7 @@ shared by the TUI and agents — with no clipgen code present.
   slot-parity test walks the protocol; the socket lock refuses a second
   server and stale clients get a typed revision conflict.
 
-### 3. Time maps + media groups (blocking)
+### 3. Time maps + media groups (done)
 
 - `TimeMap` in `nle-core`: exact rationals, piecewise linear, gaps and
   trimmed spans; `map`, `inverse`, `compose`, `map_range`. Property tests for
@@ -523,15 +523,16 @@ shared by the TUI and agents — with no clipgen code present.
   every analysis consumer need.
 - Importers emit maps alongside clips from the start; `nile show --json --maps`
   exposes the mapping so it is exercised, not dead code.
-- Landed so far: `TimeMap`, `MediaGroup`/`MediaPart`, project v12, validation,
+- Landed: `TimeMap`, `MediaGroup`/`MediaPart`, project v12, validation,
   `MediaGroup::asset_map` + `Project::group_time_map` (timeline → file →
   group), `nile show --json --maps` (per-track/asset maps plus `group_maps`),
   and importer grouping: `nile import --group NAME FILES…` adds the assets and
   the group as one undo step, `nile group ls|rm` lists and removes groups
-  (history v19). Remaining: the multi-part fixture, the EDL/OTIO grouping
-  rule, and the gate.
-- **Gate:** group → timeline → `(part, seek)` → back is exact; a wall time
-  inside a trimmed gap maps to "no media"; a multi-part fixture round-trips.
+  (history v19), and `import-edl`/`import-otio --group NAME=FILE,…` create the
+  same ordered groups from explicit parts.
+- **Gate (met):** group → timeline → `(part, seek)` → back is exact; a wall
+  time inside a trimmed gap maps to "no media"; the multi-part fixture
+  round-trips through `show --json --maps`.
 
 ### 4. Annotations (blocking)
 
@@ -589,8 +590,8 @@ shared by the TUI and agents — with no clipgen code present.
   build on annotations + time maps later.
 - `nile mcp` as a thin protocol adapter; a review/log view that shows
   history entries with actor and provenance.
-- Import completeness: additive EDL/OTIO import, audio-only EDL, multi-part
-  grouping (the ingest foundation for clipgen).
+- Import completeness: additive EDL/OTIO import and audio-only EDL
+  (multi-part grouping landed in step 3).
 
 ### Non-goals before the merge
 
@@ -602,10 +603,11 @@ is what makes the merge modular.
 ### Order and merge gate
 
 Workspace/revisions/fixtures → sequences (done) → protocol (done) → time maps
-(next) → annotations → render (keyframes, audio, reports, jobs) → sampling
-contract → toolkit hooks. Do not start the clipgen port until the merge-ready sentence
-above is true; then port ingest, planners and cases against the protocol and
-prove parity with the existing renders in `fixtures/`.
+and media groups (done) → annotations (next) → render (keyframes, audio,
+reports, jobs) → sampling contract → toolkit hooks. Do not start the clipgen
+port until the merge-ready sentence above is true; then port ingest, planners
+and cases against the protocol and prove parity with the existing renders in
+`fixtures/`.
 
 ## Timeline filmstrips (shipped)
 

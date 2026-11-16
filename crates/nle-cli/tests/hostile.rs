@@ -535,6 +535,18 @@ fn odd_media() {
                 &[&["import-otio", "nope.otio", "--force"]],
             ),
             (
+                "import-edl a nameless group",
+                &[&["import-edl", "nope.edl", "--media", ".", "--group", "=a,b"]],
+            ),
+            (
+                "import-edl a one-part group",
+                &[&["import-edl", "nope.edl", "--media", ".", "--group", "CAM=a"]],
+            ),
+            (
+                "import-otio an empty group part",
+                &[&["import-otio", "nope.otio", "--group", "CAM=a,,b"]],
+            ),
+            (
                 "trim --out past the file",
                 &[&["trim", "red.mp4", "--in", "0", "--out", "99", "-o", "t.mp4"]],
             ),

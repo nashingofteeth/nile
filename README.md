@@ -319,6 +319,9 @@ nile import --group "CAM 3" part1.mp4 part2.mp4
 # one logical recording from ordered parts; one undo removes both
 nile group ls                             # part count and group end
 nile group rm 1                           # undoable; assets stay pooled
+nile import-edl show.edl --media . --group "CAM 3=cam3_a.mp4,cam3_b.mp4"
+nile import-otio show.otio --group "CAM 3=cam3_a.mp4,cam3_b.mp4"
+# explicit parts join one recording (argument order; repeatable flag)
 nile import "clip one.mp4" 'b roll.mov'   # quoted paths (the shell eats these)
 nile add intro.mp4 --in 2.5 --out 7       # auto-imports a new file
 nile add b-roll.mov --at 10 --track 2     # tracks are 1-based
