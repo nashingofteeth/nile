@@ -66,7 +66,9 @@ pub enum ProjectError {
     TimeMap(#[from] TimeMapError),
     #[error("media group #{0}: {1}")]
     Group(u32, String),
-    #[error("asset #{0} is used by media group(s) {1:?} — remove or edit them first")]
+    #[error(
+        "asset #{0} is used by media group(s) {1:?} — remove or edit them first (nile group rm ID)"
+    )]
     AssetInGroup(u32, Vec<u32>),
 }
 

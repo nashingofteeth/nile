@@ -428,12 +428,11 @@ impl Document {
         let mut parts = Vec::with_capacity(files.len());
         let mut start = Seconds::from_integer(0);
         for path in files {
-            let asset = self
-                .project
-                .asset_by_path(&path)
-                .ok_or_else(|| EditError::Group(format!("{} is not pooled", path.display())))?;
+            let asset = self.project.asset_by_path(&path).ok_or_else(|| {
+                EditError::MediaGroup(format!("{} is not pooled", path.display()))
+            })?;
             let duration = asset.duration().ok_or_else(|| {
-                EditError::Group(format!("{} has no known duration", path.display()))
+                EditError::MediaGroup(format!("{} has no known duration", path.display()))
             })?;
             parts.push(MediaPart {
                 asset: asset.id,
