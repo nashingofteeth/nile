@@ -326,8 +326,10 @@ fn secs_string(t: &Seconds) -> String {
 }
 
 /// The project JSON plus derived per-track/asset time maps. The maps are not
-/// persisted: they are a view of the clips, so they cannot drift.
-fn show_json(project: &Project) -> Result<serde_json::Value> {
+/// persisted: they are a view of the clips, so they cannot drift. Only
+/// `show --json --maps` takes this path; plain `show --json` stays the raw
+/// persisted document (and therefore matches `project.show`).
+fn show_json_with_maps(project: &Project) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(project)?;
     let mut maps = Vec::new();
     for (track_index, track) in project.timeline.tracks.iter().enumerate() {
@@ -340,9 +342,7 @@ fn show_json(project: &Project) -> Result<serde_json::Value> {
             })
             .collect();
         for asset in assets {
-            let Ok(map) = TimeMap::from_track_for_asset(track, asset) else {
-                continue;
-            };
+            let map = TimeMap::from_track_for_asset(track, asset)?;
             if map.is_empty() {
                 continue;
             }
@@ -360,7 +360,7 @@ fn show_json(project: &Project) -> Result<serde_json::Value> {
                 .collect();
             maps.push(serde_json::json!({
                 "sequence": project.active_id(),
-                "track": track_index,
+                "track_index": track_index,
                 "asset": asset,
                 "spans": spans,
             }));
@@ -370,13 +370,23 @@ fn show_json(project: &Project) -> Result<serde_json::Value> {
     Ok(value)
 }
 
-pub(crate) fn cmd_show(project_path: &Path, json: bool, sequence: Option<u32>) -> Result<()> {
+pub(crate) fn cmd_show(
+    project_path: &Path,
+    json: bool,
+    maps: bool,
+    sequence: Option<u32>,
+) -> Result<()> {
     let mut project = Project::load(project_path)?;
     if json {
         if sequence.is_some() {
             bail!("--json prints the whole project; omit --sequence");
         }
-        say!("{}", serde_json::to_string_pretty(&show_json(&project)?)?);
+        let value = if maps {
+            show_json_with_maps(&project)?
+        } else {
+            serde_json::to_value(&project)?
+        };
+        say!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
     if let Some(id) = sequence {
@@ -664,13 +674,16 @@ pub(crate) fn show_report(project: &Project) -> String {
             }
         }
     }
-    for group in &project.groups {
-        out += &format!(
-            "  group #{} {} · {} part(s)\n",
-            group.id,
-            group.name,
-            group.parts.len()
-        );
+    if !project.groups.is_empty() {
+        out += "  media groups\n";
+        for group in &project.groups {
+            out += &format!(
+                "    group #{} {} · {} part(s)\n",
+                group.id,
+                group.name,
+                group.parts.len()
+            );
+        }
     }
     out
 }

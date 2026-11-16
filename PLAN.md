@@ -44,7 +44,7 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v11, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v12, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
@@ -479,7 +479,8 @@ shared by the TUI and agents — with no clipgen code present.
 - `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
   land now; derived sequences come later but must be traceable from day one.
 - Export takes a sequence; proxy/export caches key per sequence.
-- Landed: v11 projects with shared media, v18 per-sequence histories with
+- Landed: v12 projects with shared media and media groups, v18 per-sequence
+  histories with
   grouped batches, `nile sequence ls|add|use`, `:sequence`, and `--sequence`
   on `show`/`edl`/`export` (it reads another timeline without switching). The
   protocol resolves the sequence in step 2 (`sequence.*`).
@@ -520,8 +521,11 @@ shared by the TUI and agents — with no clipgen code present.
   CAM 3 01..N) with per-part offsets; a map resolves group time to
   `(asset, file time)`. This is the multi-part support the importers and
   every analysis consumer need.
-- Importers emit maps alongside clips from the start; `nile show --json`
+- Importers emit maps alongside clips from the start; `nile show --json --maps`
   exposes the mapping so it is exercised, not dead code.
+- Landed so far: `TimeMap`, `MediaGroup`/`MediaPart`, project v12, validation
+  and `nile show --json --maps` (derived per-track/asset maps). Remaining:
+  importer grouping, the multi-part fixture, and the gate.
 - **Gate:** group → timeline → `(part, seek)` → back is exact; a wall time
   inside a trimmed gap maps to "no media"; a multi-part fixture round-trips.
 

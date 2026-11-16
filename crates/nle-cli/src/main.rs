@@ -373,6 +373,9 @@ enum Cmd {
         /// Print the raw project JSON
         #[arg(long)]
         json: bool,
+        /// Add the derived per-track/asset time maps (requires --json)
+        #[arg(long, requires = "json")]
+        maps: bool,
         /// Report this sequence instead of the active one
         #[arg(long, value_name = "ID")]
         sequence: Option<u32>,
@@ -773,7 +776,11 @@ fn main() -> Result<()> {
                 out_point.as_deref(),
             );
         }
-        Cmd::Show { json, sequence } => return cmd_show(&project, *json, *sequence),
+        Cmd::Show {
+            json,
+            maps,
+            sequence,
+        } => return cmd_show(&project, *json, *maps, *sequence),
         Cmd::Seek { at } => return cmd_seek(&project, at.as_deref()),
         Cmd::Track {
             action: TrackCmd::Ls,
