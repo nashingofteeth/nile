@@ -149,6 +149,16 @@ fn show_json_exposes_time_maps_and_groups() {
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
     assert_eq!(shown["groups"][0]["name"], "CAM 3");
     assert!(s.ok(&["show"]).contains("group #1 CAM 3"));
+    let maps: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json", "--maps"])).expect("project + maps");
+    let group_maps = maps["group_maps"].as_array().expect("group maps");
+    assert_eq!(group_maps[0]["group"], 1);
+    assert_eq!(group_maps[0]["asset"], 1);
+    assert!(
+        group_maps[0]["spans"]
+            .as_array()
+            .is_some_and(|spans| !spans.is_empty())
+    );
 }
 
 #[test]

@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::time::{Seconds, checked_add, checked_sub, rational_ser};
+use crate::timemap::{TimeMap, TimeMapError, TimeSpan};
 
 /// One file's place in a logical recording.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,16 +72,32 @@ impl MediaGroup {
         Some((part.asset, file))
     }
 
+    /// File time → group time for one asset. The spans are ordered by file
+    /// time; parts of other assets and gaps between parts are holes.
+    pub fn asset_map(&self, asset: u32) -> Result<TimeMap, TimeMapError> {
+        let mut spans = Vec::new();
+        for part in &self.parts {
+            if part.asset != asset {
+                continue;
+            }
+            let part_group_end = part.group_end().ok_or(TimeMapError::Overflow)?;
+            let part_file_end = part.file_end().ok_or(TimeMapError::Overflow)?;
+            spans.push(TimeSpan::new(
+                part.file_start,
+                part_file_end,
+                part.group_start,
+                part_group_end,
+            )?);
+        }
+        spans.sort_by_key(|span| span.timeline().0);
+        TimeMap::new(spans)
+    }
+
     /// `(asset, file time)` → group time, or `None` when no part reads it.
-    /// If an asset appears in more than one part, the first part wins.
+    /// Delegates to [`MediaGroup::asset_map`], so the two APIs cannot disagree;
+    /// for a validated group the file ranges of one asset do not overlap.
     pub fn media_time(&self, asset: u32, file: &Seconds) -> Option<Seconds> {
-        let part = self.parts.iter().find(|part| {
-            part.asset == asset
-                && part.file_start <= *file
-                && *file < part.file_end().unwrap_or(*file)
-        })?;
-        let offset = checked_sub(file, &part.file_start)?;
-        checked_add(&part.group_start, &offset)
+        self.asset_map(asset).ok()?.map(file)
     }
 }
 
@@ -112,6 +129,23 @@ mod tests {
         assert_eq!(group.media_time(1, &s(12)), Some(s(2)));
         assert_eq!(group.media_time(2, &s(22)), Some(s(7)));
         assert_eq!(group.media_time(1, &s(14)), None, "end is exclusive");
+    }
+
+    #[test]
+    fn an_asset_map_composes_file_time_to_group_time() {
+        let group = MediaGroup::new(
+            1,
+            "CAM 3",
+            vec![part(1, 0, 0, 2), part(1, 3, 10, 2), part(2, 5, 0, 2)],
+        );
+        let map = group.asset_map(1).unwrap();
+        assert_eq!(map.map(&s(0)), Some(s(0)));
+        assert_eq!(map.map(&s(1)), Some(s(1)));
+        assert_eq!(map.map(&s(2)), None, "gap between file parts");
+        assert_eq!(map.map(&s(10)), Some(s(3)));
+        assert_eq!(map.inverse(&s(4)), Some(s(11)));
+        assert_eq!(map.inverse(&s(2)), None, "group gap between parts");
+        assert!(group.asset_map(3).unwrap().is_empty());
     }
 
     #[test]
