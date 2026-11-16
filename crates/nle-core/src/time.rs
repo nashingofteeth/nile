@@ -227,6 +227,13 @@ pub(crate) fn checked_sub(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     ratio_op(a, b, i128::checked_sub)
 }
 
+/// `a * b`, or `None` on overflow.
+pub(crate) fn checked_mul(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+    let n = (*a.numer() as i128).checked_mul(*b.numer() as i128)?;
+    let d = (*a.denom() as i128).checked_mul(*b.denom() as i128)?;
+    checked_ratio(n, d)
+}
+
 /// `a / b`, or `None` on overflow (or a zero divisor).
 pub(crate) fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     if *b.numer() == 0 {
