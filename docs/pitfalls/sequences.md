@@ -2,7 +2,8 @@
 
 `Project { media, sequences, active }` holds one or more editable timelines.
 The media pool is shared; `fps`, `video`, `timeline` and `playhead` belong to a
-`Sequence`. Project files are v11; older files are rejected, never migrated.
+`Sequence`. Project files are v12 (v11 added sequences, v12 added media groups); older
+files are rejected, never migrated.
 
 ## One active sequence, one undo stack
 
