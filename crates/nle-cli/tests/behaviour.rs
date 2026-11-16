@@ -143,6 +143,154 @@ fn import_group_creates_one_undoable_recording() {
     );
 }
 
+/// One cut from each of two files, for the importer `--group` cases.
+const PAIR_EDL: &str = "\
+TITLE: pair
+FCM: NON-DROP FRAME
+
+001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00
+* FROM CLIP NAME: red.mp4
+002  AX  V  C  00:00:00:00 00:00:01:00 01:00:01:00 01:00:02:00
+* FROM CLIP NAME: green.mp4
+";
+
+#[test]
+fn import_edl_group_resolves_bare_part_names() {
+    let s = Sandbox::new();
+    s.write("pair.edl", PAIR_EDL);
+    s.ok(&[
+        "import-edl",
+        "pair.edl",
+        "--media",
+        ".",
+        "--group",
+        "PAIR=red.mp4,green.mp4",
+    ]);
+    let listing = s.ok(&["group", "ls"]);
+    assert!(listing.contains("PAIR"), "{listing}");
+    assert!(listing.contains("2 part(s)"), "{listing}");
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["groups"][0]["name"], "PAIR");
+}
+
+#[test]
+fn import_edl_group_refuses_a_missing_part() {
+    let s = Sandbox::new();
+    s.write("pair.edl", PAIR_EDL);
+    let out = s.run(&[
+        "import-edl",
+        "pair.edl",
+        "--media",
+        ".",
+        "--group",
+        "PAIR=red.mp4,missing.mp4",
+    ]);
+    let text = merged(&out);
+    assert!(!out.status.success(), "a missing part is fatal:\n{text}");
+    assert!(text.contains("missing.mp4"), "the part is named:\n{text}");
+    assert!(!s.file(P).exists(), "no project was written");
+}
+
+#[test]
+fn import_edl_group_parts_can_fill_an_empty_media_dir() {
+    let s = Sandbox::new();
+    std::fs::create_dir(s.path().join("empty")).unwrap();
+    s.write("pair.edl", PAIR_EDL);
+    s.ok(&[
+        "import-edl",
+        "pair.edl",
+        "--media",
+        "empty",
+        "--group",
+        "PAIR=red.mp4,green.mp4",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["groups"][0]["name"], "PAIR");
+    assert_eq!(
+        project["media"].as_array().unwrap().len(),
+        2,
+        "the explicit parts are the pool"
+    );
+    assert_eq!(
+        project["sequences"][0]["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "the reels resolve from the pooled parts"
+    );
+}
+
+/// The clip paths moved, but `--group` names the real files: the OTIO
+/// importer pools group parts before it resolves clips, so the pooled-name
+/// fallback finds them (as the EDL importer already did).
+#[test]
+fn import_otio_group_parts_resolve_moved_clips() {
+    let s = Sandbox::new();
+    s.write(
+        "moved.otio",
+        r#"{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "moved",
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "children": [{
+      "OTIO_SCHEMA": "Track.1",
+      "name": "Program",
+      "kind": "Video",
+      "children": [
+        {
+          "OTIO_SCHEMA": "Clip.1",
+          "name": "red",
+          "media_reference": {
+            "OTIO_SCHEMA": "ExternalReference.1",
+            "target_url": "/moved/red.mp4"
+          },
+          "source_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": {"OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 30},
+            "duration": {"OTIO_SCHEMA": "RationalTime.1", "value": 30, "rate": 30}
+          }
+        },
+        {
+          "OTIO_SCHEMA": "Clip.1",
+          "name": "green",
+          "media_reference": {
+            "OTIO_SCHEMA": "ExternalReference.1",
+            "target_url": "/moved/green.mp4"
+          },
+          "source_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": {"OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 30},
+            "duration": {"OTIO_SCHEMA": "RationalTime.1", "value": 30, "rate": 30}
+          }
+        }
+      ]
+    }]
+  }
+}"#,
+    );
+    s.ok(&[
+        "import-otio",
+        "moved.otio",
+        "--group",
+        "PAIR=red.mp4,green.mp4",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["groups"][0]["name"], "PAIR");
+    assert_eq!(
+        project["sequences"][0]["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "both moved clips resolved through the pooled parts"
+    );
+}
+
 #[test]
 fn show_json_exposes_time_maps_and_groups() {
     let s = Sandbox::new();
