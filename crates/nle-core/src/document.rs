@@ -389,8 +389,9 @@ impl Document {
     }
 
     /// Add assets and a media group as one undo step. `files` is the full
-    /// ordered part list (existing assets are allowed); if the group is
-    /// refused, the asset batch is rolled back too.
+    /// ordered part list (existing assets are allowed); any failure restores
+    /// the project and every history stack, so the asset batch is rolled back
+    /// with the group.
     pub fn add_assets_with_group(
         &mut self,
         assets: Vec<(std::path::PathBuf, crate::media::RawProbe)>,
@@ -400,6 +401,23 @@ impl Document {
     ) -> Result<(Vec<u32>, u32), EditError> {
         let project = self.project.clone();
         let histories = self.histories.clone();
+        let result = self.add_assets_with_group_inner(assets, playhead, name, files);
+        if result.is_err() {
+            self.project = project;
+            self.histories = histories;
+        }
+        result
+    }
+
+    /// The fallible body; [`Self::add_assets_with_group`] owns the rollback so
+    /// every early return restores both snapshots.
+    fn add_assets_with_group_inner(
+        &mut self,
+        assets: Vec<(std::path::PathBuf, crate::media::RawProbe)>,
+        playhead: i64,
+        name: impl Into<String>,
+        files: Vec<std::path::PathBuf>,
+    ) -> Result<(Vec<u32>, u32), EditError> {
         let active = self.project.active_id();
         let depth = self.depth();
         self.histories.get_mut(active).begin_batch();
@@ -426,30 +444,15 @@ impl Document {
             start += duration;
         }
         let group =
-            match self
-                .histories
+            self.histories
                 .get_mut(active)
-                .add_group(&mut self.project, name, parts, playhead)
-            {
-                Ok(group) => group,
-                Err(e) => {
-                    self.project = project;
-                    self.histories = histories;
-                    return Err(e);
-                }
-            };
+                .add_group(&mut self.project, name, parts, playhead)?;
         let added = self.depth().saturating_sub(depth);
         if added > 1 {
             let desc = format!("batch: import {} asset(s) + group #{group}", ids.len());
-            if let Err(e) = self
-                .histories
+            self.histories
                 .get_mut(active)
-                .group_newest(added, desc, playhead)
-            {
-                self.project = project;
-                self.histories = histories;
-                return Err(e);
-            }
+                .group_newest(added, desc, playhead)?;
         }
         self.histories.get_mut(active).end_batch();
         Ok((ids, group))
@@ -553,6 +556,65 @@ mod tests {
             effects: Vec::new(),
         })];
         Document::new(p)
+    }
+
+    #[test]
+    fn add_assets_with_group_rolls_back_when_a_part_has_no_duration() {
+        let mut doc = document();
+        let before = doc.project.clone();
+        let depth = doc.depth();
+        // `probe` with no duration mirrors a container ffprobe can't time.
+        let mut nodur = probe("4");
+        nodur.format.duration = None;
+        let files: Vec<std::path::PathBuf> =
+            vec!["/media/a.mp4".into(), "/media/nodur.webm".into()];
+        let err = doc
+            .add_assets_with_group(
+                vec![(files[0].clone(), probe("4")), (files[1].clone(), nodur)],
+                0,
+                "CAM 3",
+                files,
+            )
+            .expect_err("no duration refuses the group");
+        assert!(err.to_string().contains("no known duration"), "{err}");
+        assert_eq!(doc.depth(), depth, "no history entry survives");
+        assert_eq!(
+            without_revision(&doc.project),
+            without_revision(&before),
+            "pool and timeline are restored"
+        );
+        // The batch is closed, so later writes still record.
+        let ids = doc.add_assets(vec![("/media/b.mp4".into(), probe("3"))], 0);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(doc.depth(), depth + 1);
+        doc.undo().expect("undo the later batch");
+        assert_eq!(doc.depth(), depth, "the next batch undoes as one entry");
+    }
+
+    #[test]
+    fn add_assets_with_group_rolls_back_when_the_group_is_refused() {
+        let mut doc = document();
+        let before = doc.project.clone();
+        let depth = doc.depth();
+        let files: Vec<std::path::PathBuf> = vec!["/media/a.mp4".into(), "/media/zero.mp4".into()];
+        let err = doc
+            .add_assets_with_group(
+                vec![
+                    (files[0].clone(), probe("4")),
+                    (files[1].clone(), probe("0")),
+                ],
+                0,
+                "BAD",
+                files,
+            )
+            .expect_err("a zero-length part is invalid");
+        assert!(err.to_string().contains("media group"), "{err}");
+        assert_eq!(doc.depth(), depth, "no history entry survives");
+        assert_eq!(
+            without_revision(&doc.project),
+            without_revision(&before),
+            "the asset batch is rolled back with the group"
+        );
     }
 
     #[test]
