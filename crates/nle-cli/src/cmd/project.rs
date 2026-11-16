@@ -26,7 +26,7 @@ use crate::preview;
 use crate::proxy;
 #[cfg(feature = "tui")]
 use crate::tui;
-use crate::{CacheCmd, SequenceCmd, parse_fps_arg};
+use crate::{CacheCmd, GroupCmd, SequenceCmd, parse_fps_arg};
 use crate::{log, say};
 #[cfg(feature = "tui")]
 pub(crate) fn cmd_edit(
@@ -549,6 +549,49 @@ pub(crate) fn cmd_sequence(project_path: &Path, action: &SequenceCmd) -> Result<
             let name = project.active_sequence().name.clone();
             Document::new(project).save(project_path)?;
             say!("✓ sequence #{id} {name} is active");
+            Ok(())
+        }
+    }
+}
+
+/// `nile group ls|rm` — logical media recordings.
+pub(crate) fn cmd_group(project_path: &Path, action: &GroupCmd) -> Result<()> {
+    match action {
+        GroupCmd::Ls => {
+            let project = Project::load(project_path)?;
+            if project.groups.is_empty() {
+                say!("no media groups — `nile import --group NAME FILES…`");
+                return Ok(());
+            }
+            say!(
+                "{} — {} media group(s)",
+                project_path.display(),
+                project.groups.len()
+            );
+            for group in &project.groups {
+                let end = group
+                    .end()
+                    .map(|end| format_seconds(&end))
+                    .unwrap_or_else(|| "?".into());
+                say!(
+                    "  #{:<3} {:<20} {} part(s) · 0–{} s",
+                    group.id,
+                    group.name,
+                    group.parts.len(),
+                    end
+                );
+            }
+            Ok(())
+        }
+        GroupCmd::Rm { id } => {
+            let project = Project::load(project_path)?;
+            let histories = edit::Histories::load_project(project_path).unwrap_or_default();
+            let mut doc = Document::with_histories(project, histories);
+            let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
+            let desc = doc.remove_group(*id, playhead)?;
+            doc.save(project_path)?;
+            doc.save_history(&edit::Histories::sidecar_path(project_path))?;
+            say!("✓ {desc}");
             Ok(())
         }
     }
