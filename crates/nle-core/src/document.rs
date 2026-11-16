@@ -218,9 +218,14 @@ impl Document {
 
     /// Apply a prepared batch (an extend commit builds one before committing).
     pub fn apply(&mut self, batch: Batch, playhead: i64) -> Result<(), EditError> {
-        let active = self.project.active_id();
-        let history = self.histories.get_mut(active);
-        history.apply(&mut self.project, batch, playhead)
+        self.clear_warnings();
+        let result = {
+            let active = self.project.active_id();
+            let history = self.histories.get_mut(active);
+            history.apply(&mut self.project, batch, playhead)
+        };
+        self.clear_warnings();
+        result
     }
 
     /// Run several catalog actions as one undo step. The project, every

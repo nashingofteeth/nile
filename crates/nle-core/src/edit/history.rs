@@ -96,16 +96,13 @@ impl History {
         let touched = batch_tracks(&batch);
         if touched.len() > 1 {
             let before = project.timeline.tracks.clone();
-            let warnings = self.warnings.len();
             if let Err(e) = apply_batch(project, &batch.ops) {
                 project.timeline.tracks = before;
-                self.warnings.truncate(warnings);
                 return Err(e);
             }
             let notes = clamp_project(project);
             if let Err(e) = project.validate() {
                 project.timeline.tracks = before;
-                self.warnings.truncate(warnings);
                 return Err(e.into());
             }
             self.warnings.extend(notes);
@@ -123,19 +120,16 @@ impl History {
         let track = batch_track(&batch, project)?;
         let before = snapshot_track(&project.timeline.tracks[track]);
         let saved = project.timeline.tracks[track].segments.clone();
-        let warnings = self.warnings.len();
         // Clamp before snapshotting: the recorded `after` must be the state
         // undo restores, so a batch can never leave a clip reading past EOF
         // or a sub-frame sliver behind.
         if let Err(e) = apply_batch(project, &batch.ops) {
             project.timeline.tracks[track].segments = saved;
-            self.warnings.truncate(warnings);
             return Err(e);
         }
         let notes = clamp_project(project);
         if let Err(e) = project.validate() {
             project.timeline.tracks[track].segments = saved;
-            self.warnings.truncate(warnings);
             return Err(e.into());
         }
         self.warnings.extend(notes);
