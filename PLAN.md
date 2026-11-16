@@ -497,6 +497,9 @@ shared by the TUI and agents — with no clipgen code present.
   (`Change::Group`, history v18), the preview diff/warnings reply, the
   socket/single-writer lock, and TUI attach (`Session::open`). `job.*` moves
   with the render milestone.
+- Deferred: an attached `:import` probes each path twice (the worker, then
+  `media.add`), so a large batch can freeze the TUI and hold the server mutex;
+  fix with probe reports on the wire or a worker-side client.
 - `action.preview` applies a batch to a cloned `Document` and returns the
   diff + warnings; `action.apply` is atomic and returns the new revision.
   A mismatched `base_revision` is a typed conflict with `{expected, actual}`;
