@@ -18,6 +18,8 @@ pub enum TimeMapError {
     Overlap,
     #[error("time-map arithmetic overflow")]
     Overflow,
+    #[error("a track mixes assets; build one map per asset or use a MediaGroup")]
+    MixedAssets,
 }
 
 /// One half-open timeline→source span.
@@ -27,6 +29,9 @@ pub struct TimeSpan {
     timeline_end: Seconds,
     source_start: Seconds,
     source_end: Seconds,
+    /// Source seconds per timeline second. Validated in `new`, so a span
+    /// that exists can always be evaluated.
+    scale: Seconds,
 }
 
 impl TimeSpan {
@@ -39,11 +44,16 @@ impl TimeSpan {
         if timeline_start >= timeline_end || source_start >= source_end {
             return Err(TimeMapError::EmptySpan);
         }
+        let timeline_len =
+            checked_sub(&timeline_end, &timeline_start).ok_or(TimeMapError::Overflow)?;
+        let source_len = checked_sub(&source_end, &source_start).ok_or(TimeMapError::Overflow)?;
+        let scale = checked_div(&source_len, &timeline_len).ok_or(TimeMapError::Overflow)?;
         Ok(Self {
             timeline_start,
             timeline_end,
             source_start,
             source_end,
+            scale,
         })
     }
 
@@ -55,27 +65,15 @@ impl TimeSpan {
         (self.source_start, self.source_end)
     }
 
-    fn timeline_len(&self) -> Option<Seconds> {
-        checked_sub(&self.timeline_end, &self.timeline_start)
-    }
-
-    fn source_len(&self) -> Option<Seconds> {
-        checked_sub(&self.source_end, &self.source_start)
-    }
-
-    fn scale(&self) -> Option<Seconds> {
-        checked_div(&self.source_len()?, &self.timeline_len()?)
-    }
-
     fn map_endpoint(&self, timeline: &Seconds) -> Option<Seconds> {
         let dt = checked_sub(timeline, &self.timeline_start)?;
-        let offset = checked_mul(&dt, &self.scale()?)?;
+        let offset = checked_mul(&dt, &self.scale)?;
         checked_add(&self.source_start, &offset)
     }
 
     fn inverse_endpoint(&self, source: &Seconds) -> Option<Seconds> {
         let ds = checked_sub(source, &self.source_start)?;
-        let offset = checked_div(&ds, &self.scale()?)?;
+        let offset = checked_div(&ds, &self.scale)?;
         checked_add(&self.timeline_start, &offset)
     }
 
@@ -120,7 +118,9 @@ impl TimeMap {
             .and_then(|span| span.map_endpoint(timeline))
     }
 
-    /// Source time → timeline time, or `None` when no span reads it.
+    /// Source time → timeline time, or `None` when no span reads it. When an
+    /// asset is used more than once, the first span in timeline order wins;
+    /// callers that need disambiguation should query per asset.
     pub fn inverse(&self, source: &Seconds) -> Option<Seconds> {
         self.spans
             .iter()
@@ -130,7 +130,10 @@ impl TimeMap {
 
     /// Clip the map to a timeline range. Gaps stay gaps.
     pub fn trim(&self, start: &Seconds, end: &Seconds) -> Result<Self, TimeMapError> {
-        if start >= end {
+        if start > end {
+            return Err(TimeMapError::EmptySpan);
+        }
+        if start == end {
             return Ok(Self::default());
         }
         let mut spans = Vec::new();
@@ -149,10 +152,14 @@ impl TimeMap {
 
     /// Map a half-open timeline range to one or more source ranges. A range
     /// that crosses a gap yields the pieces on either side; a range wholly in
-    /// a gap yields an empty vector.
-    pub fn map_range(&self, start: &Seconds, end: &Seconds) -> Vec<(Seconds, Seconds)> {
+    /// a gap yields an empty vector. Adjacent spans stay separate pieces.
+    pub fn map_range(
+        &self,
+        start: &Seconds,
+        end: &Seconds,
+    ) -> Result<Vec<(Seconds, Seconds)>, TimeMapError> {
         if start >= end {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut ranges = Vec::new();
         for span in &self.spans {
@@ -161,14 +168,11 @@ impl TimeMap {
             if lo >= hi {
                 continue;
             }
-            let (Some(source_lo), Some(source_hi)) =
-                (span.map_endpoint(&lo), span.map_endpoint(&hi))
-            else {
-                continue;
-            };
+            let source_lo = span.map_endpoint(&lo).ok_or(TimeMapError::Overflow)?;
+            let source_hi = span.map_endpoint(&hi).ok_or(TimeMapError::Overflow)?;
             ranges.push((source_lo, source_hi));
         }
-        ranges
+        Ok(ranges)
     }
 
     /// `self` then `outer`: timeline of `self` → source of `outer`'s timeline
@@ -197,27 +201,42 @@ impl TimeMap {
         Self::new(spans)
     }
 
-    /// Build a map for one track. Transitions cover two sources at once, so
-    /// they are holes here until a multi-source map exists; gaps are holes by
-    /// definition.
-    pub fn from_track(track: &Track) -> Result<Self, TimeMapError> {
+    /// Build a map for one asset on a track. Clips of other assets advance the
+    /// cursor but contribute no span; transitions and gaps are holes.
+    pub fn from_track_for_asset(track: &Track, asset: u32) -> Result<Self, TimeMapError> {
         let mut cursor = Seconds::from_integer(0);
         let mut spans = Vec::new();
         for segment in &track.segments {
-            let duration = segment.duration();
+            let duration = segment.checked_duration().ok_or(TimeMapError::Overflow)?;
             if duration <= Seconds::from_integer(0) {
                 return Err(TimeMapError::EmptySpan);
             }
             let end = checked_add(&cursor, &duration).ok_or(TimeMapError::Overflow)?;
-            match segment {
-                Segment::Clip(clip) => {
-                    spans.push(TimeSpan::new(cursor, end, clip.asset_in, clip.asset_out)?);
-                }
-                Segment::Gap(_) | Segment::Transition(_) => {}
+            if let Segment::Clip(clip) = segment
+                && clip.asset == asset
+            {
+                spans.push(TimeSpan::new(cursor, end, clip.asset_in, clip.asset_out)?);
             }
             cursor = end;
         }
         Self::new(spans)
+    }
+
+    /// Build a map for one track. A track with clips from more than one asset
+    /// has no single source axis, so it is refused; use
+    /// [`TimeMap::from_track_for_asset`] or a `MediaGroup`.
+    pub fn from_track(track: &Track) -> Result<Self, TimeMapError> {
+        let mut assets = std::collections::BTreeSet::new();
+        for segment in &track.segments {
+            if let Segment::Clip(clip) = segment {
+                assets.insert(clip.asset);
+            }
+        }
+        match assets.len() {
+            0 => Ok(Self::default()),
+            1 => Self::from_track_for_asset(track, *assets.iter().next().expect("one asset")),
+            _ => Err(TimeMapError::MixedAssets),
+        }
     }
 }
 
@@ -264,7 +283,7 @@ mod tests {
         assert_eq!(map.map(&s(2)), None);
         assert_eq!(map.map(&s(5)), Some(s(21)));
         assert_eq!(
-            map.map_range(&s(1), &s(5)),
+            map.map_range(&s(1), &s(5)).unwrap(),
             vec![(s(11), s(12)), (s(20), s(21))]
         );
         let trimmed = map.trim(&s(1), &s(5)).unwrap();
@@ -288,7 +307,7 @@ mod tests {
             segments: vec![
                 Segment::Clip(Clip::new(1, 1, s(10), s(12))),
                 Segment::Gap(Gap { duration: s(1) }),
-                Segment::Clip(Clip::new(2, 2, s(20), s(24))),
+                Segment::Clip(Clip::new(2, 1, s(20), s(24))),
             ],
         };
         let map = TimeMap::from_track(&track).unwrap();
@@ -302,14 +321,100 @@ mod tests {
     }
 
     #[test]
+    fn a_track_with_two_assets_needs_an_asset_or_group() {
+        let track = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![
+                Segment::Clip(Clip::new(1, 1, s(10), s(12))),
+                Segment::Clip(Clip::new(2, 2, s(20), s(22))),
+            ],
+        };
+        assert_eq!(TimeMap::from_track(&track), Err(TimeMapError::MixedAssets));
+        let one = TimeMap::from_track_for_asset(&track, 1).unwrap();
+        assert_eq!(one.map(&s(0)), Some(s(10)));
+        assert_eq!(one.map(&s(2)), None, "the other asset is a hole");
+        let two = TimeMap::from_track_for_asset(&track, 2).unwrap();
+        assert_eq!(two.map(&s(2)), Some(s(20)));
+    }
+
+    #[test]
+    fn a_two_x_clip_and_a_half_frame_round_trip() {
+        let mut fast = Clip::new(1, 1, s(10), s(14));
+        fast.speed = s(2);
+        let track = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(fast)],
+        };
+        let map = TimeMap::from_track_for_asset(&track, 1).unwrap();
+        assert_eq!(map.map(&s(1)), Some(s(12)));
+        assert_eq!(map.inverse(&s(12)), Some(s(1)));
+
+        let half = Clip::new(2, 1, Seconds::new(1, 2), Seconds::new(3, 2));
+        let track = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(half)],
+        };
+        let map = TimeMap::from_track_for_asset(&track, 1).unwrap();
+        assert_eq!(map.map(&Seconds::new(1, 2)), Some(s(1)));
+        assert_eq!(map.inverse(&Seconds::new(1, 1)), Some(Seconds::new(1, 2)));
+    }
+
+    #[test]
+    fn a_transition_is_a_hole_and_the_cursor_advances() {
+        use crate::timeline::{Transition, TransitionKind, TransitionSource};
+        let side = |asset| TransitionSource::Clip {
+            asset,
+            src_in: s(0),
+            src_out: s(1),
+            effects: Vec::new(),
+        };
+        let track = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![
+                Segment::Clip(Clip::new(1, 1, s(10), s(12))),
+                Segment::Transition(Transition {
+                    id: 2,
+                    dur: s(1),
+                    kind: TransitionKind::Dissolve,
+                    a: side(1),
+                    b: side(1),
+                }),
+                Segment::Clip(Clip::new(3, 1, s(20), s(22))),
+            ],
+        };
+        let map = TimeMap::from_track_for_asset(&track, 1).unwrap();
+        assert_eq!(map.map(&s(2)), None);
+        assert_eq!(map.map(&s(3)), Some(s(20)));
+    }
+
+    #[test]
+    fn trim_rejects_reversed_ranges_and_accepts_empty_ones() {
+        let map = TimeMap::new(vec![span(0, 2, 10, 12)]).unwrap();
+        assert_eq!(map.trim(&s(2), &s(1)), Err(TimeMapError::EmptySpan));
+        assert_eq!(map.trim(&s(1), &s(1)).unwrap(), TimeMap::default());
+    }
+
+    #[test]
+    fn an_unrepresentable_rate_is_refused() {
+        assert_eq!(
+            TimeSpan::new(s(0), Seconds::new(1, i64::MAX), s(0), s(86400)),
+            Err(TimeMapError::Overflow)
+        );
+    }
+
+    #[test]
     fn mapping_round_trips_exactly_for_speed_and_offsets() {
         let map = TimeMap::new(vec![span(3, 9, 100, 118)]).unwrap();
         for t in [3, 4, 5, 6, 7, 8] {
             let source = map.map(&s(t)).expect("inside the span");
             assert_eq!(map.inverse(&source), Some(s(t)), "t = {t}");
         }
-        assert_eq!(map.map_range(&s(2), &s(2)), Vec::new());
-        assert_eq!(map.map_range(&s(10), &s(12)), Vec::new());
+        assert_eq!(map.map_range(&s(2), &s(2)).unwrap(), Vec::new());
+        assert_eq!(map.map_range(&s(10), &s(12)).unwrap(), Vec::new());
     }
 
     #[test]
