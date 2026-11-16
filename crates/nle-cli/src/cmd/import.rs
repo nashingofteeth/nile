@@ -169,10 +169,9 @@ pub(crate) fn parse_group_specs(raw: &[String]) -> Result<Vec<GroupSpec>> {
 /// Locate one explicit group part: as given, then in the importer's media
 /// directory, then by a unique pooled file name. Unlike the directory scan,
 /// a group part is a promise — a miss is fatal, not a warning.
-fn resolve_group_part(project: &Project, raw: &Path, extra: &[&Path]) -> Result<PathBuf> {
-    let mut candidates = vec![raw.to_path_buf()];
-    candidates.extend(extra.iter().map(|dir| dir.join(raw)));
-    for candidate in candidates {
+fn resolve_group_part(project: &Project, raw: &Path, dir: &Path) -> Result<PathBuf> {
+    let raw = expand_tilde(raw);
+    for candidate in [raw.clone(), dir.join(&raw)] {
         if candidate.is_file() {
             return candidate
                 .canonicalize()
@@ -199,14 +198,14 @@ fn resolve_group_part(project: &Project, raw: &Path, extra: &[&Path]) -> Result<
     bail!("group part {} not found", raw.display())
 }
 
-/// Pool a resolved part if it is new, returning its canonical path.
-fn pool_group_part(project: &mut Project, path: &Path) -> Result<PathBuf> {
+/// Probe and pool a resolved part if it is new.
+fn pool_group_part(project: &mut Project, path: &Path) -> Result<()> {
     if project.asset_by_path(path).is_some() {
-        return Ok(path.to_path_buf());
+        return Ok(());
     }
     let report = probe(path).with_context(|| format!("probing {}", path.display()))?;
     project.add_asset(path.to_path_buf(), report);
-    Ok(path.to_path_buf())
+    Ok(())
 }
 
 /// Turn pooled parts into one group through the model's constructor, so
@@ -447,7 +446,6 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
         Ok(canonical)
     };
 
-    let mut imported = 0usize;
     let mut notes: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(media_dir)
         .with_context(|| format!("reading media dir {}", media_dir.display()))?
@@ -462,16 +460,11 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
             // A directory scan is a *candidate* list: one unreadable file
             // (a partial copy, a stray text file with a media extension)
             // must not sink the whole import — warn and keep looking.
-            match add(&mut project, &path) {
-                Ok(_) => imported += 1,
-                Err(e) => notes.push(format!("warning: skipping {} — {e}", path.display())),
+            if let Err(e) = add(&mut project, &path) {
+                notes.push(format!("warning: skipping {} — {e}", path.display()));
             }
         }
     }
-    if imported == 0 {
-        bail!("no media files found in {}", media_dir.display());
-    }
-
     let mut map: HashMap<String, PathBuf> = HashMap::new();
     for m in maps {
         let (reel, path) = m
@@ -487,10 +480,16 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
     for spec in groups {
         let mut paths = Vec::with_capacity(spec.parts.len());
         for raw in &spec.parts {
-            let resolved = resolve_group_part(&project, raw, &[media_dir])?;
-            paths.push(add(&mut project, &resolved)?);
+            let resolved = resolve_group_part(&project, raw, media_dir)?;
+            pool_group_part(&mut project, &resolved)?;
+            paths.push(resolved);
         }
         add_group_parts(&mut project, spec, &paths)?;
+    }
+    // A wrong `--media` directory is still an error, but explicit parts
+    // (`--map`, `--group`) are pooled media in their own right.
+    if project.media.is_empty() {
+        bail!("no media files found in {}", media_dir.display());
     }
 
     // Prefer the first video event's asset for settings; fall back to any.
@@ -675,6 +674,19 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
         .collect::<Result<_>>()?;
     let base = otio_path.parent().unwrap_or_else(|| Path::new("."));
 
+    // Explicit groups pool their parts before clip resolution, so a group
+    // part can satisfy a clip whose path moved (the pooled-name fallback),
+    // exactly as the EDL importer does.
+    for spec in groups {
+        let mut paths = Vec::with_capacity(spec.parts.len());
+        for raw in &spec.parts {
+            let resolved = resolve_group_part(&project, raw, base)?;
+            pool_group_part(&mut project, &resolved)?;
+            paths.push(resolved);
+        }
+        add_group_parts(&mut project, spec, &paths)?;
+    }
+
     // Resolve + probe every distinct clip path.
     let mut by_path: HashMap<PathBuf, u32> = HashMap::new();
     for track in &doc.tracks {
@@ -692,17 +704,6 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
             let (id, _) = project.add_asset(canonical, report);
             by_path.insert(c.path.clone(), id);
         }
-    }
-
-    // Explicit groups pool their parts first; the timeline build below does
-    // not depend on them, but `show --json --maps` does.
-    for spec in groups {
-        let mut paths = Vec::with_capacity(spec.parts.len());
-        for raw in &spec.parts {
-            let resolved = resolve_group_part(&project, raw, &[base])?;
-            paths.push(pool_group_part(&mut project, &resolved)?);
-        }
-        add_group_parts(&mut project, spec, &paths)?;
     }
 
     let fps = match fps_arg {
@@ -760,7 +761,7 @@ mod tests {
     use nle_core::Seconds;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
 
-    fn probe(duration: &str) -> RawProbe {
+    fn fake_probe(duration: &str) -> RawProbe {
         RawProbe {
             streams: vec![RawStream {
                 index: 0,
@@ -798,8 +799,8 @@ mod tests {
     #[test]
     fn group_parts_use_argument_order_and_cumulative_starts() {
         let mut p = Project::new();
-        let (first, _) = p.add_asset("/media/a.mp4".into(), probe("2"));
-        let (second, _) = p.add_asset("/media/b.mp4".into(), probe("3"));
+        let (first, _) = p.add_asset("/media/a.mp4".into(), fake_probe("2"));
+        let (second, _) = p.add_asset("/media/b.mp4".into(), fake_probe("3"));
         let spec: GroupSpec = "CAM 3=a.mp4,b.mp4".parse().unwrap();
         let id = add_group_parts(
             &mut p,
@@ -819,7 +820,7 @@ mod tests {
     #[test]
     fn group_parts_refuse_a_duplicate_part() {
         let mut p = Project::new();
-        p.add_asset("/media/a.mp4".into(), probe("2"));
+        p.add_asset("/media/a.mp4".into(), fake_probe("2"));
         let spec: GroupSpec = "CAM 3=a.mp4,a.mp4".parse().unwrap();
         let err = add_group_parts(
             &mut p,
@@ -834,8 +835,8 @@ mod tests {
     #[test]
     fn group_parts_refuse_an_unknown_duration() {
         let mut p = Project::new();
-        p.add_asset("/media/a.mp4".into(), probe("2"));
-        let mut nodur = probe("2");
+        p.add_asset("/media/a.mp4".into(), fake_probe("2"));
+        let mut nodur = fake_probe("2");
         nodur.format.duration = None;
         p.add_asset("/media/b.webm".into(), nodur);
         let spec: GroupSpec = "CAM 3=a.mp4,b.webm".parse().unwrap();
@@ -847,5 +848,59 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("no known duration"), "{err}");
         assert!(p.groups.is_empty(), "nothing was added");
+    }
+
+    #[test]
+    fn resolve_group_part_tries_the_path_then_the_media_dir_then_the_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("local.mp4"), b"").unwrap();
+        let mut p = Project::new();
+        p.add_asset("/archive/pooled.mp4".into(), fake_probe("2"));
+        p.add_asset("/archive/moved.mp4".into(), fake_probe("2"));
+
+        let absolute = dir.path().join("local.mp4");
+        assert_eq!(
+            resolve_group_part(&p, &absolute, dir.path()).unwrap(),
+            absolute.canonicalize().unwrap(),
+            "as given"
+        );
+        assert_eq!(
+            resolve_group_part(&p, Path::new("local.mp4"), dir.path()).unwrap(),
+            absolute.canonicalize().unwrap(),
+            "relative to the media dir"
+        );
+        assert_eq!(
+            resolve_group_part(&p, Path::new("pooled.mp4"), dir.path()).unwrap(),
+            PathBuf::from("/archive/pooled.mp4"),
+            "a unique pooled name"
+        );
+    }
+
+    #[test]
+    fn resolve_group_part_refuses_a_missing_or_ambiguous_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = Project::new();
+        p.add_asset("/one/cam.mp4".into(), fake_probe("2"));
+        p.add_asset("/two/cam.mp4".into(), fake_probe("2"));
+
+        let err = resolve_group_part(&p, Path::new("cam.mp4"), dir.path()).unwrap_err();
+        assert!(err.to_string().contains("matches 2 pooled files"), "{err}");
+        let err = resolve_group_part(&p, Path::new("nope.mp4"), dir.path()).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn expand_tilde_uses_home_for_the_quoted_flag_form() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        assert_eq!(expand_tilde(Path::new("~/a.mp4")), home.join("a.mp4"));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn parse_group_specs_rejects_a_bad_tui_flag() {
+        let err = parse_group_specs(&["CAM 3".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("NAME=FILE"), "{err}");
     }
 }
