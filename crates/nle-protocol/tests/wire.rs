@@ -56,10 +56,12 @@ impl Handler for Fake {
                 self.check(*base_revision)?;
                 self.last_from = *from;
                 Ok(Reply::Preview(Preview {
-                    revision: self.revision,
-                    desc: format!("preview {}", actions.first().map_or(0, Action::slot)),
-                    changed: true,
-                    playhead: None,
+                    outcome: Outcome {
+                        revision: self.revision,
+                        desc: format!("preview {}", actions.first().map_or(0, Action::slot)),
+                        changed: true,
+                        playhead: None,
+                    },
                     diff: ProjectDiff::default(),
                     warnings: Vec::new(),
                 }))
@@ -291,10 +293,12 @@ fn apply_moves_the_revision_and_preview_does_not() {
     assert_eq!(
         preview.expect("preview"),
         Reply::Preview(Preview {
-            revision: 7,
-            desc: "preview 2".into(),
-            changed: true,
-            playhead: None,
+            outcome: Outcome {
+                revision: 7,
+                desc: "preview 2".into(),
+                changed: true,
+                playhead: None,
+            },
             diff: ProjectDiff::default(),
             warnings: Vec::new(),
         })

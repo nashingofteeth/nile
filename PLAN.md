@@ -497,7 +497,8 @@ shared by the TUI and agents — with no clipgen code present.
   Remaining: the socket/single-writer lock and TUI attach.
 - `action.preview` applies a batch to a cloned `Document` and returns the
   diff + warnings; `action.apply` is atomic and returns the new revision.
-  A mismatched `base_revision` is a typed conflict with the diff.
+  A mismatched `base_revision` is a typed conflict with `{expected, actual}`;
+  `action.preview` returns the diff.
 - `nile serve` is the single writer when open; one-shot CLI stays file-based;
   the TUI attaches to the server. Events: `project.changed`,
   `sequence.changed`, `job.progress`, `annotation.added`, `playhead`.

@@ -20,7 +20,8 @@ use anyhow::{Context, Result};
 
 use nle_core::edit::Actor;
 use nle_core::{
-    Action, Asset, EditError, Project, Seconds, TrackKind, frame_of, frames_to_seconds, secs_f64,
+    Action, Asset, EditError, Outcome as ActionOutcome, Project, Seconds, TrackKind, frame_of,
+    frames_to_seconds, secs_f64,
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
@@ -145,6 +146,23 @@ impl ServeHandler {
             return Err(self.poison(e));
         }
         Ok(())
+    }
+
+    /// One place for the wire's common outcome fields. `playhead` is passed
+    /// explicitly because apply may reanchor it while preview reports the
+    /// action's own result.
+    fn wire_outcome(
+        &self,
+        outcome: ActionOutcome,
+        revision: u64,
+        playhead: Option<Seconds>,
+    ) -> WireOutcome {
+        WireOutcome {
+            revision,
+            desc: outcome.desc,
+            changed: outcome.changed,
+            playhead,
+        }
     }
 
     /// The undo anchor: the request's `from`, or the shared playhead.
@@ -330,14 +348,13 @@ impl ServeHandler {
             _ => self.session.preview_actions(actions, from),
         }
         .map_err(edit_rpc)?;
+        let playhead = preview
+            .outcome
+            .playhead
+            .map(|frame| self.frame_seconds(frame));
+        let outcome = self.wire_outcome(preview.outcome, self.session.revision(), playhead);
         Ok(Reply::Preview(Preview {
-            revision: self.session.revision(),
-            desc: preview.outcome.desc,
-            changed: preview.outcome.changed,
-            playhead: preview
-                .outcome
-                .playhead
-                .map(|frame| self.frame_seconds(frame)),
+            outcome,
             diff: preview.diff,
             warnings: preview.warnings,
         }))
@@ -401,12 +418,9 @@ impl ServeHandler {
         if let Some(at) = playhead {
             self.events.push(Event::Playhead { at });
         }
-        Ok(Reply::Outcome(WireOutcome {
-            revision,
-            desc: outcome.desc,
-            changed: outcome.changed,
-            playhead,
-        }))
+        Ok(Reply::Outcome(
+            self.wire_outcome(outcome, revision, playhead),
+        ))
     }
 }
 

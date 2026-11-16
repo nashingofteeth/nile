@@ -89,6 +89,13 @@ explainers, and commit-adjacent notes:
 - Keep it short and tied to the code at hand — a concrete explainer beats a
   tutorial dump. Tie lessons to a real file/line.
 
+## Branch and merge
+
+Work on a branch and push it when the gates pass. **Never merge to `main`
+without explicit user permission** — "review" is not permission; wait for a
+clear "merge". After approval, merge with `--no-ff`, rerun
+`scripts/check.sh` on `main`, then push.
+
 ## Verify before every commit
 
 Run `scripts/check.sh`; do not commit otherwise — it is the gate list (fmt,

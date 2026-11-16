@@ -673,6 +673,13 @@ fn preview_reports_clamp_warnings() {
             .any(|w| w.as_str().is_some_and(|s| s.contains("out 99"))),
         "{warnings:?}"
     );
+    let diff = &preview["result"]["diff"];
+    assert_eq!(diff["sequences"][0]["id"], 1);
+    assert_eq!(diff["sequences"][0]["tracks"][0]["before_segments"], 3);
+    assert_eq!(
+        diff["sequences"][0]["tracks"][0]["after_segments"], 4,
+        "the pasted clip is in the preview diff"
+    );
     assert_eq!(preview["result"]["revision"], revision);
     let show = call(&mut serve, 3, "project.show", None);
     assert_eq!(show["result"]["revision"], revision, "preview did not save");
