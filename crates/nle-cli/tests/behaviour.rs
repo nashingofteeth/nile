@@ -115,9 +115,16 @@ fn show_json_exposes_time_maps_and_groups() {
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
     assert_eq!(project["version"], 12);
     assert_eq!(project["groups"], serde_json::json!([]));
-    let maps = project["time_maps"].as_array().expect("time maps");
+    assert!(
+        project.get("time_maps").is_none(),
+        "plain show --json is the persisted project"
+    );
+
+    let with_maps: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json", "--maps"])).expect("project + maps");
+    let maps = with_maps["time_maps"].as_array().expect("time maps");
     assert!(!maps.is_empty(), "the clips produce a map");
-    assert_eq!(maps[0]["track"], 0);
+    assert_eq!(maps[0]["track_index"], 0);
     assert_eq!(maps[0]["asset"], 1);
     assert!(
         maps[0]["spans"]

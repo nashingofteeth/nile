@@ -37,6 +37,7 @@ impl MediaPart {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaGroup {
     pub id: u32,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub parts: Vec<MediaPart>,

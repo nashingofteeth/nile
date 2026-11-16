@@ -384,13 +384,16 @@ impl Document {
             .edit_tracks(&mut self.project, playhead, edit)
     }
 
-    /// Clamp, then save. The only persisted write path. A clamp that actually
-    /// repaired the model is a model write, so it bumps the revision; a clean
-    /// save — the normal case, and every playhead-only one — leaves it alone.
+    /// Clamp, validate, then save. The only persisted write path: a model that
+    /// would not load again (including a group over an unpooled asset) must not
+    /// reach disk. A clamp that actually repaired the model is a model write,
+    /// so it bumps the revision; a clean save — the normal case, and every
+    /// playhead-only one — leaves it alone.
     pub fn save(&mut self, path: &Path) -> Result<(), ProjectError> {
         if !edit::clamp_project_all(&mut self.project).is_empty() {
             self.project.bump_revision();
         }
+        self.project.validate()?;
         self.project.save(path)
     }
 
