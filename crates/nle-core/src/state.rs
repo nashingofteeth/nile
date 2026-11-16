@@ -38,6 +38,11 @@ pub fn cache_dir(project_path: &Path) -> PathBuf {
     state_dir(project_path).join("cache")
 }
 
+/// Unix socket the live protocol server listens on.
+pub fn session_socket_path(project_path: &Path) -> PathBuf {
+    state_dir(project_path).join("session.sock")
+}
+
 /// Directory-level config (`.nile/config.json` in the current directory).
 pub fn config_path(cwd: &Path) -> PathBuf {
     cwd.join(STATE_DIR).join(CONFIG_FILE)
@@ -111,6 +116,10 @@ mod tests {
             PathBuf::from("/videos/trip/.nile/nile/clipboard.json")
         );
         assert_eq!(cache_dir(p), PathBuf::from("/videos/trip/.nile/nile/cache"));
+        assert_eq!(
+            session_socket_path(p),
+            PathBuf::from("/videos/trip/.nile/nile/session.sock")
+        );
     }
 
     #[test]

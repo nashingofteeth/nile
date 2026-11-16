@@ -422,11 +422,15 @@ NLE_LOG=/tmp/nle.log nile edit            # timestamped diagnostics
 ### Protocol server (experimental)
 
 ```sh
-nile serve --stdio
+nile serve                                # .nile/<stem>/session.sock
+nile serve --stdio                        # pipe mode for scripts/tests
 ```
 
-`nile serve` exposes the loaded project over JSON-RPC 2.0 on stdin/stdout, one
-object per line. Call `hello` first, then `project.show`, `timeline.edl`,
+`nile serve` exposes the loaded project over JSON-RPC 2.0, one object per
+line, on the project's Unix socket (or stdin/stdout with `--stdio`). One
+server per project owns the socket; a second `nile serve` refuses. Multiple
+connections serialize their calls through one handler. Call `hello` first,
+then `project.show`, `timeline.edl`,
 `sequence.list|use|add`, `media.list|add`, `action.preview`, `action.apply`,
 `undo`, or `redo`.
 Actions apply to the active sequence; add media and a second sequence first,
@@ -442,10 +446,11 @@ then switch to it:
 
 `action.preview` additionally returns a structural `diff` and clamp
 `warnings`; `action.apply` returns the plain outcome. The wire is pre-1.0 and
-may change. It is a single-writer interface: close the TUI and other editing
-commands while it runs. `stdout` is protocol-only; logs
-go to stderr or `NLE_LOG`. The full contract, including the error codes and
-the event order, is in [docs/pitfalls/protocol.md](docs/pitfalls/protocol.md).
+may change. In socket mode one server is the single writer for the project;
+one-shot CLI edits are still file-based and should not run alongside it.
+`stdout` is protocol-only; logs go to stderr or `NLE_LOG`. The full
+contract, including the error codes and the event order, is in
+[docs/pitfalls/protocol.md](docs/pitfalls/protocol.md).
 
 ## Files and concurrency
 
@@ -460,6 +465,7 @@ video/
     ├── config.json    # optional default_project for this directory
     └── nile/
         ├── history.json
+        ├── session.sock   # live serve socket (present while serving)
         ├── clipboard.json
         ├── view.json      # zoom, scroll, active track, pool source marks
         └── cache/
