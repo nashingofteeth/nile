@@ -448,8 +448,10 @@ then switch to it:
 `warnings`; `action.apply` returns the plain outcome. The wire is pre-1.0 and
 may change. In socket mode one server is the single writer for the project;
 one-shot CLI edits are still file-based and should not run alongside it.
-`stdout` is protocol-only; logs go to stderr or `NLE_LOG`. The full
-contract, including the error codes and the event order, is in
+Piping requests into bare `nile serve` now blocks waiting for the socket; add
+`--stdio` for a pipe. In `--stdio` mode `stdout` is protocol-only; logs go to
+stderr or `NLE_LOG` in both modes. The full contract, including the error
+codes and the event order, is in
 [docs/pitfalls/protocol.md](docs/pitfalls/protocol.md).
 
 ## Files and concurrency
@@ -466,6 +468,7 @@ video/
     └── nile/
         ├── history.json
         ├── session.sock   # live serve socket (present while serving)
+        ├── serve.lock     # startup single-writer lock
         ├── clipboard.json
         ├── view.json      # zoom, scroll, active track, pool source marks
         └── cache/

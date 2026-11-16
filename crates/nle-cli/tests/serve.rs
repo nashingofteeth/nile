@@ -739,10 +739,28 @@ fn a_failed_batch_leaves_no_trace() {
 #[cfg(unix)]
 #[test]
 fn socket_is_the_default_and_is_single_writer() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::BufReader;
     use std::os::unix::net::UnixStream;
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    struct ChildGuard(Option<Child>);
+    impl ChildGuard {
+        fn new(child: Child) -> Self {
+            Self(Some(child))
+        }
+        fn kill(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
 
     let sandbox = Sandbox::new();
     sandbox.base();
@@ -767,19 +785,38 @@ fn socket_is_the_default_and_is_single_writer() {
         }
     };
 
-    let mut first = spawn();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let stream = connect(deadline);
-    let mut writer = stream.try_clone().expect("clone");
-    let mut reader = BufReader::new(stream);
-    writer
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}\n")
-        .unwrap();
-    writer.flush().unwrap();
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let hello: Value = serde_json::from_str(&line).expect("hello JSON");
-    assert_eq!(hello["result"]["protocol"], 5);
+    let mut first = ChildGuard::new(spawn());
+    let stream = connect(Instant::now() + Duration::from_secs(5));
+    let write = stream.try_clone().expect("clone");
+    let mut a = nle_protocol::Client::new(BufReader::new(stream), write);
+    let hello = a.hello().expect("hello");
+    assert_eq!(hello.protocol, nle_protocol::PROTOCOL_VERSION);
+
+    // A second connection sees the same handler and history: one shared
+    // session, not a per-connection clone.
+    let applied = a
+        .apply(
+            hello.revision,
+            vec![nle_core::Action::Split { track: 0, at: 1.0 }],
+            None,
+        )
+        .expect("split");
+    let after = applied.revision;
+    assert_eq!(after, hello.revision + 1);
+
+    let stream = connect(Instant::now() + Duration::from_secs(5));
+    let write = stream.try_clone().expect("clone");
+    let mut b = nle_protocol::Client::new(BufReader::new(stream), write);
+    assert_eq!(b.show().expect("show").revision, after);
+    let applied = b
+        .apply(
+            after,
+            vec![nle_core::Action::Split { track: 0, at: 0.5 }],
+            None,
+        )
+        .expect("split from the second connection");
+    assert_eq!(applied.revision, after + 1);
+    assert_eq!(a.show().expect("show").revision, after + 1);
 
     // A second server on the same project refuses before binding.
     let second = spawn();
@@ -791,19 +828,18 @@ fn socket_is_the_default_and_is_single_writer() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Killing the owner leaves its socket file behind; the next server clears
-    // the stale path and binds.
-    drop(reader);
-    drop(writer);
-    first.kill().expect("kill first server");
-    let _ = first.wait();
+    // Killing the owner leaves its socket/lock behind; the next server
+    // recognizes the dead owner, clears both and binds.
+    drop(a);
+    drop(b);
+    first.kill();
     assert!(socket.exists(), "a killed server leaves a stale socket");
 
-    let mut third = spawn();
+    let mut third = ChildGuard::new(spawn());
     let _stream = connect(Instant::now() + Duration::from_secs(5));
-    third.kill().expect("kill third server");
-    let _ = third.wait();
+    third.kill();
     let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(nle_core::state::session_lock_path(&sandbox.file(P)));
 }
 
 #[test]
