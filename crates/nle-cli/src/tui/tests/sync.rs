@@ -10,6 +10,21 @@ use nle_core::{Armed, Project};
 // paths can differ in the last ulp, which must not retrigger it), and
 // flushing writes the cursor `nile seek` reads.
 #[test]
+fn adopting_a_remote_change_takes_the_server_cursor() {
+    let path = temp_project_path("remote-adopt-cursor");
+    asset_project().save(&path).unwrap();
+    let mut app = App::new(asset_project(), path.clone());
+    app.playhead = 100.0;
+    app.project.set_playhead(1.0);
+    adopt_remote_change(&mut app);
+    assert_eq!(app.playhead, 1.0, "the server owns the adopted cursor");
+    assert!(!playhead_moved(&app));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+#[test]
 fn transport_moves_flush_the_stored_playhead() {
     let path = temp_project_path("transport-flush");
     asset_project().save(&path).unwrap();
