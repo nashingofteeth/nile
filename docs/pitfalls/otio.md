@@ -2,6 +2,11 @@
 
 Read before touching `crates/nle-core/src/otio.rs` or `import-otio`.
 
+- **`--group NAME=FILE,FILE` is explicit and ordered.** Parts resolve as
+  given, then against the `.otio` directory, then by a unique pooled name; a
+  miss is fatal. Commas separate parts, so a filename containing one cannot
+  be a part.
+
 - **Kdenlive's OTIO export has no `LinearTimeWarp`.** It encodes a rate
   conform as `source_range` in *project* frames + `available_range` in the
   *media* rate, so derive `speed = source_rate / media_rate` and source
