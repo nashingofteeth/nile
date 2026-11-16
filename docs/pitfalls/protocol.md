@@ -8,14 +8,15 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
 `undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`, `media.list`,
-`media.add`. The internal `wire_catalog!` macro
+`media.add`, `playhead.set`. The internal `wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a method to the invocation, then
 a sample to `all_calls()`; the `METHODS.len()` assertion fails until the sample
 exists. `hello` reports `PROTOCOL_VERSION` (bump only for a breaking method,
 field or unit change; additive methods stay on the current version and are
-listed in `hello.methods`), the `nile.json` version, the model revision, and
-the served methods.
+listed in `hello.methods`), the `nile.json` version, the model revision, the
+active sequence's undo depth and id, and the served methods. `Outcome` and
+the flattened `Preview` also carry `depth`.
 
 ## Actions
 
@@ -61,6 +62,9 @@ gave `action.preview` its `diff`/`warnings` reply.
 edit's own result, converted from `nle_core::Outcome` frames with
 `frames_to_seconds` (a blend midpoint, the moved edge), never an echo of
 `from`.
+
+`playhead.set { at }` moves the shared cursor without a model revision change
+and emits `playhead`; it returns `{revision, depth, at}`.
 
 The action is the catalog's serde form (`{"action":"split",...}`), not a
 parallel DTO. `crates/nle-core/src/action/tests/wire.rs` pins every slot.
@@ -158,8 +162,9 @@ the socket serializes startup, one server owns the socket, a second server
 refuses, and multiple client connections are serialized through one handler.
 A killed owner leaves both files behind; the next start checks the lock PID
 and clears a dead owner's state. One-shot CLI edits are still file-based; do
-not run them alongside the server. Foreign-change adoption is not
-implemented yet. The socket path is `sun_path`-limited (about 108 bytes on
+not run them alongside the server; `nile edit` attaches to the socket when it
+is live. Foreign-change adoption is not implemented for file writers. The
+socket path is `sun_path`-limited (about 108 bytes on
 Linux), so very deep project trees fail at bind. Action mutations go through one `apply`, which owns CAS, the
 edit, playhead conversion, saving, and events. `sequence.use`/`sequence.add`
 and `media.add` are separate model paths, but they use the same writeability,

@@ -9,8 +9,8 @@ use nle_core::{Action, Project, ProjectDiff, Seconds, TransitionKind, Transition
 use nle_protocol::{
     Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Id,
     METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage, Notification, Outcome, PARSE_ERROR,
-    PROTOCOL_VERSION, Preview, REVISION_CONFLICT, Reply, Request, Response, RevisionConflict,
-    RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
+    PROTOCOL_VERSION, PlayheadReply, Preview, REVISION_CONFLICT, Reply, Request, Response,
+    RevisionConflict, RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
 };
 use serde_json::{Value, json};
 
@@ -46,7 +46,7 @@ impl Handler for Fake {
                 project.revision = self.revision;
                 Ok(Reply::Project(project))
             }
-            Call::Hello => Ok(Reply::Hello(nle_protocol::Hello::new(self.revision))),
+            Call::Hello => Ok(Reply::Hello(nle_protocol::Hello::new(self.revision, 0, 1))),
             Call::TimelineEdl { track } => Ok(Reply::Edl(format!("TITLE: fake {track:?}"))),
             Call::ActionPreview {
                 base_revision,
@@ -58,6 +58,7 @@ impl Handler for Fake {
                 Ok(Reply::Preview(Preview {
                     outcome: Outcome {
                         revision: self.revision,
+                        depth: 0,
                         desc: format!("preview {}", actions.first().map_or(0, Action::slot)),
                         changed: true,
                         playhead: None,
@@ -84,6 +85,7 @@ impl Handler for Fake {
                 self.events.push(Event::Playhead { at: playhead });
                 Ok(Reply::Outcome(Outcome {
                     revision: self.revision,
+                    depth: 0,
                     desc: format!("applied {}", actions.first().map_or(0, Action::slot)),
                     changed: true,
                     playhead: Some(playhead),
@@ -94,6 +96,7 @@ impl Handler for Fake {
                 self.revision = self.revision.saturating_sub(1);
                 Ok(Reply::Outcome(Outcome {
                     revision: self.revision,
+                    depth: 0,
                     desc: "undo".to_string(),
                     changed: true,
                     playhead: None,
@@ -104,6 +107,7 @@ impl Handler for Fake {
                 self.revision += 1;
                 Ok(Reply::Outcome(Outcome {
                     revision: self.revision,
+                    depth: 0,
                     desc: "redo".to_string(),
                     changed: true,
                     playhead: None,
@@ -151,6 +155,11 @@ impl Handler for Fake {
                         .collect(),
                 }))
             }
+            Call::PlayheadSet { at } => Ok(Reply::Playhead(PlayheadReply {
+                revision: self.revision,
+                depth: 0,
+                at: *at,
+            })),
         }
     }
 
@@ -245,6 +254,9 @@ fn all_calls() -> Vec<Call> {
             base_revision: 0,
             paths: vec![PathBuf::from("/media/red.mp4")],
         },
+        Call::PlayheadSet {
+            at: Seconds::new(3, 2),
+        },
     ]
 }
 
@@ -270,6 +282,8 @@ fn hello_advertises_the_protocol_and_methods() {
         "hello reports the nile.json version this build reads"
     );
     assert_eq!(hello.revision, 7);
+    assert_eq!(hello.depth, 0);
+    assert_eq!(hello.active, 1);
     assert_eq!(
         hello.methods,
         nle_protocol::METHODS
@@ -295,6 +309,7 @@ fn apply_moves_the_revision_and_preview_does_not() {
         Reply::Preview(Preview {
             outcome: Outcome {
                 revision: 7,
+                depth: 0,
                 desc: "preview 2".into(),
                 changed: true,
                 playhead: None,
@@ -316,6 +331,7 @@ fn apply_moves_the_revision_and_preview_does_not() {
         applied.expect("apply"),
         Reply::Outcome(Outcome {
             revision: 8,
+            depth: 0,
             desc: "applied 2".into(),
             changed: true,
             playhead: Some(Seconds::new(5, 2)),
@@ -383,6 +399,7 @@ fn undo_and_redo_share_the_outcome_shape() {
         undone.expect("undo"),
         Reply::Outcome(Outcome {
             revision: 0,
+            depth: 0,
             desc: "undo".into(),
             changed: true,
             playhead: None,
@@ -393,6 +410,7 @@ fn undo_and_redo_share_the_outcome_shape() {
         redone.expect("redo"),
         Reply::Outcome(Outcome {
             revision: 1,
+            depth: 0,
             desc: "redo".into(),
             changed: true,
             playhead: None,
@@ -562,6 +580,7 @@ fn golden_response_and_error_envelopes() {
         id: Id::from(1u64),
         result: serde_json::to_value(Outcome {
             revision: 8,
+            depth: 0,
             desc: "applied".into(),
             changed: true,
             playhead: Some(Seconds::new(1, 2)),
@@ -575,6 +594,7 @@ fn golden_response_and_error_envelopes() {
             "id": 1,
             "result": {
                 "changed": true,
+                "depth": 0,
                 "desc": "applied",
                 "playhead": "1/2",
                 "revision": 8

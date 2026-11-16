@@ -35,8 +35,8 @@ pub mod rpc;
 pub mod transport;
 
 pub use call::{
-    Call, Hello, METHODS, MediaAsset, MediaList, MediaUsage, Outcome, PROTOCOL_VERSION, Preview,
-    Reply, SequenceList, SequenceReply, SequenceSummary,
+    Call, Hello, METHODS, MediaAsset, MediaList, MediaUsage, Outcome, PROTOCOL_VERSION,
+    PlayheadReply, Preview, Reply, SequenceList, SequenceReply, SequenceSummary,
 };
 pub use error::{ClientError, ServerError};
 pub use event::{EVENTS, Event};

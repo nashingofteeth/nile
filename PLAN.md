@@ -460,11 +460,12 @@ shared by the TUI and agents — with no clipgen code present.
   action per apply (one undo step), rational `from`/playhead times, `hello` +
   `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
   single-source `wire_catalog!` generation. The handler owns CAS, saves,
-  playhead, and events. Step 1 (sequences) landed; step 2 (protocol) is next.
+  playhead, and events. Steps 1 (sequences) and 2 (protocol) have landed; time
+  maps are next.
 - **Order within step 0:** revision + provenance, the `nle-protocol` wire,
-  `nile serve`, and fixtures are done. Steps 0 and 1 are complete; step 2 is in
-  progress. These are breaking format changes: close any live TUI before
-  testing and rebuild old projects.
+  `nile serve`, and fixtures are done. Steps 0, 1 and 2 are complete. These
+  are breaking format changes: close any live TUI before testing and rebuild
+  old projects.
 
 ### 1. Sequences (done)
 
@@ -485,16 +486,20 @@ shared by the TUI and agents — with no clipgen code present.
 - **Gate (met):** demo + EDL/OTIO builds `sequences[0]`; two sequences with
   different sizes export; the TUI switches and undo is isolated.
 
-### 2. Protocol (blocking)
+### 2. Protocol (done)
 
 - NDJSON JSON-RPC over `--stdio` or `.nile/<stem>/session.sock`; methods are
   the action catalog plus reads (`project.show`, `timeline.edl`), jobs,
   sequences and media: `action.preview`, `action.apply` (batched),
   `undo/redo`, `sequence.*`, `media.*`, `job.*`.
-- Landed so far: `sequence.*`, `media.*`, typed client helpers, the
+- Landed: `sequence.*`, `media.*`, typed client helpers, the
   golden/action-slot contract tests, batched `action.apply`
-  (`Change::Group`, history v18), the preview diff/warnings reply, and the
-  socket/single-writer lock. Remaining: TUI attach.
+  (`Change::Group`, history v18), the preview diff/warnings reply, the
+  socket/single-writer lock, and TUI attach (`Session::open`). `job.*` moves
+  with the render milestone.
+- Deferred: an attached `:import` probes each path twice (the worker, then
+  `media.add`), so a large batch can freeze the TUI and hold the server mutex;
+  fix with probe reports on the wire or a worker-side client.
 - `action.preview` applies a batch to a cloned `Document` and returns the
   diff + warnings; `action.apply` is atomic and returns the new revision.
   A mismatched `base_revision` is a typed conflict with `{expected, actual}`;
@@ -502,8 +507,9 @@ shared by the TUI and agents — with no clipgen code present.
 - `nile serve` is the single writer when open; one-shot CLI stays file-based;
   the TUI attaches to the server. Events: `project.changed`,
   `sequence.changed`, `job.progress`, `annotation.added`, `playhead`.
-- **Gate:** protocol contract tests with golden JSON; the action slot-parity
-  test also walks the protocol; two writers get a clean conflict.
+- **Gate (met):** protocol contract tests with golden JSON; the action
+  slot-parity test walks the protocol; the socket lock refuses a second
+  server and stale clients get a typed revision conflict.
 
 ### 3. Time maps + media groups (blocking)
 
@@ -587,9 +593,9 @@ is what makes the merge modular.
 
 ### Order and merge gate
 
-Workspace/revisions/fixtures → sequences (done) → protocol (next) → time maps
-→ annotations → render (keyframes, audio, reports, jobs) → sampling contract →
-toolkit hooks. Do not start the clipgen port until the merge-ready sentence
+Workspace/revisions/fixtures → sequences (done) → protocol (done) → time maps
+(next) → annotations → render (keyframes, audio, reports, jobs) → sampling
+contract → toolkit hooks. Do not start the clipgen port until the merge-ready sentence
 above is true; then port ingest, planners and cases against the protocol and
 prove parity with the existing renders in `fixtures/`.
 
