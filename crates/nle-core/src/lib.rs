@@ -28,7 +28,7 @@ pub use action::{
 pub use detect::{Span, reconstruct};
 pub use document::{BatchOutcome, Document, PreviewOutcome};
 pub use edit::{
-    Atom, Batch, Change, EditError, EditOp, GroupChange, GroupsChange, Histories, History,
+    Atom, Batch, Change, EditError, EditOp, GroupChange, Histories, History, MediaGroupsChange,
     absorb_outward, add_effect, add_effect_on, add_transition, clamp_project, clamp_project_all,
     clamp_to_media, delete_clip_by_id, delete_ripple, delete_under, extend_edge, extend_gap_end,
     paste, paste_ripple, purge_stumps, set_speed, split, trim_in, trim_in_ripple, trim_out,

@@ -40,8 +40,8 @@ pub use extend::{
     extend_gap_end_on, extend_gap_head, extend_gap_head_on, extend_gap_tail, extend_gap_tail_on,
 };
 pub use history::{
-    Actor, AssetChange, Atom, Change, GroupChange, GroupsChange, Histories, HistoriesState,
-    History, HistoryState, Provenance, TrackChange, TracksChange, UndoOutcome,
+    Actor, AssetChange, Atom, Change, GroupChange, Histories, HistoriesState, History,
+    HistoryState, MediaGroupsChange, Provenance, TrackChange, TracksChange, UndoOutcome,
 };
 pub use speed::{set_speed, set_speed_on};
 pub use transitions::{add_transition, retime_transition_on, transition_at};
@@ -126,7 +126,7 @@ pub enum EditError {
     #[error("remote session: {0}")]
     Remote(String),
     #[error("media group: {0}")]
-    Group(String),
+    MediaGroup(String),
     #[error("undo/redo cannot be part of a batch")]
     BatchUndoRedo,
     #[error("nothing to undo")]
