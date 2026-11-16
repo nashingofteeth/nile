@@ -11,6 +11,7 @@ pub mod document;
 pub mod edit;
 pub mod edl;
 pub mod extend;
+mod group;
 pub mod media;
 pub mod otio;
 pub mod project;
@@ -37,6 +38,7 @@ pub use edl::{EdlDoc, EdlError, EdlEvent};
 pub use extend::{
     Armed, CommitKind, armed_edge, clip_span, commit_batch, gap_span, plan_commit, resolve_armed,
 };
+pub use group::{MediaGroup, MediaPart};
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
 pub use project::{

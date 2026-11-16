@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+use crate::group::{MediaGroup, MediaPart};
 use crate::media::RawProbe;
 use crate::time::{Seconds, grid_time, rational_ser, secs_f64};
 use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
@@ -24,8 +25,9 @@ use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 /// v8 stores `crop` as per-edge percentage insets and `scale` as percentages;
 /// v9 stores each transition side's effects (they render the neighbour);
 /// v10 stores the monotonic model `revision`;
-/// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s.
-pub const PROJECT_VERSION: u32 = 11;
+/// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
+/// v12 adds logical media groups.
+pub const PROJECT_VERSION: u32 = 12;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -55,6 +57,8 @@ pub enum ProjectError {
     SequenceDuplicate(u32),
     #[error("sequence #{0} has a non-positive frame rate")]
     NonPositiveFps(u32),
+    #[error("media group #{0}: {1}")]
+    Group(u32, String),
 }
 
 /// Output sequence settings (set from the first clip, changeable later).
@@ -177,6 +181,9 @@ pub struct Project {
     /// The media pool is shared by every sequence.
     #[serde(default)]
     pub media: Vec<Asset>,
+    /// Logical recordings assembled from ordered media parts.
+    #[serde(default)]
+    pub groups: Vec<MediaGroup>,
     /// One or more editable timelines.
     #[serde(default)]
     pub sequences: Vec<Sequence>,
@@ -216,6 +223,7 @@ impl Project {
             version: PROJECT_VERSION,
             revision: 0,
             media: Vec::new(),
+            groups: Vec::new(),
             sequences: vec![Sequence::new(1, "Sequence 1")],
             active: 1,
         }
@@ -346,6 +354,17 @@ impl Project {
         Ok(())
     }
 
+    pub fn group(&self, id: u32) -> Option<&MediaGroup> {
+        self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// Add a logical media group and return its id.
+    pub fn add_group(&mut self, name: impl Into<String>, parts: Vec<MediaPart>) -> u32 {
+        let id = self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+        self.groups.push(MediaGroup::new(id, name, parts));
+        id
+    }
+
     /// Structural sanity of the whole project.
     pub fn validate(&self) -> Result<(), ProjectError> {
         if self.sequences.is_empty() {
@@ -361,6 +380,42 @@ impl Project {
         }
         if self.sequence(self.active).is_none() {
             return Err(ProjectError::SequenceNotFound(self.active));
+        }
+        for (i, group) in self.groups.iter().enumerate() {
+            if self.groups[..i].iter().any(|other| other.id == group.id) {
+                return Err(ProjectError::Group(group.id, "duplicated id".to_string()));
+            }
+            if group.parts.is_empty() {
+                return Err(ProjectError::Group(group.id, "has no parts".to_string()));
+            }
+            let mut previous_end = Seconds::from_integer(0);
+            for (part_index, part) in group.parts.iter().enumerate() {
+                if self.asset(part.asset).is_none() {
+                    return Err(ProjectError::Group(
+                        group.id,
+                        format!("part {part_index}: asset #{} is not pooled", part.asset),
+                    ));
+                }
+                if part.group_start < Seconds::from_integer(0)
+                    || part.file_start < Seconds::from_integer(0)
+                    || part.duration <= Seconds::from_integer(0)
+                {
+                    return Err(ProjectError::Group(
+                        group.id,
+                        format!("part {part_index}: invalid time or duration"),
+                    ));
+                }
+                let end = part.group_end().ok_or_else(|| {
+                    ProjectError::Group(group.id, format!("part {part_index}: time overflow"))
+                })?;
+                if part_index > 0 && part.group_start < previous_end {
+                    return Err(ProjectError::Group(
+                        group.id,
+                        format!("part {part_index}: overlaps the previous part"),
+                    ));
+                }
+                previous_end = end;
+            }
         }
         for sequence in &self.sequences {
             if sequence
@@ -913,7 +968,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 11);
+        assert_eq!(PROJECT_VERSION, 12);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);
@@ -980,6 +1035,56 @@ mod tests {
             Seconds::from_integer(1),
         ))];
         assert_eq!(p.asset_usage(1).len(), before + 1);
+    }
+
+    #[test]
+    fn media_groups_round_trip_and_validate() {
+        let mut p = sample_project();
+        let id = p.add_group(
+            "CAM 3",
+            vec![
+                MediaPart {
+                    asset: 1,
+                    group_start: Seconds::from_integer(0),
+                    file_start: Seconds::from_integer(10),
+                    duration: Seconds::from_integer(2),
+                },
+                MediaPart {
+                    asset: 2,
+                    group_start: Seconds::from_integer(3),
+                    file_start: Seconds::from_integer(20),
+                    duration: Seconds::from_integer(2),
+                },
+            ],
+        );
+        assert_eq!(id, 1);
+        assert_eq!(
+            p.group(id).unwrap().group_time(&Seconds::from_integer(1)),
+            Some((1, Seconds::from_integer(11)))
+        );
+        let text = serde_json::to_string(&p).unwrap();
+        let back: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.groups, p.groups);
+        assert!(p.validate().is_ok());
+
+        let mut bad = p.clone();
+        bad.groups[0].parts[1].group_start = Seconds::from_integer(1);
+        assert!(matches!(
+            bad.validate(),
+            Err(ProjectError::Group(1, ref msg)) if msg.contains("overlaps")
+        ));
+
+        let mut bad = p.clone();
+        bad.groups[0].parts[0].asset = 99;
+        assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
+
+        let mut bad = p.clone();
+        bad.groups[0].parts.clear();
+        assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
+
+        let mut bad = p.clone();
+        bad.groups.push(bad.groups[0].clone());
+        assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
     }
 
     #[test]
