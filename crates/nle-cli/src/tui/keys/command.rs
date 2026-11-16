@@ -403,10 +403,12 @@ pub(crate) fn detect_command(app: &mut App, f: &mut action::Flags) -> Option<Str
 }
 
 /// `:edl-import FILE --media DIR [--fps R] [--src-offset TC] [--map
-/// REEL=PATH] [--force]` — build a project from a CMX3600 EDL (the CLI's
-/// `import-edl`); the open project reloads when it lands.
+/// REEL=PATH] [--group NAME=FILE,FILE] [--force]` — build a project from a
+/// CMX3600 EDL (the CLI's `import-edl`); the open project reloads when it
+/// lands.
 pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
-    const USAGE: &str = "usage: :edl-import FILE --media DIR [--fps R] [--src-offset TC] [--map REEL=PATH] [--force]";
+    const USAGE: &str = "usage: :edl-import FILE --media DIR [--fps R] [--src-offset TC] \
+         [--map REEL=PATH] [--group NAME=FILE,FILE] [--force]";
     let file = match f.positional() {
         Some(p) => PathBuf::from(p),
         None => return Some(USAGE.to_string()),
@@ -420,25 +422,31 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
         .take("src-offset")
         .unwrap_or_else(|| "00:00:00:00".to_string());
     let map = f.take_all("map");
+    let group = f.take_all("group");
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
+    let groups = match crate::cmd::import::parse_group_specs(&group) {
+        Ok(groups) => groups,
+        Err(e) => return Some(e.to_string()),
+    };
     let notice = format!("importing {}…", file.display());
     let Some(job) = start_job(app, "edl-import", true) else {
         return Some("a job is already running — wait for it".to_string());
     };
     let project_path = app.project.path().to_path_buf();
     std::thread::spawn(move || {
-        let result = crate::cmd::import::import_edl_work(
-            &project_path,
-            &file,
-            &media,
-            fps.as_deref(),
-            &src_offset,
-            &map,
+        let result = crate::cmd::import::import_edl_work(crate::cmd::import::EdlImport {
+            project: &project_path,
+            file: &file,
+            media: &media,
+            fps: fps.as_deref(),
+            src_offset: &src_offset,
+            maps: &map,
+            groups: &groups,
             force,
-        )
+        })
         .map_err(|e| e.to_string())
         .map(|r| {
             for w in &r.warnings {
@@ -452,11 +460,12 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
 }
 
 /// `:otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW]
-/// [--force]` — build a project from an OpenTimelineIO timeline (the
-/// CLI's `import-otio`); the open project reloads when it lands.
+/// [--group NAME=FILE,FILE] [--force]` — build a project from an
+/// OpenTimelineIO timeline (the CLI's `import-otio`); the open project
+/// reloads when it lands.
 pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
-    const USAGE: &str =
-        "usage: :otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW] [--force]";
+    const USAGE: &str = "usage: :otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW] \
+         [--group NAME=FILE,FILE] [--force]";
     let file = match f.positional() {
         Some(p) => PathBuf::from(p),
         None => return Some(USAGE.to_string()),
@@ -464,24 +473,30 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
     let media = f.take("media").map(PathBuf::from);
     let fps = f.take("fps");
     let remap = f.take_all("remap");
+    let group = f.take_all("group");
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
+    let groups = match crate::cmd::import::parse_group_specs(&group) {
+        Ok(groups) => groups,
+        Err(e) => return Some(e.to_string()),
+    };
     let notice = format!("importing {}…", file.display());
     let Some(job) = start_job(app, "otio-import", true) else {
         return Some("a job is already running — wait for it".to_string());
     };
     let project_path = app.project.path().to_path_buf();
     std::thread::spawn(move || {
-        let result = crate::cmd::import::import_otio_work(
-            &project_path,
-            &file,
-            media.as_deref(),
-            fps.as_deref(),
-            &remap,
+        let result = crate::cmd::import::import_otio_work(crate::cmd::import::OtioImport {
+            project: &project_path,
+            file: &file,
+            media: media.as_deref(),
+            fps: fps.as_deref(),
+            remaps: &remap,
+            groups: &groups,
             force,
-        )
+        })
         .map_err(|e| e.to_string())
         .map(|r| {
             for w in &r.warnings {

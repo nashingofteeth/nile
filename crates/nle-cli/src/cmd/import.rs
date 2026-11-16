@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 
@@ -10,9 +11,9 @@ use nle_core::edit;
 use nle_core::edl::{self, EdlEvent};
 use nle_core::otio;
 use nle_core::otio::OtioItem;
-use nle_core::time::{parse_timecode, timecode_to_frames};
+use nle_core::time::{Seconds, parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Segment, TrackKind};
-use nle_core::{Document, Project, VideoSettings, frame_of};
+use nle_core::{Document, MediaPart, Project, VideoSettings, frame_of};
 use nle_ffmpeg::probe;
 
 use super::project::{save_and_reset_history, secs_f64};
@@ -112,6 +113,134 @@ pub(crate) fn cmd_import(
 pub(crate) const MEDIA_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "m4v", "avi", "webm", "wav", "mp3", "m4a", "aac", "flac", "ogg",
 ];
+
+/// A `--group NAME=FILE,FILE,…` spec. Parsed by clap, so a malformed flag
+/// fails before any file is probed and an empty name or parts list cannot
+/// exist downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GroupSpec {
+    pub name: String,
+    pub parts: Vec<PathBuf>,
+}
+
+impl FromStr for GroupSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let (name, list) = s
+            .split_once('=')
+            .ok_or_else(|| format!("expected NAME=FILE,FILE,… (got {s:?})"))?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!("expected a group name before '=' (got {s:?})"));
+        }
+        let parts = list
+            .split(',')
+            .map(str::trim)
+            .map(|part| {
+                if part.is_empty() {
+                    Err(format!("group {name:?} has an empty part (got {s:?})"))
+                } else {
+                    Ok(PathBuf::from(part))
+                }
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if parts.len() < 2 {
+            return Err(format!(
+                "group {name:?} needs at least two parts (NAME=FILE,FILE)"
+            ));
+        }
+        Ok(Self {
+            name: name.to_string(),
+            parts,
+        })
+    }
+}
+
+/// Parse the TUI's raw `--group` values with the same grammar the CLI's clap
+/// parser enforces.
+#[cfg(feature = "tui")]
+pub(crate) fn parse_group_specs(raw: &[String]) -> Result<Vec<GroupSpec>> {
+    raw.iter()
+        .map(|spec| GroupSpec::from_str(spec).map_err(anyhow::Error::msg))
+        .collect()
+}
+
+/// Locate one explicit group part: as given, then in the importer's media
+/// directory, then by a unique pooled file name. Unlike the directory scan,
+/// a group part is a promise — a miss is fatal, not a warning.
+fn resolve_group_part(project: &Project, raw: &Path, extra: &[&Path]) -> Result<PathBuf> {
+    let mut candidates = vec![raw.to_path_buf()];
+    candidates.extend(extra.iter().map(|dir| dir.join(raw)));
+    for candidate in candidates {
+        if candidate.is_file() {
+            return candidate
+                .canonicalize()
+                .with_context(|| format!("reading {}", candidate.display()));
+        }
+    }
+    if let Some(name) = raw.file_name() {
+        let matches: Vec<&PathBuf> = project
+            .media
+            .iter()
+            .filter(|asset| asset.path.file_name() == Some(name))
+            .map(|asset| &asset.path)
+            .collect();
+        match matches.as_slice() {
+            [one] => return Ok((*one).clone()),
+            [] => {}
+            many => bail!(
+                "group part {} matches {} pooled files — give a path",
+                raw.display(),
+                many.len()
+            ),
+        }
+    }
+    bail!("group part {} not found", raw.display())
+}
+
+/// Pool a resolved part if it is new, returning its canonical path.
+fn pool_group_part(project: &mut Project, path: &Path) -> Result<PathBuf> {
+    if project.asset_by_path(path).is_some() {
+        return Ok(path.to_path_buf());
+    }
+    let report = probe(path).with_context(|| format!("probing {}", path.display()))?;
+    project.add_asset(path.to_path_buf(), report);
+    Ok(path.to_path_buf())
+}
+
+/// Turn pooled parts into one group: argument order, cumulative group starts
+/// and zero file offsets — the same construction `nile import --group` uses.
+fn add_group_parts(project: &mut Project, spec: &GroupSpec, paths: &[PathBuf]) -> Result<u32> {
+    let mut parts = Vec::with_capacity(paths.len());
+    let mut start = Seconds::from_integer(0);
+    let mut seen = HashSet::new();
+    for path in paths {
+        let asset = project.asset_by_path(path).ok_or_else(|| {
+            anyhow::anyhow!("group {:?}: {} is not pooled", spec.name, path.display())
+        })?;
+        if !seen.insert(asset.id) {
+            bail!("group {:?}: {} is listed twice", spec.name, path.display());
+        }
+        let duration = asset.duration().ok_or_else(|| {
+            anyhow::anyhow!(
+                "group {:?}: {} has no known duration",
+                spec.name,
+                path.display()
+            )
+        })?;
+        parts.push(MediaPart {
+            asset: asset.id,
+            group_start: start,
+            file_start: Seconds::from_integer(0),
+            duration,
+        });
+        start += duration;
+    }
+    project
+        .add_group(&spec.name, parts)
+        .with_context(|| format!("group {:?}", spec.name))
+}
 
 /// Expand `~`/`~/…` without a shell. `~user` is left alone: resolving
 /// another account's home is not needed here.
@@ -288,37 +417,36 @@ pub(crate) fn resolve_reel(
     match_asset(project, &ev.reel)
 }
 
-pub(crate) fn cmd_import_edl(
-    project_path: &Path,
-    edl_path: &Path,
-    media_dir: &Path,
-    fps_arg: Option<&str>,
-    src_offset: &str,
-    maps: &[String],
-    force: bool,
-) -> Result<()> {
-    import_edl_work(
-        project_path,
-        edl_path,
-        media_dir,
-        fps_arg,
-        src_offset,
-        maps,
-        force,
-    )
-    .map(|r| r.print())
+/// Arguments for [`cmd_import_edl`] and [`import_edl_work`]. A parameter
+/// struct keeps the call sites readable and clippy's `too_many_arguments`
+/// quiet — an options object instead of a long positional list.
+pub(crate) struct EdlImport<'a> {
+    pub project: &'a Path,
+    pub file: &'a Path,
+    pub media: &'a Path,
+    pub fps: Option<&'a str>,
+    pub src_offset: &'a str,
+    pub maps: &'a [String],
+    pub groups: &'a [GroupSpec],
+    pub force: bool,
+}
+
+pub(crate) fn cmd_import_edl(args: EdlImport<'_>) -> Result<()> {
+    import_edl_work(args).map(|r| r.print())
 }
 
 /// The work behind `import-edl` (and the TUI's `:edl-import`).
-pub(crate) fn import_edl_work(
-    project_path: &Path,
-    edl_path: &Path,
-    media_dir: &Path,
-    fps_arg: Option<&str>,
-    src_offset: &str,
-    maps: &[String],
-    force: bool,
-) -> Result<CommandReport> {
+pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
+    let EdlImport {
+        project: project_path,
+        file: edl_path,
+        media: media_dir,
+        fps: fps_arg,
+        src_offset,
+        maps,
+        groups,
+        force,
+    } = args;
     if project_path.exists() && !force {
         bail!(
             "{} already exists (use --force to overwrite)",
@@ -374,6 +502,18 @@ pub(crate) fn import_edl_work(
             .ok_or_else(|| anyhow::anyhow!("--map expects REEL=PATH, got {m:?}"))?;
         let canonical = add(&mut project, Path::new(path))?;
         map.insert(reel.to_string(), canonical);
+    }
+
+    // Explicit groups are part of the ingest: pool their parts and create the
+    // recording before the timeline is built, so `show --json --maps` can
+    // resolve group time.
+    for spec in groups {
+        let mut paths = Vec::with_capacity(spec.parts.len());
+        for raw in &spec.parts {
+            let resolved = resolve_group_part(&project, raw, &[media_dir])?;
+            paths.push(add(&mut project, &resolved)?);
+        }
+        add_group_parts(&mut project, spec, &paths)?;
     }
 
     // Prefer the first video event's asset for settings; fall back to any.
@@ -504,26 +644,32 @@ pub(crate) fn resolve_otio_path(
     )
 }
 
-pub(crate) fn cmd_import_otio(
-    project_path: &Path,
-    otio_path: &Path,
-    media_dir: Option<&Path>,
-    fps_arg: Option<&str>,
-    remaps: &[String],
-    force: bool,
-) -> Result<()> {
-    import_otio_work(project_path, otio_path, media_dir, fps_arg, remaps, force).map(|r| r.print())
+/// Arguments for [`cmd_import_otio`] and [`import_otio_work`].
+pub(crate) struct OtioImport<'a> {
+    pub project: &'a Path,
+    pub file: &'a Path,
+    pub media: Option<&'a Path>,
+    pub fps: Option<&'a str>,
+    pub remaps: &'a [String],
+    pub groups: &'a [GroupSpec],
+    pub force: bool,
+}
+
+pub(crate) fn cmd_import_otio(args: OtioImport<'_>) -> Result<()> {
+    import_otio_work(args).map(|r| r.print())
 }
 
 /// The work behind `import-otio` (and the TUI's `:otio-import`).
-pub(crate) fn import_otio_work(
-    project_path: &Path,
-    otio_path: &Path,
-    media_dir: Option<&Path>,
-    fps_arg: Option<&str>,
-    remaps: &[String],
-    force: bool,
-) -> Result<CommandReport> {
+pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
+    let OtioImport {
+        project: project_path,
+        file: otio_path,
+        media: media_dir,
+        fps: fps_arg,
+        remaps,
+        groups,
+        force,
+    } = args;
     if project_path.exists() && !force {
         bail!(
             "{} already exists (use --force to overwrite)",
@@ -569,6 +715,17 @@ pub(crate) fn import_otio_work(
             let (id, _) = project.add_asset(canonical, report);
             by_path.insert(c.path.clone(), id);
         }
+    }
+
+    // Explicit groups pool their parts first; the timeline build below does
+    // not depend on them, but `show --json --maps` does.
+    for spec in groups {
+        let mut paths = Vec::with_capacity(spec.parts.len());
+        for raw in &spec.parts {
+            let resolved = resolve_group_part(&project, raw, &[base])?;
+            paths.push(pool_group_part(&mut project, &resolved)?);
+        }
+        add_group_parts(&mut project, spec, &paths)?;
     }
 
     let fps = match fps_arg {
@@ -618,4 +775,99 @@ pub(crate) fn import_otio_work(
         clips
     );
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nle_core::media::{RawFormat, RawProbe, RawStream};
+
+    fn probe(duration: &str) -> RawProbe {
+        RawProbe {
+            streams: vec![RawStream {
+                index: 0,
+                codec_type: Some("video".into()),
+                width: Some(320),
+                height: Some(240),
+                r_frame_rate: Some("30/1".into()),
+                ..Default::default()
+            }],
+            format: RawFormat {
+                format_name: "mp4".into(),
+                duration: Some(duration.into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn group_spec_keeps_argument_order() {
+        let spec: GroupSpec = "CAM 3=a.mp4, b.mp4".parse().unwrap();
+        assert_eq!(spec.name, "CAM 3");
+        assert_eq!(
+            spec.parts,
+            vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")]
+        );
+    }
+
+    #[test]
+    fn group_spec_refuses_malformed_flags() {
+        for bad in ["CAM 3", "=a,b", "CAM 3=a", "CAM 3=a,,b", "CAM 3=,a"] {
+            assert!(bad.parse::<GroupSpec>().is_err(), "{bad:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn group_parts_use_argument_order_and_cumulative_starts() {
+        let mut p = Project::new();
+        let (first, _) = p.add_asset("/media/a.mp4".into(), probe("2"));
+        let (second, _) = p.add_asset("/media/b.mp4".into(), probe("3"));
+        let spec: GroupSpec = "CAM 3=a.mp4,b.mp4".parse().unwrap();
+        let id = add_group_parts(
+            &mut p,
+            &spec,
+            &["/media/a.mp4".into(), "/media/b.mp4".into()],
+        )
+        .unwrap();
+
+        let group = p.group(id).expect("group");
+        assert_eq!(group.parts[0].asset, first);
+        assert_eq!(group.parts[0].group_start, Seconds::from_integer(0));
+        assert_eq!(group.parts[1].asset, second);
+        assert_eq!(group.parts[1].group_start, Seconds::from_integer(2));
+        assert_eq!(group.end(), Some(Seconds::from_integer(5)));
+    }
+
+    #[test]
+    fn group_parts_refuse_a_duplicate_part() {
+        let mut p = Project::new();
+        p.add_asset("/media/a.mp4".into(), probe("2"));
+        let spec: GroupSpec = "CAM 3=a.mp4,a.mp4".parse().unwrap();
+        let err = add_group_parts(
+            &mut p,
+            &spec,
+            &["/media/a.mp4".into(), "/media/a.mp4".into()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("listed twice"), "{err}");
+        assert!(p.groups.is_empty(), "nothing was added");
+    }
+
+    #[test]
+    fn group_parts_refuse_an_unknown_duration() {
+        let mut p = Project::new();
+        p.add_asset("/media/a.mp4".into(), probe("2"));
+        let mut nodur = probe("2");
+        nodur.format.duration = None;
+        p.add_asset("/media/b.webm".into(), nodur);
+        let spec: GroupSpec = "CAM 3=a.mp4,b.webm".parse().unwrap();
+        let err = add_group_parts(
+            &mut p,
+            &spec,
+            &["/media/a.mp4".into(), "/media/b.webm".into()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no known duration"), "{err}");
+        assert!(p.groups.is_empty(), "nothing was added");
+    }
 }
