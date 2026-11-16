@@ -551,9 +551,9 @@ enum Cmd {
         sequence: Option<u32>,
     },
 
-    /// Serve the project over JSON-RPC 2.0 on stdio (one object per line)
+    /// Serve the project over JSON-RPC 2.0 on its Unix socket
     Serve {
-        /// Use stdio (the only transport for now)
+        /// Use stdin/stdout instead of the project socket (pipes, tests)
         #[arg(long)]
         stdio: bool,
     },
