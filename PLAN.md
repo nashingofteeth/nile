@@ -49,7 +49,7 @@ nile (process)                       mpv window (child)
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v18 (grouped batches) |
+| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v19 (grouped batches, media groups) |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
@@ -479,7 +479,7 @@ shared by the TUI and agents — with no clipgen code present.
 - `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
   land now; derived sequences come later but must be traceable from day one.
 - Export takes a sequence; proxy/export caches key per sequence.
-- Landed: v12 projects with shared media and media groups, v18 per-sequence
+- Landed: v12 projects with shared media and media groups, v19 per-sequence
   histories with
   grouped batches, `nile sequence ls|add|use`, `:sequence`, and `--sequence`
   on `show`/`edl`/`export` (it reads another timeline without switching). The
@@ -495,7 +495,7 @@ shared by the TUI and agents — with no clipgen code present.
   `undo/redo`, `sequence.*`, `media.*`, `job.*`.
 - Landed: `sequence.*`, `media.*`, typed client helpers, the
   golden/action-slot contract tests, batched `action.apply`
-  (`Change::Group`, history v18), the preview diff/warnings reply, the
+  (`Change::Group`, history v19), the preview diff/warnings reply, the
   socket/single-writer lock, and TUI attach (`Session::open`). `job.*` moves
   with the render milestone.
 - Deferred: an attached `:import` probes each path twice (the worker, then
@@ -525,9 +525,11 @@ shared by the TUI and agents — with no clipgen code present.
   exposes the mapping so it is exercised, not dead code.
 - Landed so far: `TimeMap`, `MediaGroup`/`MediaPart`, project v12, validation,
   `MediaGroup::asset_map` + `Project::group_time_map` (timeline → file →
-  group), and `nile show --json --maps` (per-track/asset maps plus
-  `group_maps`). Remaining: importer grouping, the multi-part fixture, and the
-  gate.
+  group), `nile show --json --maps` (per-track/asset maps plus `group_maps`),
+  and importer grouping: `nile import --group NAME FILES…` adds the assets and
+  the group as one undo step, `nile group ls|rm` lists and removes groups
+  (history v19). Remaining: the multi-part fixture, the EDL/OTIO grouping
+  rule, and the gate.
 - **Gate:** group → timeline → `(part, seek)` → back is exact; a wall time
   inside a trimmed gap maps to "no media"; a multi-part fixture round-trips.
 

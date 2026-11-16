@@ -18,7 +18,11 @@ use nle_ffmpeg::probe;
 use super::project::{save_and_reset_history, secs_f64};
 use super::{CommandReport, asset_summary};
 use crate::{parse_fps_arg, say};
-pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
+pub(crate) fn cmd_import(
+    project_path: &Path,
+    files: &[PathBuf],
+    group: Option<&str>,
+) -> Result<()> {
     let mut doc = Document::with_histories(
         Project::load(project_path)?,
         edit::Histories::load_project(project_path).unwrap_or_default(),
@@ -33,15 +37,15 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
     }
 
     let mut fresh: Vec<(PathBuf, nle_core::media::RawProbe)> = Vec::new();
-    for file in files {
+    for file in &files {
         // Dedup before probing: re-importing a directory must not spawn
         // ffprobe for every file already in the pool.
-        if let Some(a) = doc.asset_by_path(&file) {
+        if let Some(a) = doc.asset_by_path(file) {
             say!("· {} already imported (asset #{})", file.display(), a.id);
             continue;
         }
-        match probe(&file) {
-            Ok(report) => fresh.push((file, report)),
+        match probe(file) {
+            Ok(report) => fresh.push((file.clone(), report)),
             // One unreadable file must not abort the rest of the batch (the
             // TUI reports per file and imports the good ones the same way).
             Err(e) => {
@@ -54,9 +58,20 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
     if fresh.is_empty() && !errors.is_empty() {
         bail!("{}", errors.join("; "));
     }
+    if group.is_some() && !errors.is_empty() {
+        bail!("cannot form a media group: {}", errors.join("; "));
+    }
+    if group.is_some() && files.len() < 2 {
+        bail!("--group needs at least two files");
+    }
     let imported_paths: Vec<PathBuf> = fresh.iter().map(|(p, _)| p.clone()).collect();
     // One undo entry for the whole command: `nile undo` peels the batch.
-    let ids = doc.add_assets(fresh, playhead);
+    let (ids, group_id) = if let Some(name) = group {
+        let (ids, group_id) = doc.add_assets_with_group(fresh, playhead, name, files.clone())?;
+        (ids, Some(group_id))
+    } else {
+        (doc.add_assets(fresh, playhead), None)
+    };
     for (id, path) in ids.iter().zip(&imported_paths) {
         let asset = doc.asset(*id).context("asset vanished")?;
         say!(
@@ -66,9 +81,15 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
         );
     }
     let added = ids.len();
-    if added > 0 {
+    if added > 0 || group_id.is_some() {
         doc.save(project_path)?;
         doc.save_history(&edit::Histories::sidecar_path(project_path))?;
+    }
+    if let Some(id) = group_id {
+        say!(
+            "✓ media group #{id} {group_name}",
+            group_name = group.unwrap_or("")
+        );
     }
     let clip_count = |p: &Project| {
         p.timeline

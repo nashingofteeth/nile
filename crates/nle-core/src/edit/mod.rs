@@ -41,7 +41,7 @@ pub use extend::{
 };
 pub use history::{
     Actor, AssetChange, Atom, Change, GroupChange, Histories, HistoriesState, History,
-    HistoryState, Provenance, TrackChange, TracksChange, UndoOutcome,
+    HistoryState, MediaGroupsChange, Provenance, TrackChange, TracksChange, UndoOutcome,
 };
 pub use speed::{set_speed, set_speed_on};
 pub use transitions::{add_transition, retime_transition_on, transition_at};
@@ -63,8 +63,9 @@ pub const MAX_HISTORY: usize = 100;
 /// v14 follows the per-edge crop insets and percentage `scale`;
 /// v15 follows the effects carried on a transition side; v16 carries each
 /// change's `{ actor, at }` provenance; v17 keys the stacks by sequence;
-/// v18 adds grouped changes (one undo step for a batch of actions).
-pub const HISTORY_VERSION: u32 = 18;
+/// v18 adds grouped changes (one undo step for a batch of actions);
+/// v19 adds media-group creation/removal.
+pub const HISTORY_VERSION: u32 = 19;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -124,6 +125,8 @@ pub enum EditError {
     EmptyBatch,
     #[error("remote session: {0}")]
     Remote(String),
+    #[error("media group: {0}")]
+    MediaGroup(String),
     #[error("undo/redo cannot be part of a batch")]
     BatchUndoRedo,
     #[error("nothing to undo")]

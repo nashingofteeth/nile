@@ -201,6 +201,30 @@ fn clamp_notes_are_collected_for_preview() {
 }
 
 #[test]
+fn media_groups_are_undoable() {
+    let mut p = fixture();
+    let mut h = History::default();
+    let part = crate::group::MediaPart {
+        asset: 1,
+        group_start: Seconds::from_integer(0),
+        file_start: Seconds::from_integer(0),
+        duration: Seconds::from_integer(2),
+    };
+    let id = h.add_group(&mut p, "CAM 3", vec![part], 42).expect("group");
+    assert_eq!(p.groups.len(), 1);
+    let undone = h.undo(&mut p).unwrap();
+    assert!(undone.desc.contains("add media group"));
+    assert!(p.groups.is_empty());
+    h.redo(&mut p).unwrap();
+    assert_eq!(p.groups[0].id, id);
+    let removed = h.remove_group(&mut p, id, 0).unwrap();
+    assert!(removed.contains("remove media group"));
+    assert!(p.groups.is_empty());
+    h.undo(&mut p).unwrap();
+    assert_eq!(p.groups[0].id, id);
+}
+
+#[test]
 fn history_stores_and_returns_the_playhead_frame() {
     let mut p = fixture();
     let mut h = History::default();
@@ -379,6 +403,26 @@ fn asset_history_refuses_when_pool_changed_outside() {
 
     assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
     assert_eq!(p.media, live, "failed undo left the pool untouched");
+}
+
+// If the group list changed outside the stack, a group undo refuses and
+// leaves the foreign change untouched.
+#[test]
+fn group_history_refuses_when_groups_changed_outside() {
+    let mut p = fixture();
+    let mut h = History::default();
+    let part = crate::group::MediaPart {
+        asset: 1,
+        group_start: Seconds::from_integer(0),
+        file_start: Seconds::from_integer(0),
+        duration: Seconds::from_integer(2),
+    };
+    h.add_group(&mut p, "CAM 3", vec![part.clone()], 0).unwrap();
+    p.add_group("OTHER", vec![part]).unwrap();
+    let live = p.groups.clone();
+
+    assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
+    assert_eq!(p.groups, live, "failed undo left the groups untouched");
 }
 
 // The pool change serializes into the sidecar and undoes after reload.
