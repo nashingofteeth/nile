@@ -430,6 +430,9 @@ enum Cmd {
         /// Override a reel: REEL=PATH (repeatable)
         #[arg(long = "map", value_name = "REEL=PATH")]
         map: Vec<String>,
+        /// Group files as one recording: NAME=FILE,FILE,… (repeatable)
+        #[arg(long = "group", value_name = "NAME=FILE,…")]
+        group: Vec<GroupSpec>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -447,6 +450,9 @@ enum Cmd {
         /// Remap a clip path: OLD=NEW (repeatable)
         #[arg(long = "remap", value_name = "OLD=NEW")]
         remap: Vec<String>,
+        /// Group files as one recording: NAME=FILE,FILE,… (repeatable)
+        #[arg(long = "group", value_name = "NAME=FILE,…")]
+        group: Vec<GroupSpec>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -731,7 +737,7 @@ impl From<EncoderArg> for Encoder {
 
 use cmd::detect::{DetectArgs, cmd_detect_edits};
 use cmd::export::{ExportOptions, QualityPreset, cmd_export};
-use cmd::import::{cmd_import, cmd_import_edl, cmd_import_otio};
+use cmd::import::{EdlImport, GroupSpec, OtioImport, cmd_import, cmd_import_edl, cmd_import_otio};
 use cmd::media::{cmd_probe, cmd_trim};
 #[cfg(feature = "tui")]
 use cmd::project::cmd_edit;
@@ -817,33 +823,37 @@ fn main() -> Result<()> {
             fps,
             src_offset,
             map,
+            group,
             force,
         } => {
-            return cmd_import_edl(
-                &project,
+            return cmd_import_edl(EdlImport {
+                project: &project,
                 file,
                 media,
-                fps.as_deref(),
+                fps: fps.as_deref(),
                 src_offset,
-                map,
-                *force,
-            );
+                maps: map,
+                groups: group,
+                force: *force,
+            });
         }
         Cmd::ImportOtio {
             file,
             media,
             fps,
             remap,
+            group,
             force,
         } => {
-            return cmd_import_otio(
-                &project,
+            return cmd_import_otio(OtioImport {
+                project: &project,
                 file,
-                media.as_deref(),
-                fps.as_deref(),
-                remap,
-                *force,
-            );
+                media: media.as_deref(),
+                fps: fps.as_deref(),
+                remaps: remap,
+                groups: group,
+                force: *force,
+            });
         }
         Cmd::DetectEdits {
             file,

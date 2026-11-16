@@ -76,6 +76,16 @@ impl Sandbox {
         Sandbox { dir }
     }
 
+    /// A two-part logical recording (one camera rolling over): two 3 s files
+    /// with distinct colours, no project yet.
+    pub fn multi_part() -> Sandbox {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let d = dir.path();
+        gen_av(d, "cam3_a.mp4", "blue", "320x240", "30", "3", "440");
+        gen_av(d, "cam3_b.mp4", "yellow", "320x240", "30", "3", "660");
+        Sandbox { dir }
+    }
+
     pub fn path(&self) -> &Path {
         self.dir.path()
     }

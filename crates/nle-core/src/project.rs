@@ -3,6 +3,7 @@
 //! Times are exact rationals serialized as "n/d" strings; positions never
 //! drift no matter how many times you edit.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::ops::{Deref, DerefMut};
@@ -404,6 +405,51 @@ impl Project {
         Ok(self.groups.remove(pos))
     }
 
+    /// The id the next [`Project::add_group`] will use.
+    fn next_group_id(&self) -> u32 {
+        self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1
+    }
+
+    /// Ordered parts for already-pooled `paths`: argument order, cumulative
+    /// group starts, zero file offsets. One constructor for every caller
+    /// (`nile import --group` and the EDL/OTIO importers), so the ingest paths
+    /// cannot disagree. A repeated asset or an unknown duration is refused;
+    /// the id in the error is the group that would have been created.
+    pub fn group_parts(&self, paths: &[PathBuf]) -> Result<Vec<MediaPart>, ProjectError> {
+        let id = self.next_group_id();
+        let mut parts = Vec::with_capacity(paths.len());
+        let mut start = Seconds::from_integer(0);
+        let mut seen = HashSet::new();
+        for (index, path) in paths.iter().enumerate() {
+            let asset = self.asset_by_path(path).ok_or_else(|| {
+                ProjectError::Group(
+                    id,
+                    format!("part {index}: {} is not pooled", path.display()),
+                )
+            })?;
+            if !seen.insert(asset.id) {
+                return Err(ProjectError::Group(
+                    id,
+                    format!("part {index}: {} is listed twice", path.display()),
+                ));
+            }
+            let duration = asset.duration().ok_or_else(|| {
+                ProjectError::Group(
+                    id,
+                    format!("part {index}: {} has no known duration", path.display()),
+                )
+            })?;
+            parts.push(MediaPart {
+                asset: asset.id,
+                group_start: start,
+                file_start: Seconds::from_integer(0),
+                duration,
+            });
+            start += duration;
+        }
+        Ok(parts)
+    }
+
     /// Add a logical media group and return its id.
     /// Model-only group creation. A front-end must add a `Document` wrapper
     /// that bumps the revision and records history before exposing this.
@@ -412,7 +458,7 @@ impl Project {
         name: impl Into<String>,
         parts: Vec<MediaPart>,
     ) -> Result<u32, ProjectError> {
-        let id = self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+        let id = self.next_group_id();
         let group = MediaGroup::new(id, name, parts);
         self.validate_group(&group)?;
         self.groups.push(group);
@@ -1312,6 +1358,58 @@ mod tests {
             p.group_time_map(99, 0, group, asset),
             Err(ProjectError::SequenceNotFound(99))
         ));
+    }
+
+    #[test]
+    fn group_parts_follow_argument_order() {
+        let mut p = Project::new();
+        let (a, _) = p.add_asset(
+            "/media/a.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        let (b, _) = p.add_asset(
+            "/media/b.mp4".into(),
+            probe_report("3", 320, 240, "30/1", false),
+        );
+        let parts = p
+            .group_parts(&["/media/b.mp4".into(), "/media/a.mp4".into()])
+            .unwrap();
+
+        assert_eq!(parts[0].asset, b);
+        assert_eq!(parts[0].group_start, Seconds::from_integer(0));
+        assert_eq!(parts[1].asset, a);
+        assert_eq!(parts[1].group_start, Seconds::from_integer(3));
+        assert!(
+            parts
+                .iter()
+                .all(|part| part.file_start == Seconds::from_integer(0))
+        );
+    }
+
+    #[test]
+    fn group_parts_refuse_duplicates_missing_and_unknown_durations() {
+        let mut p = Project::new();
+        p.add_asset(
+            "/media/a.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        let mut nodur = probe_report("2", 320, 240, "30/1", false);
+        nodur.format.duration = None;
+        p.add_asset("/media/b.webm".into(), nodur);
+
+        assert!(matches!(
+            p.group_parts(&["/media/a.mp4".into(), "/media/a.mp4".into()]),
+            Err(ProjectError::Group(_, ref detail)) if detail.contains("listed twice")
+        ));
+        assert!(matches!(
+            p.group_parts(&["/media/a.mp4".into(), "/media/nope.mp4".into()]),
+            Err(ProjectError::Group(_, ref detail)) if detail.contains("not pooled")
+        ));
+        assert!(matches!(
+            p.group_parts(&["/media/a.mp4".into(), "/media/b.webm".into()]),
+            Err(ProjectError::Group(_, ref detail)) if detail.contains("no known duration")
+        ));
+        assert!(p.groups.is_empty(), "refusals add nothing");
     }
 
     #[test]
