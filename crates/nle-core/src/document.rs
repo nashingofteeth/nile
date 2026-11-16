@@ -19,6 +19,7 @@ use std::path::Path;
 
 use crate::action::{self, Action, Outcome, Register};
 use crate::edit::{self, Actor, Batch, EditError, Histories, History, UndoOutcome};
+use crate::group::MediaPart;
 use crate::project::{Project, ProjectDiff, ProjectError, VideoSettings};
 use crate::time::{Seconds, frame_of};
 
@@ -365,6 +366,93 @@ impl Document {
         self.histories
             .get_mut(active)
             .add_assets(&mut self.project, assets, playhead)
+    }
+
+    /// Add a media group through the active sequence's history.
+    pub fn add_group(
+        &mut self,
+        name: impl Into<String>,
+        parts: Vec<MediaPart>,
+        playhead: i64,
+    ) -> Result<u32, EditError> {
+        let active = self.project.active_id();
+        self.histories
+            .get_mut(active)
+            .add_group(&mut self.project, name, parts, playhead)
+    }
+
+    pub fn remove_group(&mut self, id: u32, playhead: i64) -> Result<String, EditError> {
+        let active = self.project.active_id();
+        self.histories
+            .get_mut(active)
+            .remove_group(&mut self.project, id, playhead)
+    }
+
+    /// Add assets and a media group as one undo step. `files` is the full
+    /// ordered part list (existing assets are allowed); if the group is
+    /// refused, the asset batch is rolled back too.
+    pub fn add_assets_with_group(
+        &mut self,
+        assets: Vec<(std::path::PathBuf, crate::media::RawProbe)>,
+        playhead: i64,
+        name: impl Into<String>,
+        files: Vec<std::path::PathBuf>,
+    ) -> Result<(Vec<u32>, u32), EditError> {
+        let project = self.project.clone();
+        let histories = self.histories.clone();
+        let active = self.project.active_id();
+        let depth = self.depth();
+        self.histories.get_mut(active).begin_batch();
+        let ids = self
+            .histories
+            .get_mut(active)
+            .add_assets(&mut self.project, assets, playhead);
+        let mut parts = Vec::with_capacity(files.len());
+        let mut start = Seconds::from_integer(0);
+        for path in files {
+            let asset = self
+                .project
+                .asset_by_path(&path)
+                .ok_or_else(|| EditError::Group(format!("{} is not pooled", path.display())))?;
+            let duration = asset.duration().ok_or_else(|| {
+                EditError::Group(format!("{} has no known duration", path.display()))
+            })?;
+            parts.push(MediaPart {
+                asset: asset.id,
+                group_start: start,
+                file_start: Seconds::from_integer(0),
+                duration,
+            });
+            start += duration;
+        }
+        let group =
+            match self
+                .histories
+                .get_mut(active)
+                .add_group(&mut self.project, name, parts, playhead)
+            {
+                Ok(group) => group,
+                Err(e) => {
+                    self.project = project;
+                    self.histories = histories;
+                    return Err(e);
+                }
+            };
+        let added = self.depth().saturating_sub(depth);
+        if added > 1 {
+            let desc = format!("batch: import {} asset(s) + group #{group}", ids.len());
+            if let Err(e) = self
+                .histories
+                .get_mut(active)
+                .group_newest(added, desc, playhead)
+            {
+                self.project = project;
+                self.histories = histories;
+                return Err(e);
+            }
+        }
+        self.histories.get_mut(active).end_batch();
+        Ok((ids, group))
     }
 
     pub fn remove_asset(&mut self, id: u32, playhead: i64) -> Result<String, EditError> {

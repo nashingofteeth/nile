@@ -392,6 +392,16 @@ impl Project {
         Ok(timeline.compose(&file)?)
     }
 
+    /// Remove a media group by id, returning it.
+    pub fn remove_group(&mut self, id: u32) -> Result<MediaGroup, ProjectError> {
+        let pos = self
+            .groups
+            .iter()
+            .position(|group| group.id == id)
+            .ok_or(ProjectError::GroupNotFound(id))?;
+        Ok(self.groups.remove(pos))
+    }
+
     /// Add a logical media group and return its id.
     /// Model-only group creation. A front-end must add a `Document` wrapper
     /// that bumps the revision and records history before exposing this.

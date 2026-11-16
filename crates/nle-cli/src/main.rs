@@ -108,6 +108,9 @@ enum Cmd {
     Import {
         /// Media files to import
         files: Vec<PathBuf>,
+        /// Group the imported files as one logical recording (argument order)
+        #[arg(long, value_name = "NAME")]
+        group: Option<String>,
     },
     /// Place a clip on the video track
     Add {
@@ -391,6 +394,11 @@ enum Cmd {
         #[command(subcommand)]
         action: MediaCmd,
     },
+    /// Logical media groups: list, remove
+    Group {
+        #[command(subcommand)]
+        action: GroupCmd,
+    },
     /// Timeline tracks: list, add, mute, remove
     Track {
         #[command(subcommand)]
@@ -614,6 +622,18 @@ enum MediaCmd {
     },
 }
 
+/// Media-group subcommands.
+#[derive(Debug, Subcommand)]
+enum GroupCmd {
+    /// List groups, their parts and group end
+    Ls,
+    /// Remove a media group by id (undoable)
+    Rm {
+        /// Group id (from `nile group ls`)
+        id: u32,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum CacheCmd {
     /// Delete proxy renders older than N days
@@ -716,8 +736,8 @@ use cmd::media::{cmd_probe, cmd_trim};
 #[cfg(feature = "tui")]
 use cmd::project::cmd_edit;
 use cmd::project::{
-    cmd_add, cmd_cache, cmd_default, cmd_edl, cmd_init, cmd_media_ls, cmd_seek, cmd_sequence,
-    cmd_show, cmd_track_ls,
+    cmd_add, cmd_cache, cmd_default, cmd_edl, cmd_group, cmd_init, cmd_media_ls, cmd_seek,
+    cmd_sequence, cmd_show, cmd_track_ls,
 };
 use cmd::{run_cli_action, to_action};
 
@@ -759,7 +779,7 @@ fn main() -> Result<()> {
         Cmd::Edl { track, sequence } => return cmd_edl(&project, *track, *sequence),
         Cmd::Serve { stdio } => return serve::cmd_serve(&project, *stdio),
         Cmd::Init { force } => return cmd_init(&project, *force),
-        Cmd::Import { files } => return cmd_import(&project, files),
+        Cmd::Import { files, group } => return cmd_import(&project, files, group.as_deref()),
         Cmd::Add {
             file,
             track,
@@ -790,6 +810,7 @@ fn main() -> Result<()> {
         Cmd::Media {
             action: MediaCmd::Ls,
         } => return cmd_media_ls(&project),
+        Cmd::Group { action } => return cmd_group(&project, action),
         Cmd::ImportEdl {
             file,
             media,

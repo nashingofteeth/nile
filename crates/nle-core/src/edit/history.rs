@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+use crate::group::MediaGroup;
 use crate::media::RawProbe;
 use crate::project::{Asset, Project};
 use crate::time::Seconds;
@@ -270,6 +271,49 @@ impl History {
         }));
         project.bump_revision();
         ids
+    }
+
+    /// Create a media group and record the group list so undo removes it.
+    pub fn add_group(
+        &mut self,
+        project: &mut Project,
+        name: impl Into<String>,
+        parts: Vec<crate::group::MediaPart>,
+        playhead: i64,
+    ) -> Result<u32, EditError> {
+        let before = project.groups.clone();
+        let id = project.add_group(name, parts)?;
+        let desc = format!("add media group #{id}");
+        self.push_change(Change::Groups(GroupsChange {
+            before,
+            after: project.groups.clone(),
+            desc,
+            playhead,
+            provenance: self.provenance(),
+        }));
+        project.bump_revision();
+        Ok(id)
+    }
+
+    /// Remove a media group and record the group list so undo restores it.
+    pub fn remove_group(
+        &mut self,
+        project: &mut Project,
+        id: u32,
+        playhead: i64,
+    ) -> Result<String, EditError> {
+        let before = project.groups.clone();
+        let removed = project.remove_group(id)?;
+        let desc = format!("remove media group #{}", removed.id);
+        self.push_change(Change::Groups(GroupsChange {
+            before,
+            after: project.groups.clone(),
+            desc: desc.clone(),
+            playhead,
+            provenance: self.provenance(),
+        }));
+        project.bump_revision();
+        Ok(desc)
     }
 
     /// Set the actor recorded on subsequent changes.
@@ -632,6 +676,7 @@ pub enum Change {
     Tracks(TracksChange),
     Assets(AssetChange),
     Group(GroupChange),
+    Groups(GroupsChange),
 }
 
 impl Change {
@@ -641,6 +686,7 @@ impl Change {
             Change::Tracks(c) => &c.desc,
             Change::Assets(c) => &c.desc,
             Change::Group(c) => &c.desc,
+            Change::Groups(c) => &c.desc,
         }
     }
 
@@ -650,6 +696,7 @@ impl Change {
             Change::Tracks(c) => c.playhead,
             Change::Assets(c) => c.playhead,
             Change::Group(c) => c.playhead,
+            Change::Groups(c) => c.playhead,
         }
     }
 
@@ -659,6 +706,7 @@ impl Change {
             Change::Tracks(c) => &c.provenance,
             Change::Assets(c) => &c.provenance,
             Change::Group(c) => &c.provenance,
+            Change::Groups(c) => &c.provenance,
         }
     }
 }
@@ -710,6 +758,16 @@ pub struct AssetChange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupChange {
     pub changes: Vec<Change>,
+    pub desc: String,
+    pub playhead: i64,
+    pub provenance: Provenance,
+}
+
+/// A media-group list edit: creating or removing a logical recording.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupsChange {
+    pub before: Vec<MediaGroup>,
+    pub after: Vec<MediaGroup>,
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
@@ -821,6 +879,7 @@ fn substitute(project: &mut Project, change: &Change, forward: bool) -> Result<(
         Change::Track(c) => substitute_topology(project, c, forward)?,
         Change::Tracks(c) => substitute_tracks(project, c, forward)?,
         Change::Assets(c) => substitute_assets(project, c, forward)?,
+        Change::Groups(c) => substitute_groups(project, c, forward)?,
         Change::Group(c) => {
             if forward {
                 for change in &c.changes {
@@ -884,6 +943,25 @@ fn substitute_topology(
 
 /// Verify the live media pool matches one side of `change` (exact equality,
 /// including probes) and substitute the other.
+fn substitute_groups(
+    project: &mut Project,
+    change: &GroupsChange,
+    forward: bool,
+) -> Result<(), EditError> {
+    let (expected, write) = if forward {
+        (&change.before, &change.after)
+    } else {
+        (&change.after, &change.before)
+    };
+    if project.groups != *expected {
+        return Err(EditError::History(
+            "media groups changed outside the undo stack".to_string(),
+        ));
+    }
+    project.groups = write.clone();
+    Ok(())
+}
+
 fn substitute_assets(
     project: &mut Project,
     change: &AssetChange,

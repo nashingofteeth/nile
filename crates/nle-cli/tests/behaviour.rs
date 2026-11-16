@@ -108,6 +108,42 @@ fn show_json_does_not_rewrite_the_active_sequence() {
 }
 
 #[test]
+fn import_group_creates_one_undoable_recording() {
+    let s = Sandbox::new();
+    s.ok(&["init"]);
+    s.ok(&["import", "--group", "CAM 3", "red.mp4", "green.mp4"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["groups"][0]["name"], "CAM 3");
+    assert_eq!(project["groups"][0]["parts"].as_array().unwrap().len(), 2);
+    assert_eq!(project["media"].as_array().unwrap().len(), 2);
+    assert!(s.ok(&["group", "ls"]).contains("CAM 3"));
+
+    // One undo removes the group and both imported assets.
+    s.ok(&["undo"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert!(project["groups"].as_array().unwrap().is_empty());
+    assert!(project["media"].as_array().unwrap().is_empty());
+
+    // Redo restores both, and removing the group leaves the assets pooled.
+    s.ok(&["redo"]);
+    s.ok(&["group", "rm", "1"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert!(project["groups"].as_array().unwrap().is_empty());
+    assert_eq!(project["media"].as_array().unwrap().len(), 2);
+    s.ok(&["undo"]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&s.ok(&["show", "--json"])).unwrap()["groups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn show_json_exposes_time_maps_and_groups() {
     let s = Sandbox::new();
     s.base();
