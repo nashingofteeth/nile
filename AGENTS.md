@@ -91,10 +91,13 @@ explainers, and commit-adjacent notes:
 
 ## Branch and merge
 
-Work on a branch and push it when the gates pass. **Never merge to `main`
-without explicit user permission** — "review" is not permission; wait for a
-clear "merge". After approval, merge with `--no-ff`, rerun
-`scripts/check.sh` on `main`, then push.
+One slice, one branch. Keep review fixes on that same branch: commit them
+onto the feature branch and push; do not create a separate `fix/...-review`
+branch. The branch reviewed is the branch that merges.
+
+Do not commit directly to `main`. **Never merge to `main` without an explicit
+request** — "review" is not permission; wait for a clear "merge". After
+approval, merge with `--no-ff`, rerun `scripts/check.sh` on `main`, then push.
 
 ## Verify before every commit
 
