@@ -549,7 +549,7 @@ impl Segment {
     /// [`Segment::duration`], or `None` if the arithmetic would overflow.
     /// `validate` sums with this: a hand-edited project (a speed near zero, an
     /// extreme span) must be rejected, not panic the caller.
-    fn checked_duration(&self) -> Option<Seconds> {
+    pub(crate) fn checked_duration(&self) -> Option<Seconds> {
         match self {
             Segment::Clip(c) => checked_div(&checked_sub(&c.asset_out, &c.asset_in)?, &c.speed),
             Segment::Gap(g) => Some(g.duration),
