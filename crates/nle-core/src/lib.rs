@@ -17,6 +17,7 @@ pub mod project;
 pub mod state;
 pub mod time;
 pub mod timeline;
+mod timemap;
 
 pub use action::{
     Action, DEFAULT_TRANSITION_FRAMES, Edge, GapLen, Outcome, ParseDefaults, ParseError, Register,
@@ -50,3 +51,4 @@ pub use time::{
 pub use timeline::{
     Clip, Timeline, TimelineError, Track, TrackKind, Transition, TransitionKind, TransitionSource,
 };
+pub use timemap::{TimeMap, TimeMapError, TimeSpan};
