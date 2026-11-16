@@ -456,15 +456,15 @@ shared by the TUI and agents — with no clipgen code present.
   (`cam_a.mp4`/`cam_b.mp4`, mic, ATEM log, tiny Resolve EDL/OTIO) with a
   normalized golden project, video-track EDL, frame count and sampled PSNR,
   wired through `crates/nle-cli/tests/fixtures.rs` and `cargo test`.
-- `nile-protocol` and `nile serve --stdio` are wire-complete: one catalog
+- `nile-protocol` and `nile serve` (stdio and socket) are wire-complete: one catalog
   action per apply (one undo step), rational `from`/playhead times, `hello` +
   `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
   single-source `wire_catalog!` generation. The handler owns CAS, saves,
   playhead, and events. Step 1 (sequences) landed; step 2 (protocol) is next.
 - **Order within step 0:** revision + provenance, the `nle-protocol` wire,
-  `nile serve --stdio`, and fixtures are done. Steps 0 and 1 are complete; the
-  protocol (step 2) starts next. These are breaking format changes: close any
-  live TUI before testing and rebuild old projects.
+  `nile serve`, and fixtures are done. Steps 0 and 1 are complete; step 2 is in
+  progress. These are breaking format changes: close any live TUI before
+  testing and rebuild old projects.
 
 ### 1. Sequences (done)
 
@@ -493,8 +493,8 @@ shared by the TUI and agents — with no clipgen code present.
   `undo/redo`, `sequence.*`, `media.*`, `job.*`.
 - Landed so far: `sequence.*`, `media.*`, typed client helpers, the
   golden/action-slot contract tests, batched `action.apply`
-  (`Change::Group`, history v18), and the preview diff/warnings reply.
-  Remaining: the socket/single-writer lock and TUI attach.
+  (`Change::Group`, history v18), the preview diff/warnings reply, and the
+  socket/single-writer lock. Remaining: TUI attach.
 - `action.preview` applies a batch to a cloned `Document` and returns the
   diff + warnings; `action.apply` is atomic and returns the new revision.
   A mismatched `base_revision` is a typed conflict with `{expected, actual}`;
