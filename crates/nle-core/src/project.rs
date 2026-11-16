@@ -533,6 +533,8 @@ impl ProjectDiff {
     }
 }
 
+/// One sequence that changed. Only differing tracks are listed, and added or
+/// removed tracks are reported by index.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SequenceDiff {
     pub id: u32,
@@ -542,6 +544,7 @@ pub struct SequenceDiff {
     pub tracks: Vec<TrackDiff>,
 }
 
+/// One track whose kind, mute flag, or segments changed.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TrackDiff {
     pub index: usize,
