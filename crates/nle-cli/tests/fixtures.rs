@@ -16,6 +16,51 @@ const EXPECTED_PROJECT: &str = include_str!("../../../fixtures/expected/project.
 const EXPECTED_MONITOR: &str = include_str!("../../../fixtures/expected/monitor.edl");
 const EXPECTED_FRAMES: &str = include_str!("../../../fixtures/expected/frames.txt");
 
+/// Two events cut from the two parts of one rolling camera.
+const MULTI_PART_EDL: &str = "\
+TITLE: MULTI PART
+FCM: NON-DROP FRAME
+
+001  CAM3_A   V     C        00:00:00:00 00:00:03:00 01:00:00:00 01:00:03:00
+002  CAM3_B   V     C        00:00:00:00 00:00:03:00 01:00:03:00 01:00:06:00
+";
+
+/// The same two parts as an OTIO video track, for the importer-parity check.
+const MULTI_PART_OTIO: &str = r#"{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "multi part",
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "children": [{
+      "OTIO_SCHEMA": "Track.1",
+      "name": "Program",
+      "kind": "Video",
+      "children": [
+        {
+          "OTIO_SCHEMA": "Clip.1",
+          "name": "cam3_a.mp4",
+          "media_reference": {"OTIO_SCHEMA": "ExternalReference.1", "target_url": "cam3_a.mp4"},
+          "source_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": {"OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 30},
+            "duration": {"OTIO_SCHEMA": "RationalTime.1", "value": 90, "rate": 30}
+          }
+        },
+        {
+          "OTIO_SCHEMA": "Clip.1",
+          "name": "cam3_b.mp4",
+          "media_reference": {"OTIO_SCHEMA": "ExternalReference.1", "target_url": "cam3_b.mp4"},
+          "source_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": {"OTIO_SCHEMA": "RationalTime.1", "value": 0, "rate": 30},
+            "duration": {"OTIO_SCHEMA": "RationalTime.1", "value": 90, "rate": 30}
+          }
+        }
+      ]
+    }]
+  }
+}"#;
+
 #[test]
 fn the_fixture_show_imports_to_the_golden_project() {
     let sandbox = fixture_sandbox();
@@ -71,6 +116,110 @@ fn the_fixture_show_exports_and_matches_the_program() {
             "PSNR at {at} s (frame {frame}) is {psnr:.2} dB"
         );
     }
+}
+
+/// The step-3 gate: one recording made of two files maps group time through
+/// the timeline and back, survives a reload, and has no media across a gap.
+#[test]
+fn a_multi_part_recording_round_trips() {
+    let sandbox = Sandbox::multi_part();
+    sandbox.write("multi.edl", MULTI_PART_EDL);
+    sandbox.ok(&[
+        "import-edl",
+        "multi.edl",
+        "--media",
+        ".",
+        "--group",
+        "CAM 3=cam3_a.mp4,cam3_b.mp4",
+    ]);
+
+    let listing = sandbox.ok(&["group", "ls"]);
+    assert!(listing.contains("2 part(s) · 0–6 s"), "{listing}");
+
+    let shown: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json", "--maps"])).expect("project + maps");
+    assert_eq!(shown["groups"][0]["name"], "CAM 3");
+    assert_eq!(shown["groups"][0]["parts"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        spans(&shown),
+        vec![(0.0, 3.0, 0.0), (3.0, 6.0, 3.0)],
+        "timeline 0–6 maps to group 0–6 across the two parts"
+    );
+
+    // Every `nile` call reloads the file: equal maps prove the round-trip.
+    let again: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json", "--maps"])).expect("project + maps");
+    assert_eq!(shown["groups"], again["groups"]);
+    assert_eq!(shown["group_maps"], again["group_maps"]);
+
+    // A gap at 3 s pushes the second part to 4–7 s; group 3–6 stays intact.
+    sandbox.ok(&["gap", "--at", "3", "--frames", "30"]);
+    let gapped: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json", "--maps"])).expect("project + maps");
+    assert_eq!(
+        spans(&gapped),
+        vec![(0.0, 3.0, 0.0), (4.0, 7.0, 3.0)],
+        "the gap shifts the second part but not its group time"
+    );
+    assert!(
+        gapped["group_maps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(
+                |entry| entry["spans"].as_array().unwrap().iter().all(|span| {
+                    let (start, end) = timeline_span(span);
+                    !(start <= 3.5 && 3.5 < end)
+                })
+            ),
+        "a wall time inside the trimmed gap maps to no media"
+    );
+
+    // The OTIO importer builds the same group from the same ordered parts.
+    sandbox.write("multi.otio", MULTI_PART_OTIO);
+    sandbox.ok(&[
+        "import-otio",
+        "multi.otio",
+        "--group",
+        "CAM 3=cam3_a.mp4,cam3_b.mp4",
+        "--force",
+    ]);
+    let otio: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json", "--maps"])).expect("project + maps");
+    assert_eq!(otio["groups"][0]["name"], "CAM 3");
+    assert_eq!(
+        spans(&otio),
+        vec![(0.0, 3.0, 0.0), (3.0, 6.0, 3.0)],
+        "EDL and OTIO grouping agree"
+    );
+}
+
+/// `(timeline start, timeline end, source start)` for every group-map span,
+/// sorted by timeline start.
+fn spans(project: &Value) -> Vec<(f64, f64, f64)> {
+    let mut spans: Vec<(f64, f64, f64)> = project["group_maps"]
+        .as_array()
+        .expect("group maps")
+        .iter()
+        .flat_map(|entry| entry["spans"].as_array().expect("spans"))
+        .map(|span| {
+            let (start, end) = timeline_span(span);
+            let source = secs(&span["source"][0]);
+            (start, end, source)
+        })
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    spans
+}
+
+fn timeline_span(span: &Value) -> (f64, f64) {
+    (secs(&span["timeline"][0]), secs(&span["timeline"][1]))
+}
+
+fn secs(value: &Value) -> f64 {
+    let text = value.as_str().expect("rational string");
+    let (num, den) = text.split_once('/').expect("num/den");
+    num.parse::<f64>().unwrap() / den.parse::<f64>().unwrap()
 }
 
 fn fixture_sandbox() -> Sandbox {
