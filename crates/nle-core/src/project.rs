@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+use crate::group::{MediaGroup, MediaPart};
 use crate::media::RawProbe;
-use crate::time::{Seconds, grid_time, rational_ser, secs_f64};
+use crate::time::{Seconds, format_seconds, grid_time, rational_ser, secs_f64};
 use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 
 /// Project file format version. No migration path is kept (see
@@ -24,8 +25,9 @@ use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 /// v8 stores `crop` as per-edge percentage insets and `scale` as percentages;
 /// v9 stores each transition side's effects (they render the neighbour);
 /// v10 stores the monotonic model `revision`;
-/// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s.
-pub const PROJECT_VERSION: u32 = 11;
+/// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
+/// v12 adds logical media groups.
+pub const PROJECT_VERSION: u32 = 12;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -55,6 +57,10 @@ pub enum ProjectError {
     SequenceDuplicate(u32),
     #[error("sequence #{0} has a non-positive frame rate")]
     NonPositiveFps(u32),
+    #[error("media group #{0}: {1}")]
+    Group(u32, String),
+    #[error("asset #{0} is used by media group(s) {1:?} — remove or edit them first")]
+    AssetInGroup(u32, Vec<u32>),
 }
 
 /// Output sequence settings (set from the first clip, changeable later).
@@ -177,6 +183,9 @@ pub struct Project {
     /// The media pool is shared by every sequence.
     #[serde(default)]
     pub media: Vec<Asset>,
+    /// Logical recordings assembled from ordered media parts.
+    #[serde(default)]
+    pub groups: Vec<MediaGroup>,
     /// One or more editable timelines.
     #[serde(default)]
     pub sequences: Vec<Sequence>,
@@ -216,6 +225,7 @@ impl Project {
             version: PROJECT_VERSION,
             revision: 0,
             media: Vec::new(),
+            groups: Vec::new(),
             sequences: vec![Sequence::new(1, "Sequence 1")],
             active: 1,
         }
@@ -346,6 +356,74 @@ impl Project {
         Ok(())
     }
 
+    pub fn group(&self, id: u32) -> Option<&MediaGroup> {
+        self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// Add a logical media group and return its id.
+    /// Model-only group creation. A front-end must add a `Document` wrapper
+    /// that bumps the revision and records history before exposing this.
+    pub fn add_group(
+        &mut self,
+        name: impl Into<String>,
+        parts: Vec<MediaPart>,
+    ) -> Result<u32, ProjectError> {
+        let id = self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+        let group = MediaGroup::new(id, name, parts);
+        self.validate_group(&group)?;
+        self.groups.push(group);
+        Ok(id)
+    }
+
+    fn validate_group(&self, group: &MediaGroup) -> Result<(), ProjectError> {
+        if group.parts.is_empty() {
+            return Err(ProjectError::Group(group.id, "has no parts".to_string()));
+        }
+        let mut previous_end = Seconds::from_integer(0);
+        for (part_index, part) in group.parts.iter().enumerate() {
+            let asset = self.asset(part.asset).ok_or_else(|| {
+                ProjectError::Group(
+                    group.id,
+                    format!("part {part_index}: asset #{} is not pooled", part.asset),
+                )
+            })?;
+            if part.group_start < Seconds::from_integer(0)
+                || part.file_start < Seconds::from_integer(0)
+                || part.duration <= Seconds::from_integer(0)
+            {
+                return Err(ProjectError::Group(
+                    group.id,
+                    format!("part {part_index}: invalid time or duration"),
+                ));
+            }
+            let group_end = part.group_end().ok_or_else(|| {
+                ProjectError::Group(group.id, format!("part {part_index}: group time overflow"))
+            })?;
+            let file_end = part.file_end().ok_or_else(|| {
+                ProjectError::Group(group.id, format!("part {part_index}: file time overflow"))
+            })?;
+            if let Some(duration) = asset.duration()
+                && file_end > duration
+            {
+                return Err(ProjectError::Group(
+                    group.id,
+                    format!(
+                        "part {part_index}: reads to {} s past the {duration} s asset",
+                        format_seconds(&file_end)
+                    ),
+                ));
+            }
+            if part_index > 0 && part.group_start < previous_end {
+                return Err(ProjectError::Group(
+                    group.id,
+                    format!("part {part_index}: overlaps the previous part"),
+                ));
+            }
+            previous_end = group_end;
+        }
+        Ok(())
+    }
+
     /// Structural sanity of the whole project.
     pub fn validate(&self) -> Result<(), ProjectError> {
         if self.sequences.is_empty() {
@@ -361,6 +439,12 @@ impl Project {
         }
         if self.sequence(self.active).is_none() {
             return Err(ProjectError::SequenceNotFound(self.active));
+        }
+        for (i, group) in self.groups.iter().enumerate() {
+            if self.groups[..i].iter().any(|other| other.id == group.id) {
+                return Err(ProjectError::Group(group.id, "duplicated id".to_string()));
+            }
+            self.validate_group(group)?;
         }
         for sequence in &self.sequences {
             if sequence
@@ -474,12 +558,26 @@ impl Project {
             .collect()
     }
 
-    /// Remove an asset from the pool. Refuses while any clip references it
-    /// (the caller lists the clips); no clip is ever silently dropped.
+    /// Group ids that reference asset `id`.
+    pub fn asset_group_usage(&self, id: u32) -> Vec<u32> {
+        self.groups
+            .iter()
+            .filter(|group| group.parts.iter().any(|part| part.asset == id))
+            .map(|group| group.id)
+            .collect()
+    }
+
+    /// Remove an asset from the pool. Refuses while any clip or media group
+    /// references it (the caller lists the clips/groups); nothing is silently
+    /// left dangling.
     pub fn remove_asset(&mut self, id: u32) -> Result<Asset, ProjectError> {
         let used = self.asset_usage(id);
         if !used.is_empty() {
             return Err(ProjectError::AssetInUse(id, used));
+        }
+        let groups = self.asset_group_usage(id);
+        if !groups.is_empty() {
+            return Err(ProjectError::AssetInGroup(id, groups));
         }
         let pos = self
             .media
@@ -913,7 +1011,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 11);
+        assert_eq!(PROJECT_VERSION, 12);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);
@@ -980,6 +1078,111 @@ mod tests {
             Seconds::from_integer(1),
         ))];
         assert_eq!(p.asset_usage(1).len(), before + 1);
+    }
+
+    #[test]
+    fn media_groups_round_trip_and_validate() {
+        let mut p = sample_project();
+        let id = p
+            .add_group(
+                "CAM 3",
+                vec![
+                    MediaPart {
+                        asset: 1,
+                        group_start: Seconds::from_integer(0),
+                        file_start: Seconds::from_integer(0),
+                        duration: Seconds::from_integer(2),
+                    },
+                    MediaPart {
+                        asset: 2,
+                        group_start: Seconds::from_integer(3),
+                        file_start: Seconds::from_integer(2),
+                        duration: Seconds::from_integer(2),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(
+            p.group(id).unwrap().group_time(&Seconds::from_integer(1)),
+            Some((1, Seconds::from_integer(1)))
+        );
+        let text = serde_json::to_string(&p).unwrap();
+        let back: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.groups, p.groups);
+        assert!(p.validate().is_ok());
+
+        let mut bad = p.clone();
+        bad.groups[0].parts[0].file_start = Seconds::from_integer(i64::MAX);
+        assert!(matches!(
+            bad.validate(),
+            Err(ProjectError::Group(1, ref msg)) if msg.contains("file time overflow")
+        ));
+
+        assert!(matches!(
+            p.add_group(
+                "bad",
+                vec![MediaPart {
+                    asset: 99,
+                    group_start: Seconds::from_integer(0),
+                    file_start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(1),
+                }]
+            ),
+            Err(ProjectError::Group(_, ref msg)) if msg.contains("not pooled")
+        ));
+
+        let mut bad = p.clone();
+        bad.groups[0].parts[0].duration = Seconds::from_integer(11);
+        assert!(matches!(
+            bad.validate(),
+            Err(ProjectError::Group(1, ref msg)) if msg.contains("past")
+        ));
+
+        let mut bad = p.clone();
+        bad.groups[0].parts[1].group_start = Seconds::from_integer(1);
+        assert!(matches!(
+            bad.validate(),
+            Err(ProjectError::Group(1, ref msg)) if msg.contains("overlaps")
+        ));
+
+        let mut bad = p.clone();
+        bad.groups[0].parts[0].asset = 99;
+        assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
+
+        let mut bad = p.clone();
+        bad.groups[0].parts.clear();
+        assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
+
+        let mut bad = p.clone();
+        bad.groups.push(bad.groups[0].clone());
+        assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
+    }
+
+    #[test]
+    fn remove_asset_refuses_a_group_only_reference() {
+        let mut p = sample_project();
+        let (spare, _) = p.add_asset(
+            "/media/spare.mp4".into(),
+            probe_report("5", 320, 240, "30/1", true),
+        );
+        let group = p
+            .add_group(
+                "MIC 1",
+                vec![MediaPart {
+                    asset: spare,
+                    group_start: Seconds::from_integer(0),
+                    file_start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(2),
+                }],
+            )
+            .unwrap();
+        assert_eq!(p.asset_group_usage(spare), vec![group]);
+        assert!(matches!(
+            p.remove_asset(spare),
+            Err(ProjectError::AssetInGroup(id, ref groups)) if id == spare && groups == &vec![group]
+        ));
+        assert!(p.asset(spare).is_some(), "the asset survives the refusal");
     }
 
     #[test]
