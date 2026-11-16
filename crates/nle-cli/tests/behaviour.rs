@@ -108,6 +108,43 @@ fn show_json_does_not_rewrite_the_active_sequence() {
 }
 
 #[test]
+fn show_json_exposes_time_maps_and_groups() {
+    let s = Sandbox::new();
+    s.base();
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["version"], 12);
+    assert_eq!(project["groups"], serde_json::json!([]));
+    let maps = project["time_maps"].as_array().expect("time maps");
+    assert!(!maps.is_empty(), "the clips produce a map");
+    assert_eq!(maps[0]["track"], 0);
+    assert_eq!(maps[0]["asset"], 1);
+    assert!(
+        maps[0]["spans"]
+            .as_array()
+            .is_some_and(|spans| !spans.is_empty())
+    );
+
+    // A group referencing a pooled asset round-trips through show.
+    let mut with_group = project.clone();
+    with_group["groups"] = serde_json::json!([{
+        "id": 1,
+        "name": "CAM 3",
+        "parts": [{
+            "asset": 1,
+            "group_start": "0/1",
+            "file_start": "0/1",
+            "duration": "2/1"
+        }]
+    }]);
+    s.write(P, &serde_json::to_string_pretty(&with_group).unwrap());
+    let shown: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(shown["groups"][0]["name"], "CAM 3");
+    assert!(s.ok(&["show"]).contains("group #1 CAM 3"));
+}
+
+#[test]
 fn cli_undo_follows_the_active_sequence() {
     let s = Sandbox::new();
     s.base();

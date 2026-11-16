@@ -13,7 +13,8 @@ use nle_core::state;
 use nle_core::time::{parse_signed_time, parse_time};
 use nle_core::timeline::{Clip, Segment, TrackKind};
 use nle_core::{
-    Action, Document, Project, Seconds, VideoSettings, format_seconds, frame_of, track_label,
+    Action, Document, Project, Seconds, TimeMap, VideoSettings, format_seconds, frame_of,
+    track_label,
 };
 use nle_ffmpeg::probe;
 
@@ -320,13 +321,62 @@ pub(crate) fn secs_f64(t: &Seconds) -> f64 {
     *t.numer() as f64 / *t.denom() as f64
 }
 
+fn secs_string(t: &Seconds) -> String {
+    format!("{}/{}", t.numer(), t.denom())
+}
+
+/// The project JSON plus derived per-track/asset time maps. The maps are not
+/// persisted: they are a view of the clips, so they cannot drift.
+fn show_json(project: &Project) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(project)?;
+    let mut maps = Vec::new();
+    for (track_index, track) in project.timeline.tracks.iter().enumerate() {
+        let assets: std::collections::BTreeSet<u32> = track
+            .segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Clip(clip) => Some(clip.asset),
+                _ => None,
+            })
+            .collect();
+        for asset in assets {
+            let Ok(map) = TimeMap::from_track_for_asset(track, asset) else {
+                continue;
+            };
+            if map.is_empty() {
+                continue;
+            }
+            let spans: Vec<serde_json::Value> = map
+                .spans()
+                .iter()
+                .map(|span| {
+                    let (timeline_start, timeline_end) = span.timeline();
+                    let (source_start, source_end) = span.source();
+                    serde_json::json!({
+                        "timeline": [secs_string(&timeline_start), secs_string(&timeline_end)],
+                        "source": [secs_string(&source_start), secs_string(&source_end)],
+                    })
+                })
+                .collect();
+            maps.push(serde_json::json!({
+                "sequence": project.active_id(),
+                "track": track_index,
+                "asset": asset,
+                "spans": spans,
+            }));
+        }
+    }
+    value["time_maps"] = serde_json::Value::Array(maps);
+    Ok(value)
+}
+
 pub(crate) fn cmd_show(project_path: &Path, json: bool, sequence: Option<u32>) -> Result<()> {
     let mut project = Project::load(project_path)?;
     if json {
         if sequence.is_some() {
             bail!("--json prints the whole project; omit --sequence");
         }
-        say!("{}", serde_json::to_string_pretty(&project)?);
+        say!("{}", serde_json::to_string_pretty(&show_json(&project)?)?);
         return Ok(());
     }
     if let Some(id) = sequence {
@@ -613,6 +663,14 @@ pub(crate) fn show_report(project: &Project) -> String {
                 }
             }
         }
+    }
+    for group in &project.groups {
+        out += &format!(
+            "  group #{} {} · {} part(s)\n",
+            group.id,
+            group.name,
+            group.parts.len()
+        );
     }
     out
 }

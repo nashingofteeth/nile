@@ -35,7 +35,7 @@ fn protocol_server_round_trip() {
 
     let hello = call(&mut serve, 1, "hello", None);
     assert_eq!(hello["result"]["protocol"], 5);
-    assert_eq!(hello["result"]["project_version"], 11);
+    assert_eq!(hello["result"]["project_version"], 12);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
         hello["result"]["methods"]
