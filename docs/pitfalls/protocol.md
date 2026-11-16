@@ -57,12 +57,14 @@ back to the media end). `action.apply` keeps the plain outcome.
 `{expected, actual}`. Protocol v4 changed `action` to the `actions` list; v5
 gave `action.preview` its `diff`/`warnings` reply.
 
-`playhead.set { at }` moves the shared cursor without a model revision change
-and emits `playhead`; it returns `{revision, depth, at}`. `from` is the
-optional rational undo anchor; absent means the shared `Project.playhead`. It is an **input**: the returned `Outcome.playhead` is the
+`from` is the optional rational undo anchor; absent means the shared
+`Project.playhead`. It is an **input**: the returned `Outcome.playhead` is the
 edit's own result, converted from `nle_core::Outcome` frames with
 `frames_to_seconds` (a blend midpoint, the moved edge), never an echo of
 `from`.
+
+`playhead.set { at }` moves the shared cursor without a model revision change
+and emits `playhead`; it returns `{revision, depth, at}`.
 
 The action is the catalog's serde form (`{"action":"split",...}`), not a
 parallel DTO. `crates/nle-core/src/action/tests/wire.rs` pins every slot.

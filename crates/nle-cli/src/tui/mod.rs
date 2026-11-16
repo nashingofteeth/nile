@@ -960,11 +960,7 @@ pub fn run<P: Mpv>(session: Session, player: P) -> anyhow::Result<()> {
         if matches!(app.mode, Mode::Normal) {
             match app.project.poll_remote() {
                 Ok(true) => {
-                    app.active_track = app
-                        .active_track
-                        .min(app.project.timeline.tracks.len().saturating_sub(1));
-                    forget_missing_assets(&mut app);
-                    start_preview(&mut app);
+                    adopt_remote_change(&mut app);
                     app.set_message("adopted changes from the server");
                 }
                 Ok(false) => {}
@@ -1127,7 +1123,9 @@ fn persist_playhead(app: &mut App) -> anyhow::Result<bool> {
     if app.external_change() {
         return Ok(false);
     }
-    app.project.set_playhead(app.playhead);
+    // Remote set_playhead returns the server's cursor on failure, so adopting
+    // the return value stops a poisoned cursor from retrying every flush.
+    app.playhead = app.project.set_playhead(app.playhead);
     app.project.save_project()?;
     app.note_project();
     Ok(true)
@@ -1166,6 +1164,33 @@ fn watch_foreign(app: &mut App) -> bool {
     true
 }
 
+/// Adopt a server project change: the server owns the cursor, so take its
+/// playhead (a sequence switch or a shorter timeline makes the old one
+/// stale), clamp the active track and rebuild the monitor.
+fn adopt_remote_change(app: &mut App) {
+    app.active_track = app
+        .active_track
+        .min(app.project.timeline.tracks.len().saturating_sub(1));
+    app.playhead = secs(&app.project.playhead);
+    app.follow_timeline();
+    reset_render_caches(app);
+    start_preview(app);
+}
+
+fn reset_render_caches(app: &mut App) {
+    app.waveforms.clear();
+    app.waveform_failed.clear();
+    app.wave_job = None;
+    app.keyframes.clear();
+    app.keyframe_job = None;
+    app.thumbnails.clear();
+    app.thumb_job = None;
+    app.filmstrips.clear();
+    app.filmstrip_failed.clear();
+    app.filmstrip_job = None;
+    forget_missing_assets(app);
+}
+
 /// Reload the project (and its undo history) from disk and rebuild the
 /// preview. A **user** reload (`R`) keeps the live playhead; adopting a
 /// foreign write (`nile seek`, an edit in another window) also adopts that
@@ -1183,18 +1208,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
         }
         app.reload_pending = false;
         app.follow_timeline();
-        app.waveforms.clear();
-        app.waveform_failed.clear();
-        app.wave_job = None;
-        app.keyframes.clear();
-        app.keyframe_job = None;
-        app.thumbnails.clear();
-        app.thumb_job = None;
-        app.filmstrips.clear();
-        app.filmstrip_failed.clear();
-        app.filmstrip_job = None;
-        let ids: std::collections::BTreeSet<u32> = app.project.media.iter().map(|a| a.id).collect();
-        app.pool_marks.retain(|id, _| ids.contains(id));
+        reset_render_caches(app);
         start_preview(app);
         return Ok(());
     }
@@ -1219,18 +1233,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     app.follow_timeline();
     // Re-key both caches against the reloaded timeline; a dropped receiver
     // simply discards a stale worker's results.
-    app.waveforms.clear();
-    app.waveform_failed.clear();
-    app.wave_job = None;
-    app.keyframes.clear();
-    app.keyframe_job = None;
-    app.thumbnails.clear();
-    app.thumb_job = None;
-    app.filmstrips.clear();
-    app.filmstrip_failed.clear();
-    app.filmstrip_job = None;
-    let ids: std::collections::BTreeSet<u32> = app.project.media.iter().map(|a| a.id).collect();
-    app.pool_marks.retain(|id, _| ids.contains(id));
+    reset_render_caches(app);
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())

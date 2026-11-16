@@ -282,6 +282,8 @@ fn hello_advertises_the_protocol_and_methods() {
         "hello reports the nile.json version this build reads"
     );
     assert_eq!(hello.revision, 7);
+    assert_eq!(hello.depth, 0);
+    assert_eq!(hello.active, 1);
     assert_eq!(
         hello.methods,
         nle_protocol::METHODS

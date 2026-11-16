@@ -51,12 +51,19 @@ enum Backend {
     Remote(RemoteSession),
 }
 
+type RpcClient = Client<BufReader<UnixStream>, UnixStream>;
+
 struct RemoteSession {
-    client: Client<BufReader<UnixStream>, UnixStream>,
+    client: RpcClient,
     project: Project,
     revision: u64,
     depth: u64,
     last_poll: Instant,
+    /// The connection is gone; stop polling and refuse remote work.
+    failed: Option<String>,
+    /// A playhead save failed but the connection may still be alive (a
+    /// poisoned server, for example); surface it on the next save.
+    save_error: Option<String>,
 }
 
 /// A loaded project plus the state that travels with it across commands.
@@ -76,6 +83,7 @@ impl Session {
     /// Open the live server when its socket accepts; otherwise load the file.
     /// A non-connection error (permissions, broken protocol) is reported
     /// rather than silently falling back to a second writer.
+    #[allow(dead_code)] // TUI startup
     pub fn open(path: &Path) -> Result<Self, SessionError> {
         match RemoteSession::connect(path) {
             Ok(Some(remote)) => Ok(Self {
@@ -100,6 +108,7 @@ impl Session {
     }
 
     /// Adopt a single stack for the active sequence (tests, scratch dumps).
+    #[allow(dead_code)] // TUI tests/dump
     pub fn from_history(project: Project, history: History, path: PathBuf) -> Self {
         let active = project.active_id();
         Self::from_histories(project, Histories::from_history(active, history), path)
@@ -109,6 +118,7 @@ impl Session {
         &self.path
     }
 
+    #[allow(dead_code)] // TUI attach
     pub fn is_remote(&self) -> bool {
         matches!(self.backend, Backend::Remote(_))
     }
@@ -142,6 +152,7 @@ impl Session {
 
     /// The direct document, for process-bound commands (`:add` probes a file
     /// and records the pool insertion). Remote sessions do not expose one.
+    #[allow(dead_code)] // TUI :add
     pub fn document_mut(&mut self) -> Option<&mut Document> {
         match &mut self.backend {
             Backend::Direct { document, .. } => Some(document),
@@ -154,7 +165,7 @@ impl Session {
             Backend::Direct { document, .. } => document.set_playhead(at),
             Backend::Remote(remote) => {
                 let snapped = grid_time(remote.project.fps.as_ref(), at);
-                match remote.client.set_playhead(snapped) {
+                match remote.call(|client| client.set_playhead(snapped)) {
                     Ok(reply) => {
                         remote.project.playhead = reply.at;
                         remote.revision = reply.revision;
@@ -162,7 +173,10 @@ impl Session {
                         let _ = remote.client.drain_buffered_events();
                         secs_f64(&reply.at)
                     }
-                    Err(_) => at,
+                    Err(error) => {
+                        remote.save_error = Some(error.to_string());
+                        secs_f64(&remote.project.playhead)
+                    }
                 }
             }
         }
@@ -176,6 +190,7 @@ impl Session {
         }
     }
 
+    #[allow(dead_code)] // TUI dump
     pub fn set_register(&mut self, register: Option<Register>) {
         if let Backend::Direct {
             register: current, ..
@@ -192,9 +207,9 @@ impl Session {
             Backend::Direct { document, register } => document.edit(action, from, register),
             Backend::Remote(remote) => {
                 let at = grid_time(remote.project.fps.as_ref(), from);
+                let revision = remote.revision;
                 let outcome = remote
-                    .client
-                    .apply(remote.revision, vec![action.clone()], Some(at))
+                    .call(|client| client.apply(revision, vec![action.clone()], Some(at)))
                     .map_err(remote_edit_error)?;
                 remote
                     .refresh_after(&outcome)
@@ -217,9 +232,9 @@ impl Session {
             }
             Backend::Remote(remote) => {
                 let at = grid_time(remote.project.fps.as_ref(), from);
+                let revision = remote.revision;
                 let outcome = remote
-                    .client
-                    .apply(remote.revision, actions.to_vec(), Some(at))
+                    .call(|client| client.apply(revision, actions.to_vec(), Some(at)))
                     .map_err(remote_edit_error)?;
                 remote
                     .refresh_after(&outcome)
@@ -273,9 +288,9 @@ impl Session {
             }
             Backend::Remote(remote) => {
                 let at = grid_time(remote.project.fps.as_ref(), from);
+                let revision = remote.revision;
                 let preview: WirePreview = remote
-                    .client
-                    .preview(remote.revision, actions.to_vec(), Some(at))
+                    .call(|client| client.preview(revision, actions.to_vec(), Some(at)))
                     .map_err(remote_edit_error)?;
                 let outcome = WireOutcome {
                     revision: preview.outcome.revision,
@@ -298,14 +313,9 @@ impl Session {
         match &mut self.backend {
             Backend::Direct { document, .. } => document.undo(),
             Backend::Remote(remote) => {
-                let outcome = remote
-                    .client
-                    .undo(remote.revision)
-                    .map_err(remote_edit_error)?;
-                remote
-                    .refresh_after(&outcome)
-                    .map_err(|e| EditError::Remote(e.to_string()))?;
-                Ok(remote_undo_outcome(&outcome, remote.project.fps.as_ref()))
+                Err(EditError::Remote(remote.failed.clone().unwrap_or_else(
+                    || "undo/redo is not wired for a remote session".into(),
+                )))
             }
         }
     }
@@ -315,14 +325,9 @@ impl Session {
         match &mut self.backend {
             Backend::Direct { document, .. } => document.redo(),
             Backend::Remote(remote) => {
-                let outcome = remote
-                    .client
-                    .redo(remote.revision)
-                    .map_err(remote_edit_error)?;
-                remote
-                    .refresh_after(&outcome)
-                    .map_err(|e| EditError::Remote(e.to_string()))?;
-                Ok(remote_undo_outcome(&outcome, remote.project.fps.as_ref()))
+                Err(EditError::Remote(remote.failed.clone().unwrap_or_else(
+                    || "undo/redo is not wired for a remote session".into(),
+                )))
             }
         }
     }
@@ -357,20 +362,6 @@ impl Session {
         }
     }
 
-    /// Add one asset through the direct history or `media.add`.
-    #[allow(dead_code)] // TUI tests use the direct form
-    pub fn add_asset(
-        &mut self,
-        path: PathBuf,
-        report: nle_core::media::RawProbe,
-        playhead: i64,
-    ) -> (u32, String) {
-        match &mut self.backend {
-            Backend::Direct { document, .. } => document.add_asset(path, report, playhead),
-            Backend::Remote(_) => (0, "media.add is not available on a direct session".into()),
-        }
-    }
-
     /// Add a batch of files as one undo step.
     pub fn add_assets(
         &mut self,
@@ -382,9 +373,9 @@ impl Session {
             Backend::Remote(remote) => {
                 let paths: Vec<PathBuf> = assets.iter().map(|(path, _)| path.clone()).collect();
                 let _ = playhead;
+                let revision = remote.revision;
                 let media = remote
-                    .client
-                    .add_media(remote.revision, paths)
+                    .call(|client| client.add_media(revision, paths))
                     .map_err(|e| SessionError::Remote(e.to_string()))?;
                 remote.revision = media.revision;
                 remote
@@ -406,9 +397,9 @@ impl Session {
                 document.add_sequence(name, fps, video).map_err(Into::into)
             }
             Backend::Remote(remote) => {
+                let revision = remote.revision;
                 let reply = remote
-                    .client
-                    .add_sequence(remote.revision, name, fps, video)
+                    .call(|client| client.add_sequence(revision, name, fps, video))
                     .map_err(|e| SessionError::Remote(e.to_string()))?;
                 remote
                     .refresh()
@@ -423,8 +414,7 @@ impl Session {
             Backend::Direct { document, .. } => document.select_sequence(id).map_err(Into::into),
             Backend::Remote(remote) => {
                 remote
-                    .client
-                    .use_sequence(id)
+                    .call(|client| client.use_sequence(id))
                     .map_err(|e| SessionError::Remote(e.to_string()))?;
                 remote
                     .refresh()
@@ -434,6 +424,7 @@ impl Session {
     }
 
     /// Re-fetch a remote session (a manual reload or a foreign edit).
+    #[allow(dead_code)] // TUI reload
     pub fn refresh(&mut self) -> Result<bool, SessionError> {
         match &mut self.backend {
             Backend::Direct { .. } => Ok(false),
@@ -446,17 +437,20 @@ impl Session {
     }
 
     /// Cheap remote revision poll for the TUI tick.
+    #[allow(dead_code)] // TUI poll
     pub fn poll_remote(&mut self) -> Result<bool, SessionError> {
         match &mut self.backend {
             Backend::Direct { .. } => Ok(false),
             Backend::Remote(remote) => {
+                if remote.failed.is_some() {
+                    return Ok(false);
+                }
                 if remote.last_poll.elapsed() < Duration::from_millis(200) {
                     return Ok(false);
                 }
                 remote.last_poll = Instant::now();
                 let hello = remote
-                    .client
-                    .hello()
+                    .call(|client| client.hello())
                     .map_err(|e| SessionError::Remote(e.to_string()))?;
                 if hello.revision == remote.revision && hello.active == remote.project.active_id() {
                     remote.depth = hello.depth;
@@ -464,8 +458,7 @@ impl Session {
                     return Ok(false);
                 }
                 remote.project = remote
-                    .client
-                    .show()
+                    .call(|client| client.show())
                     .map_err(|e| SessionError::Remote(e.to_string()))?;
                 remote.revision = hello.revision;
                 remote.depth = hello.depth;
@@ -480,10 +473,13 @@ impl Session {
         self.save_if(true, true)
     }
 
-    pub fn save_register(&self) -> std::io::Result<()> {
-        match &self.backend {
+    pub fn save_register(&mut self) -> std::io::Result<()> {
+        match &mut self.backend {
             Backend::Direct { register, .. } => save_register(&self.path, register.as_ref()),
-            Backend::Remote(_) => Ok(()),
+            Backend::Remote(remote) => match remote.take_save_error() {
+                Some(reason) => Err(std::io::Error::other(reason)),
+                None => Ok(()),
+            },
         }
     }
 
@@ -491,17 +487,23 @@ impl Session {
     pub fn save_project(&mut self) -> Result<(), ProjectError> {
         match &mut self.backend {
             Backend::Direct { document, .. } => document.save(&self.path),
-            Backend::Remote(_) => Ok(()),
+            Backend::Remote(remote) => match remote.take_save_error() {
+                Some(reason) => Err(ProjectError::Io(std::io::Error::other(reason))),
+                None => Ok(()),
+            },
         }
     }
 
     /// Save only the undo stack beside the project.
-    pub fn save_history(&self) -> std::io::Result<()> {
-        match &self.backend {
+    pub fn save_history(&mut self) -> std::io::Result<()> {
+        match &mut self.backend {
             Backend::Direct { document, .. } => {
                 document.save_history(&Histories::sidecar_path(&self.path))
             }
-            Backend::Remote(_) => Ok(()),
+            Backend::Remote(remote) => match remote.take_save_error() {
+                Some(reason) => Err(std::io::Error::other(reason)),
+                None => Ok(()),
+            },
         }
     }
 
@@ -514,6 +516,7 @@ impl Session {
     }
 
     /// Replace the sidecar stacks (the TUI dump path).
+    #[allow(dead_code)] // TUI dump
     pub fn set_histories(&mut self, histories: Histories) {
         if let Backend::Direct { document, .. } = &mut self.backend {
             document.set_histories(histories);
@@ -523,8 +526,11 @@ impl Session {
     /// Save the parts a caller actually changed. A yank only needs the
     /// register; a playhead-only move needs the project but not the stack.
     pub fn save_if(&mut self, changed: bool, playhead_moved: bool) -> Result<(), SessionError> {
-        if let Backend::Remote(_) = self.backend {
-            return Ok(());
+        if let Backend::Remote(remote) = &mut self.backend {
+            return match remote.take_save_error() {
+                Some(reason) => Err(SessionError::Remote(reason)),
+                None => Ok(()),
+            };
         }
         if changed || playhead_moved {
             self.save_project()?;
@@ -546,6 +552,29 @@ impl Deref for Session {
 }
 
 impl RemoteSession {
+    fn call<T>(
+        &mut self,
+        call: impl FnOnce(&mut RpcClient) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        if let Some(reason) = &self.failed {
+            return Err(ClientError::Io(std::io::Error::other(reason.clone())));
+        }
+        match call(&mut self.client) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if fatal(&error) {
+                    self.failed = Some(error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn take_save_error(&mut self) -> Option<String> {
+        self.failed.clone().or_else(|| self.save_error.take())
+    }
+
+    #[allow(dead_code)] // TUI attach
     fn connect(path: &Path) -> std::io::Result<Option<Self>> {
         let socket = nle_core::state::session_socket_path(path);
         let stream = match UnixStream::connect(&socket) {
@@ -570,12 +599,14 @@ impl RemoteSession {
             revision: hello.revision,
             depth: hello.depth,
             last_poll: Instant::now(),
+            failed: None,
+            save_error: None,
         }))
     }
 
     fn refresh(&mut self) -> std::io::Result<()> {
-        let hello = self.client.hello().map_err(client_io)?;
-        self.project = self.client.show().map_err(client_io)?;
+        let hello = self.call(|client| client.hello()).map_err(client_io)?;
+        self.project = self.call(|client| client.show()).map_err(client_io)?;
         self.revision = hello.revision;
         self.depth = hello.depth;
         self.last_poll = Instant::now();
@@ -584,13 +615,20 @@ impl RemoteSession {
     }
 
     fn refresh_after(&mut self, outcome: &WireOutcome) -> std::io::Result<()> {
-        self.project = self.client.show().map_err(client_io)?;
+        self.project = self.call(|client| client.show()).map_err(client_io)?;
         self.revision = outcome.revision;
         self.depth = outcome.depth;
         self.last_poll = Instant::now();
         let _ = self.client.drain_buffered_events();
         Ok(())
     }
+}
+
+fn fatal(error: &ClientError) -> bool {
+    !matches!(
+        error,
+        ClientError::Server(_) | ClientError::Encode(_) | ClientError::UnexpectedReply(_)
+    )
 }
 
 fn client_io(error: ClientError) -> std::io::Error {
@@ -612,28 +650,25 @@ fn remote_action_outcome(
     })
 }
 
-#[allow(dead_code)] // reached by the direct/test undo helpers above
-fn remote_undo_outcome(outcome: &WireOutcome, fps: Option<&nle_core::Seconds>) -> UndoOutcome {
-    UndoOutcome {
-        desc: outcome.desc.clone(),
-        playhead: outcome
-            .playhead
-            .map(|at| frame_of(fps, secs_f64(&at)))
-            .unwrap_or(0),
-        provenance: nle_core::edit::Provenance {
-            actor: Actor::Agent("nile-serve".into()),
-            at: 0,
-        },
-    }
-}
-
 #[cfg(test)]
 mod remote_tests {
     use super::*;
-    use nle_core::timeline::{Clip, Segment};
+    use nle_core::timeline::{Clip, Gap, Segment};
     use nle_protocol::Server;
     use std::io::BufReader;
     use std::os::unix::net::UnixListener;
+
+    fn seeded() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(nle_core::Seconds::from_integer(30));
+        project.timeline.video_track_mut().unwrap().segments = vec![Segment::Gap(Gap {
+            duration: nle_core::Seconds::from_integer(2),
+        })];
+        project.save(&path).expect("seed project");
+        (dir, path)
+    }
 
     fn project_with_clip() -> Project {
         let mut project = Project::new();
@@ -649,6 +684,44 @@ mod remote_tests {
             nle_core::Seconds::from_integer(2),
         ))];
         project
+    }
+
+    #[test]
+    fn load_save_round_trip() {
+        let (_dir, path) = seeded();
+        let mut session = Session::load(&path).expect("load");
+        assert_eq!(
+            session.project().fps,
+            Some(nle_core::Seconds::from_integer(30)),
+            "the project loads"
+        );
+        session.set_playhead(1.0);
+        session.persist().expect("save");
+        let again = Session::load(&path).expect("reload");
+        assert_eq!(again.project().playhead, nle_core::Seconds::from_integer(1));
+    }
+
+    #[test]
+    fn preview_does_not_touch_the_live_document_or_file() {
+        let (_dir, path) = seeded();
+        let mut session = Session::load(&path).expect("load");
+        let before = session.project().clone();
+        let preview = session
+            .preview(
+                &Action::TrackAdd {
+                    kind: nle_core::TrackKind::Audio,
+                },
+                0.0,
+            )
+            .expect("preview");
+        assert!(preview.outcome.changed, "the preview reports the change");
+        assert_eq!(session.project(), &before, "the live project is untouched");
+        let reloaded = Session::load(&path).expect("reload");
+        assert_eq!(
+            reloaded.project(),
+            &before,
+            "the preview did not save the project"
+        );
     }
 
     #[test]
@@ -713,6 +786,20 @@ mod remote_tests {
                 .segments
                 .len(),
             1
+        );
+
+        // A lost/poisoned server latches: polling goes quiet and the next
+        // save reports the reason instead of silently succeeding.
+        if let Backend::Remote(remote) = &mut session.backend {
+            remote.failed = Some("gone".into());
+        }
+        assert!(
+            !session.poll_remote().unwrap(),
+            "a dead server stops polling"
+        );
+        assert!(
+            session.save_project().is_err(),
+            "the failure reaches the save"
         );
 
         drop(session);
