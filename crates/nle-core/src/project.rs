@@ -66,7 +66,9 @@ pub enum ProjectError {
     TimeMap(#[from] TimeMapError),
     #[error("media group #{0}: {1}")]
     Group(u32, String),
-    #[error("asset #{0} is used by media group(s) {1:?} — remove or edit them first")]
+    #[error(
+        "asset #{0} is used by media group(s) {1:?} — remove or edit them first (nile group rm ID)"
+    )]
     AssetInGroup(u32, Vec<u32>),
 }
 
@@ -390,6 +392,16 @@ impl Project {
         let timeline = TimeMap::from_track_for_asset(track, asset)?;
         let file = group.asset_map(asset)?;
         Ok(timeline.compose(&file)?)
+    }
+
+    /// Remove a media group by id, returning it.
+    pub fn remove_group(&mut self, id: u32) -> Result<MediaGroup, ProjectError> {
+        let pos = self
+            .groups
+            .iter()
+            .position(|group| group.id == id)
+            .ok_or(ProjectError::GroupNotFound(id))?;
+        Ok(self.groups.remove(pos))
     }
 
     /// Add a logical media group and return its id.

@@ -14,7 +14,8 @@ files are rejected, never migrated.
 - `Document` owns `Histories` keyed by sequence id and routes every edit,
   asset change, undo and redo through `project.active_id()`. Switching
   sequences switches undo; never share one stack across timelines.
-- History sidecars are v18 (`stacks` keyed by id, plus grouped changes).
+- History sidecars are v19 (`stacks` keyed by id, plus grouped changes and
+  media groups).
   Pool edits are recorded in the sequence active at the time; undoing one
   still validates against every sequence, so an asset used elsewhere refuses
   loudly.
