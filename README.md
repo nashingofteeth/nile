@@ -317,7 +317,7 @@ nile import intro.mp4 b-roll.mov
 nile import footage/                      # immediate media files, one undo step
 nile import --group "CAM 3" part1.mp4 part2.mp4
 # one logical recording from ordered parts; one undo removes both
-nile group ls                             # parts and group end
+nile group ls                             # part count and group end
 nile group rm 1                           # undoable; assets stay pooled
 nile import "clip one.mp4" 'b roll.mov'   # quoted paths (the shell eats these)
 nile add intro.mp4 --in 2.5 --out 7       # auto-imports a new file
