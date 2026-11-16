@@ -28,10 +28,11 @@ Read before touching `crates/nle-core/src/edl.rs` or the `import-edl` path.
   field; `speed = src_span / rec_span`. Deriving it per event keeps the built
   timeline aligned with record time; assuming 1× shifts every later event by
   the accumulated mismatch.
-- **`--group NAME=FILE,FILE` is explicit and ordered.** Parts resolve as
-  given, then in `--media`, then by a unique pooled name; a miss is fatal
-  (unlike a stray media-dir file, which only warns). Commas separate parts,
-  so a filename containing one cannot be a part.
+- **`--group NAME=FILE,FILE` is explicit and ordered.** `~` expands; parts
+  resolve as given, then in `--media`, then by a unique pooled name, and a
+  miss is fatal (unlike a stray media-dir file, which only warns). Explicit
+  parts are pooled media, so they can satisfy an otherwise empty `--media`.
+  Commas separate parts, so a filename containing one cannot be a part.
 - **Fuzzy reel matching must be edge-aligned and unique.** A substring that
   matches anywhere latches `AX` onto anything containing it (`taxi.mp4`),
   and first-match-in-pool-order is a decision, not evidence: match a stem
