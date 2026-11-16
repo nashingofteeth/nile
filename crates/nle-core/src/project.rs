@@ -16,6 +16,7 @@ use crate::group::{MediaGroup, MediaPart};
 use crate::media::RawProbe;
 use crate::time::{Seconds, format_seconds, grid_time, rational_ser, secs_f64};
 use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
+use crate::timemap::{TimeMap, TimeMapError};
 
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
@@ -57,6 +58,12 @@ pub enum ProjectError {
     SequenceDuplicate(u32),
     #[error("sequence #{0} has a non-positive frame rate")]
     NonPositiveFps(u32),
+    #[error("track #{0} not found")]
+    TrackNotFound(usize),
+    #[error("media group #{0} not found")]
+    GroupNotFound(u32),
+    #[error(transparent)]
+    TimeMap(#[from] TimeMapError),
     #[error("media group #{0}: {1}")]
     Group(u32, String),
     #[error("asset #{0} is used by media group(s) {1:?} — remove or edit them first")]
@@ -360,6 +367,31 @@ impl Project {
         self.groups.iter().find(|group| group.id == id)
     }
 
+    /// Timeline → group time for one track/asset/group. The per-asset clip map
+    /// is composed with the group's file→group map, so gaps in either axis and
+    /// speed changes stay exact. A missing sequence, track or group is `None`.
+    pub fn group_time_map(
+        &self,
+        sequence: u32,
+        track: usize,
+        group: u32,
+        asset: u32,
+    ) -> Result<TimeMap, ProjectError> {
+        let sequence = self
+            .sequence(sequence)
+            .ok_or(ProjectError::SequenceNotFound(sequence))?;
+        let track = sequence
+            .timeline
+            .track(track)
+            .ok_or(ProjectError::TrackNotFound(track))?;
+        let group = self
+            .group(group)
+            .ok_or(ProjectError::GroupNotFound(group))?;
+        let timeline = TimeMap::from_track_for_asset(track, asset)?;
+        let file = group.asset_map(asset)?;
+        Ok(timeline.compose(&file)?)
+    }
+
     /// Add a logical media group and return its id.
     /// Model-only group creation. A front-end must add a `Document` wrapper
     /// that bumps the revision and records history before exposing this.
@@ -380,6 +412,7 @@ impl Project {
             return Err(ProjectError::Group(group.id, "has no parts".to_string()));
         }
         let mut previous_end = Seconds::from_integer(0);
+        let mut file_parts: Vec<(u32, Seconds, Seconds, usize)> = Vec::new();
         for (part_index, part) in group.parts.iter().enumerate() {
             let asset = self.asset(part.asset).ok_or_else(|| {
                 ProjectError::Group(
@@ -420,6 +453,19 @@ impl Project {
                 ));
             }
             previous_end = group_end;
+            file_parts.push((part.asset, part.file_start, file_end, part_index));
+        }
+        file_parts.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        for pair in file_parts.windows(2) {
+            if pair[0].0 == pair[1].0 && pair[0].2 > pair[1].1 {
+                return Err(ProjectError::Group(
+                    group.id,
+                    format!(
+                        "parts {} and {} overlap in asset #{} file time",
+                        pair[0].3, pair[1].3, pair[0].0
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -1147,6 +1193,18 @@ mod tests {
         ));
 
         let mut bad = p.clone();
+        bad.groups[0].parts.push(MediaPart {
+            asset: 1,
+            group_start: Seconds::from_integer(6),
+            file_start: Seconds::from_integer(1),
+            duration: Seconds::from_integer(2),
+        });
+        assert!(matches!(
+            bad.validate(),
+            Err(ProjectError::Group(1, ref msg)) if msg.contains("overlap in asset")
+        ));
+
+        let mut bad = p.clone();
         bad.groups[0].parts[0].asset = 99;
         assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
 
@@ -1157,6 +1215,143 @@ mod tests {
         let mut bad = p.clone();
         bad.groups.push(bad.groups[0].clone());
         assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
+    }
+
+    #[test]
+    fn group_time_map_composes_timeline_file_and_group_time() {
+        use crate::timeline::{Clip, Gap, Segment};
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("20", 320, 240, "30/1", false),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            Segment::Clip(Clip::new(
+                asset,
+                asset,
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+            )),
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+            Segment::Clip(Clip::new(
+                2,
+                asset,
+                Seconds::from_integer(10),
+                Seconds::from_integer(12),
+            )),
+        ];
+        let group = p
+            .add_group(
+                "CAM 3",
+                vec![
+                    MediaPart {
+                        asset,
+                        group_start: Seconds::from_integer(0),
+                        file_start: Seconds::from_integer(0),
+                        duration: Seconds::from_integer(2),
+                    },
+                    MediaPart {
+                        asset,
+                        group_start: Seconds::from_integer(3),
+                        file_start: Seconds::from_integer(10),
+                        duration: Seconds::from_integer(2),
+                    },
+                ],
+            )
+            .unwrap();
+        let map = p.group_time_map(1, 0, group, asset).unwrap();
+        assert_eq!(
+            map.map(&Seconds::from_integer(1)),
+            Some(Seconds::from_integer(1))
+        );
+        assert_eq!(map.map(&Seconds::from_integer(2)), None, "timeline gap");
+        assert_eq!(map.map(&Seconds::new(7, 2)), Some(Seconds::new(7, 2)));
+        assert_eq!(map.inverse(&Seconds::new(7, 2)), Some(Seconds::new(7, 2)));
+        assert_eq!(map.inverse(&Seconds::new(5, 2)), None, "group gap");
+        let second = p
+            .add_group(
+                "CAM 3 copy",
+                vec![MediaPart {
+                    asset,
+                    group_start: Seconds::from_integer(10),
+                    file_start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(2),
+                }],
+            )
+            .unwrap();
+        let map2 = p.group_time_map(1, 0, second, asset).unwrap();
+        assert_eq!(
+            map2.map(&Seconds::from_integer(0)),
+            Some(Seconds::from_integer(10))
+        );
+        assert!(p.group_time_map(1, 0, group, 99).unwrap().is_empty());
+        assert!(matches!(
+            p.group_time_map(1, 0, 99, asset),
+            Err(ProjectError::GroupNotFound(99))
+        ));
+        assert!(matches!(
+            p.group_time_map(1, 99, group, asset),
+            Err(ProjectError::TrackNotFound(99))
+        ));
+        assert!(matches!(
+            p.group_time_map(99, 0, group, asset),
+            Err(ProjectError::SequenceNotFound(99))
+        ));
+    }
+
+    #[test]
+    fn group_time_map_composes_a_retimed_clip() {
+        use crate::timeline::{Clip, Segment};
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("20", 320, 240, "30/1", false),
+        );
+        let mut clip = Clip::new(
+            1,
+            asset,
+            Seconds::from_integer(0),
+            Seconds::from_integer(10),
+        );
+        clip.speed = Seconds::from_integer(2);
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(clip)];
+        let group = p
+            .add_group(
+                "CAM 3",
+                vec![
+                    MediaPart {
+                        asset,
+                        group_start: Seconds::from_integer(0),
+                        file_start: Seconds::from_integer(0),
+                        duration: Seconds::from_integer(4),
+                    },
+                    MediaPart {
+                        asset,
+                        group_start: Seconds::from_integer(5),
+                        file_start: Seconds::from_integer(4),
+                        duration: Seconds::from_integer(6),
+                    },
+                ],
+            )
+            .unwrap();
+        let map = p.group_time_map(1, 0, group, asset).unwrap();
+        assert_eq!(
+            map.map(&Seconds::from_integer(1)),
+            Some(Seconds::from_integer(2))
+        );
+        assert_eq!(
+            map.map(&Seconds::from_integer(3)),
+            Some(Seconds::from_integer(7))
+        );
+        assert_eq!(
+            map.inverse(&Seconds::from_integer(7)),
+            Some(Seconds::from_integer(3))
+        );
+        assert_eq!(map.map(&Seconds::from_integer(5)), None, "timeline end");
     }
 
     #[test]
