@@ -38,9 +38,17 @@ pub fn cache_dir(project_path: &Path) -> PathBuf {
     state_dir(project_path).join("cache")
 }
 
-/// Unix socket the live protocol server listens on.
+/// Unix socket the live protocol server listens on. `sun_path` caps the whole
+/// path at roughly 108 bytes on Linux, so a very deep project tree fails at
+/// bind with a clear "file name too long" error.
 pub fn session_socket_path(project_path: &Path) -> PathBuf {
     state_dir(project_path).join("session.sock")
+}
+
+/// Startup lock beside the socket. It serializes stale-socket cleanup and
+/// bind; a killed server leaves it behind for the next start to recognize.
+pub fn session_lock_path(project_path: &Path) -> PathBuf {
+    state_dir(project_path).join("serve.lock")
 }
 
 /// Directory-level config (`.nile/config.json` in the current directory).
@@ -119,6 +127,10 @@ mod tests {
         assert_eq!(
             session_socket_path(p),
             PathBuf::from("/videos/trip/.nile/nile/session.sock")
+        );
+        assert_eq!(
+            session_lock_path(p),
+            PathBuf::from("/videos/trip/.nile/nile/serve.lock")
         );
     }
 

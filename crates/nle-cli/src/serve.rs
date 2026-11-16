@@ -13,7 +13,9 @@
 //! leave through the JSON-RPC response, and `main` sends command failures to
 //! stderr.
 
-use std::io::{self, BufReader};
+use std::io;
+#[cfg(unix)]
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
@@ -69,20 +71,100 @@ impl Drop for SocketGuard {
 }
 
 #[cfg(unix)]
+struct LockGuard(PathBuf);
+
+#[cfg(unix)]
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Serialize startup before touching the socket path. The lock's PID lets a
+/// later server distinguish a live/starting owner from a crash leftover.
+#[cfg(unix)]
+fn acquire_lock(project_path: &Path, socket: &Path, lock: &Path) -> Result<LockGuard> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+
+    for _ in 0..4 {
+        match OpenOptions::new().write(true).create_new(true).open(lock) {
+            Ok(mut file) => {
+                writeln!(file, "{}", std::process::id()).context("write the server lock")?;
+                return Ok(LockGuard(lock.to_path_buf()));
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                match UnixStream::connect(socket) {
+                    Ok(_) => anyhow::bail!(
+                        "already serving {} (socket {})",
+                        project_path.display(),
+                        socket.display()
+                    ),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        let stale = fs::read_to_string(lock)
+                            .ok()
+                            .and_then(|text| text.trim().parse::<u32>().ok());
+                        if stale.is_some_and(pid_alive) {
+                            anyhow::bail!(
+                                "serving is starting for {} (pid {})",
+                                project_path.display(),
+                                stale.unwrap_or(0)
+                            );
+                        }
+                        // Re-read before unlink so a lock re-created between
+                        // the check and removal is not the one we discard.
+                        let unchanged = fs::read_to_string(lock)
+                            .ok()
+                            .and_then(|text| text.trim().parse::<u32>().ok())
+                            == stale;
+                        if unchanged {
+                            let _ = fs::remove_file(lock);
+                        }
+                    }
+                    Err(e) => return Err(e).context("check the project socket"),
+                }
+            }
+            Err(e) => return Err(e).context("create the server lock"),
+        }
+    }
+    anyhow::bail!(
+        "could not acquire the server lock for {} ({})",
+        project_path.display(),
+        lock.display()
+    )
+}
+
+#[cfg(unix)]
 fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
 
     let socket = nle_core::state::session_socket_path(project_path);
+    let lock = nle_core::state::session_lock_path(project_path);
     let dir = socket
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).context("create the project state directory")?;
-    // A live server keeps the socket accepting. A dead one leaves a stale
-    // file, which connect refuses; remove only that case so a permission
-    // error still surfaces.
+    let _lock = acquire_lock(project_path, &socket, &lock)?;
+    // With the lock held, an unconnectable socket is stale and safe to
+    // replace; a live one belongs to an older/foreign server.
     match UnixStream::connect(&socket) {
         Ok(_) => anyhow::bail!(
             "already serving {} (socket {})",
@@ -101,7 +183,8 @@ fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
     }
     let listener = UnixListener::bind(&socket).context("bind the project socket")?;
     let _guard = SocketGuard(socket.clone());
-    let _ = fs::set_permissions(&socket, fs::Permissions::from_mode(0o600));
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+        .context("set socket permissions")?;
     say_err!("serving {} on {}", project_path.display(), socket.display());
 
     let shared = Arc::new(Mutex::new(handler));
@@ -151,13 +234,19 @@ struct ConnectionHandler {
 #[cfg(unix)]
 impl Handler for ConnectionHandler {
     fn handle(&mut self, call: &Call) -> Result<Reply, RpcError> {
-        let mut handler = self
-            .shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let reply = handler.handle(call)?;
+        let mut handler = match self.shared.lock() {
+            Ok(handler) => handler,
+            Err(poisoned) => {
+                let mut handler = poisoned.into_inner();
+                handler.poisoned = Some("a connection handler panicked".into());
+                return Err(RpcError::internal(
+                    "server is read-only after a handler panic",
+                ));
+            }
+        };
+        let reply = handler.handle(call);
         self.events.extend(handler.take_events());
-        Ok(reply)
+        reply
     }
 
     fn take_events(&mut self) -> Vec<Event> {
