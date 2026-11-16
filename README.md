@@ -325,7 +325,7 @@ nile sequence ls                          # timelines, active marked with *
 nile sequence add Vertical --width 1080 --height 1920 --fps 30
 nile sequence use 2                       # edits, undo and export follow it
 nile show                                 # or --json (the persisted project)
-nile show --json --maps                   # add derived per-track/asset maps
+nile show --json --maps                   # add derived time and group maps
 nile show --sequence 1                    # report another timeline
 nile remove 2                             # by clip id
 nile media ls
