@@ -382,18 +382,12 @@ pub struct MediaList {
 }
 
 /// `action.preview` result: the would-be outcome, a structural diff and the
-/// clamp warnings a real apply would have to repair.
+/// clamp warnings a real apply would have to repair. The outcome fields are
+/// flattened, so the JSON stays the same flat shape as before.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preview {
-    pub revision: u64,
-    pub desc: String,
-    pub changed: bool,
-    #[serde(
-        default,
-        with = "nle_core::time::rational_ser::opt",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub playhead: Option<Seconds>,
+    #[serde(flatten)]
+    pub outcome: Outcome,
     pub diff: ProjectDiff,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,

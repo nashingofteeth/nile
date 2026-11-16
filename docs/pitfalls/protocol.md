@@ -33,10 +33,24 @@ is `batch: <child> · <child>…`, so clients can identify it without parsing
 each child.
 
 `action.preview` returns the outcome fields plus `diff` and `warnings`.
-`diff` names changed sequences/tracks (segment counts, kind/mute flags),
-added/removed sequences, and added/removed/changed assets; `warnings` carries
-the clamp notes the real apply would produce (for example, an out-point
-pulled back to the media end). `action.apply` keeps the plain outcome.
+The diff shape is:
+
+```text
+diff = {
+  sequences: [{
+    id, settings_changed,
+    tracks_added: [index], tracks_removed: [index],
+    tracks: [{ index, before_segments, after_segments,
+               segments_changed, kind_changed, muted_changed }]
+  }],
+  sequences_added: [id], sequences_removed: [id],
+  assets_added: [asset id], assets_removed: [asset id], assets_changed: [asset id]
+}
+```
+
+`warnings` is omitted from the JSON when empty and otherwise carries the
+clamp notes the real apply would produce (for example, an out-point pulled
+back to the media end). `action.apply` keeps the plain outcome.
 
 `base_revision` is compare-and-swap: a stale value returns `-32001` with
 `{expected, actual}`. Protocol v4 changed `action` to the `actions` list; v5
