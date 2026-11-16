@@ -283,7 +283,13 @@ fn finish_import(
         return;
     }
 
-    let ids = app.project.add_assets(fresh, playhead);
+    let ids = match app.project.add_assets(fresh, playhead) {
+        Ok(ids) => ids,
+        Err(e) => {
+            app.fail(&format!("import failed: {e}"));
+            return;
+        }
+    };
     if ids.is_empty() {
         let mut msg = "no new assets imported".to_string();
         append_errors(&mut msg, &errors);

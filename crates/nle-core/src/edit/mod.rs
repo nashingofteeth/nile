@@ -122,6 +122,8 @@ pub enum EditError {
     },
     #[error("a batch needs at least one action")]
     EmptyBatch,
+    #[error("remote session: {0}")]
+    Remote(String),
     #[error("undo/redo cannot be part of a batch")]
     BatchUndoRedo,
     #[error("nothing to undo")]

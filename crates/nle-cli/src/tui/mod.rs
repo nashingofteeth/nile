@@ -336,8 +336,14 @@ pub struct App {
 
 impl App {
     pub fn new(project: Project, path: PathBuf) -> Self {
+        let history = History::default();
+        Self::with_session(Session::from_history(project, history, path))
+    }
+
+    /// Adopt a session that may be file-backed or attached to `nile serve`.
+    pub fn with_session(project: Session) -> Self {
         let mut app = Self {
-            project: Session::from_history(project, History::default(), path),
+            project,
             mode: Mode::Normal,
             playhead: 0.0,
             count: None,
@@ -439,6 +445,9 @@ impl App {
     /// Whether a shell wrote one of the shared files since we last read or
     /// wrote it.
     fn external_change(&self) -> bool {
+        if self.project.is_remote() {
+            return false;
+        }
         stamp(self.project.path()) != self.seen.project
             || stamp(&Histories::sidecar_path(self.project.path())) != self.seen.history
             || stamp(&action::register_path(self.project.path())) != self.seen.register
@@ -920,11 +929,9 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     out
 }
 
-pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result<()> {
+pub fn run<P: Mpv>(session: Session, player: P) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
-    let histories = Histories::load_project(&path).unwrap_or_default();
-    let mut app = App::new(project, path);
-    app.project.set_histories(histories);
+    let mut app = App::with_session(session);
     // Open where `nile seek` (or the last session) left the playhead.
     app.playhead = secs(&app.project.playhead);
     // Restore the session viewport and active track after the playhead: don't
@@ -947,6 +954,19 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         }
         let st = player.state();
         app.sync(&st);
+
+        // A live server is the single writer; poll its revision so an agent
+        // edit appears without waiting for a file stamp.
+        if matches!(app.mode, Mode::Normal) {
+            match app.project.poll_remote() {
+                Ok(true) => {
+                    adopt_remote_change(&mut app);
+                    app.set_message("adopted changes from the server");
+                }
+                Ok(false) => {}
+                Err(e) => app.fail(&format!("server refresh failed: {e}")),
+            }
+        }
 
         // A shell may have written the shared files (`nile split`,
         // `nile seek`, `nile yank`) — adopt it before anything of our own,
@@ -1103,7 +1123,9 @@ fn persist_playhead(app: &mut App) -> anyhow::Result<bool> {
     if app.external_change() {
         return Ok(false);
     }
-    app.project.set_playhead(app.playhead);
+    // Remote set_playhead returns the server's cursor on failure, so adopting
+    // the return value stops a poisoned cursor from retrying every flush.
+    app.playhead = app.project.set_playhead(app.playhead);
     app.project.save_project()?;
     app.note_project();
     Ok(true)
@@ -1142,11 +1164,54 @@ fn watch_foreign(app: &mut App) -> bool {
     true
 }
 
+/// Adopt a server project change: the server owns the cursor, so take its
+/// playhead (a sequence switch or a shorter timeline makes the old one
+/// stale), clamp the active track and rebuild the monitor.
+fn adopt_remote_change(app: &mut App) {
+    app.active_track = app
+        .active_track
+        .min(app.project.timeline.tracks.len().saturating_sub(1));
+    app.playhead = secs(&app.project.playhead);
+    app.follow_timeline();
+    reset_render_caches(app);
+    start_preview(app);
+}
+
+fn reset_render_caches(app: &mut App) {
+    app.waveforms.clear();
+    app.waveform_failed.clear();
+    app.wave_job = None;
+    app.keyframes.clear();
+    app.keyframe_job = None;
+    app.thumbnails.clear();
+    app.thumb_job = None;
+    app.filmstrips.clear();
+    app.filmstrip_failed.clear();
+    app.filmstrip_job = None;
+    forget_missing_assets(app);
+}
+
 /// Reload the project (and its undo history) from disk and rebuild the
 /// preview. A **user** reload (`R`) keeps the live playhead; adopting a
 /// foreign write (`nile seek`, an edit in another window) also adopts that
 /// file's playhead.
 fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> anyhow::Result<()> {
+    if app.project.is_remote() {
+        app.project.refresh()?;
+        app.active_track = app
+            .active_track
+            .min(app.project.timeline.tracks.len().saturating_sub(1));
+        if adopt_playhead {
+            app.playhead = secs(&app.project.playhead);
+        } else {
+            app.playhead = app.playhead.clamp(0.0, app.last_frame().max(0.0));
+        }
+        app.reload_pending = false;
+        app.follow_timeline();
+        reset_render_caches(app);
+        start_preview(app);
+        return Ok(());
+    }
     let path = app.project.path().to_path_buf();
     let project = Project::load(&path)?;
     let histories = Histories::load_project(&path).unwrap_or_default();
@@ -1168,18 +1233,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     app.follow_timeline();
     // Re-key both caches against the reloaded timeline; a dropped receiver
     // simply discards a stale worker's results.
-    app.waveforms.clear();
-    app.waveform_failed.clear();
-    app.wave_job = None;
-    app.keyframes.clear();
-    app.keyframe_job = None;
-    app.thumbnails.clear();
-    app.thumb_job = None;
-    app.filmstrips.clear();
-    app.filmstrip_failed.clear();
-    app.filmstrip_job = None;
-    let ids: std::collections::BTreeSet<u32> = app.project.media.iter().map(|a| a.id).collect();
-    app.pool_marks.retain(|id, _| ids.contains(id));
+    reset_render_caches(app);
     // The monitor rebuilds off-thread (a cold proxy could take seconds).
     start_preview(app);
     Ok(())

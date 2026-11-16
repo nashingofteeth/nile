@@ -814,7 +814,11 @@ fn removing_an_asset_prunes_its_cached_waveform() {
     let mut app = App::new(asset_project(), temp_project_path("cache-prune"));
     app.loaded = true;
     let probe = app.project.media[0].probe.clone();
-    let (id, _) = app.project.add_asset("/media/spare.mp4".into(), probe, 0);
+    let (id, _) = app
+        .project
+        .document_mut()
+        .expect("direct test session")
+        .add_asset("/media/spare.mp4".into(), probe, 0);
     app.waveforms.insert(
         id,
         crate::waveform::Waveform {
