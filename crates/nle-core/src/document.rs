@@ -368,19 +368,6 @@ impl Document {
             .add_assets(&mut self.project, assets, playhead)
     }
 
-    /// Add a media group through the active sequence's history.
-    pub fn add_group(
-        &mut self,
-        name: impl Into<String>,
-        parts: Vec<MediaPart>,
-        playhead: i64,
-    ) -> Result<u32, EditError> {
-        let active = self.project.active_id();
-        self.histories
-            .get_mut(active)
-            .add_group(&mut self.project, name, parts, playhead)
-    }
-
     pub fn remove_group(&mut self, id: u32, playhead: i64) -> Result<String, EditError> {
         let active = self.project.active_id();
         self.histories
