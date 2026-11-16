@@ -16,6 +16,7 @@ use crate::group::{MediaGroup, MediaPart};
 use crate::media::RawProbe;
 use crate::time::{Seconds, format_seconds, grid_time, rational_ser, secs_f64};
 use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
+use crate::timemap::{TimeMap, TimeMapError};
 
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
@@ -358,6 +359,30 @@ impl Project {
 
     pub fn group(&self, id: u32) -> Option<&MediaGroup> {
         self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// Timeline → group time for one track/asset/group. The per-asset clip map
+    /// is composed with the group's file→group map, so gaps in either axis and
+    /// speed changes stay exact. A missing sequence, track or group is `None`.
+    pub fn group_time_map(
+        &self,
+        sequence: u32,
+        track: usize,
+        group: u32,
+        asset: u32,
+    ) -> Result<Option<TimeMap>, TimeMapError> {
+        let Some(sequence) = self.sequence(sequence) else {
+            return Ok(None);
+        };
+        let Some(track) = sequence.timeline.track(track) else {
+            return Ok(None);
+        };
+        let Some(group) = self.group(group) else {
+            return Ok(None);
+        };
+        let timeline = TimeMap::from_track_for_asset(track, asset)?;
+        let file = group.asset_map(asset)?;
+        Ok(Some(timeline.compose(&file)?))
     }
 
     /// Add a logical media group and return its id.
@@ -1157,6 +1182,65 @@ mod tests {
         let mut bad = p.clone();
         bad.groups.push(bad.groups[0].clone());
         assert!(matches!(bad.validate(), Err(ProjectError::Group(1, _))));
+    }
+
+    #[test]
+    fn group_time_map_composes_timeline_file_and_group_time() {
+        use crate::timeline::{Clip, Gap, Segment};
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("20", 320, 240, "30/1", false),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            Segment::Clip(Clip::new(
+                asset,
+                asset,
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+            )),
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+            Segment::Clip(Clip::new(
+                2,
+                asset,
+                Seconds::from_integer(10),
+                Seconds::from_integer(12),
+            )),
+        ];
+        let group = p
+            .add_group(
+                "CAM 3",
+                vec![
+                    MediaPart {
+                        asset,
+                        group_start: Seconds::from_integer(0),
+                        file_start: Seconds::from_integer(0),
+                        duration: Seconds::from_integer(2),
+                    },
+                    MediaPart {
+                        asset,
+                        group_start: Seconds::from_integer(3),
+                        file_start: Seconds::from_integer(10),
+                        duration: Seconds::from_integer(2),
+                    },
+                ],
+            )
+            .unwrap();
+        let map = p.group_time_map(1, 0, group, asset).unwrap().unwrap();
+        assert_eq!(
+            map.map(&Seconds::from_integer(1)),
+            Some(Seconds::from_integer(1))
+        );
+        assert_eq!(map.map(&Seconds::from_integer(2)), None, "timeline gap");
+        assert_eq!(map.map(&Seconds::new(7, 2)), Some(Seconds::new(7, 2)));
+        assert_eq!(map.inverse(&Seconds::new(7, 2)), Some(Seconds::new(7, 2)));
+        assert_eq!(map.inverse(&Seconds::new(5, 2)), None, "group gap");
+        assert!(p.group_time_map(1, 0, 99, asset).unwrap().is_none());
+        assert_eq!(p.group_time_map(1, 99, group, asset).unwrap(), None);
+        assert_eq!(p.group_time_map(99, 0, group, asset).unwrap(), None);
     }
 
     #[test]
