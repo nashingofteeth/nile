@@ -94,15 +94,10 @@ impl MediaGroup {
     }
 
     /// `(asset, file time)` → group time, or `None` when no part reads it.
-    /// If an asset appears in more than one part, the first part wins.
+    /// Delegates to [`MediaGroup::asset_map`], so the two APIs cannot disagree;
+    /// for a validated group the file ranges of one asset do not overlap.
     pub fn media_time(&self, asset: u32, file: &Seconds) -> Option<Seconds> {
-        let part = self.parts.iter().find(|part| {
-            part.asset == asset
-                && part.file_start <= *file
-                && *file < part.file_end().unwrap_or(*file)
-        })?;
-        let offset = checked_sub(file, &part.file_start)?;
-        checked_add(&part.group_start, &offset)
+        self.asset_map(asset).ok()?.map(file)
     }
 }
 

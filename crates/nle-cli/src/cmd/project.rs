@@ -329,6 +329,20 @@ fn secs_string(t: &Seconds) -> String {
 /// persisted: they are a view of the clips, so they cannot drift. Only
 /// `show --json --maps` takes this path; plain `show --json` stays the raw
 /// persisted document (and therefore matches `project.show`).
+fn map_spans_json(map: &TimeMap) -> Vec<serde_json::Value> {
+    map.spans()
+        .iter()
+        .map(|span| {
+            let (timeline_start, timeline_end) = span.timeline();
+            let (source_start, source_end) = span.source();
+            serde_json::json!({
+                "timeline": [secs_string(&timeline_start), secs_string(&timeline_end)],
+                "source": [secs_string(&source_start), secs_string(&source_end)],
+            })
+        })
+        .collect()
+}
+
 fn show_json_with_maps(project: &Project) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(project)?;
     let mut maps = Vec::new();
@@ -346,27 +360,44 @@ fn show_json_with_maps(project: &Project) -> Result<serde_json::Value> {
             if map.is_empty() {
                 continue;
             }
-            let spans: Vec<serde_json::Value> = map
-                .spans()
-                .iter()
-                .map(|span| {
-                    let (timeline_start, timeline_end) = span.timeline();
-                    let (source_start, source_end) = span.source();
-                    serde_json::json!({
-                        "timeline": [secs_string(&timeline_start), secs_string(&timeline_end)],
-                        "source": [secs_string(&source_start), secs_string(&source_end)],
-                    })
-                })
-                .collect();
             maps.push(serde_json::json!({
                 "sequence": project.active_id(),
                 "track_index": track_index,
                 "asset": asset,
-                "spans": spans,
+                "spans": map_spans_json(&map),
             }));
         }
     }
     value["time_maps"] = serde_json::Value::Array(maps);
+
+    let mut group_maps = Vec::new();
+    for group in &project.groups {
+        for (track_index, track) in project.timeline.tracks.iter().enumerate() {
+            let assets: std::collections::BTreeSet<u32> = track
+                .segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    Segment::Clip(clip) => Some(clip.asset),
+                    _ => None,
+                })
+                .collect();
+            for asset in assets {
+                let map =
+                    project.group_time_map(project.active_id(), track_index, group.id, asset)?;
+                if map.is_empty() {
+                    continue;
+                }
+                group_maps.push(serde_json::json!({
+                    "sequence": project.active_id(),
+                    "track_index": track_index,
+                    "group": group.id,
+                    "asset": asset,
+                    "spans": map_spans_json(&map),
+                }));
+            }
+        }
+    }
+    value["group_maps"] = serde_json::Value::Array(group_maps);
     Ok(value)
 }
 

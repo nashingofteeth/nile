@@ -523,9 +523,11 @@ shared by the TUI and agents — with no clipgen code present.
   every analysis consumer need.
 - Importers emit maps alongside clips from the start; `nile show --json --maps`
   exposes the mapping so it is exercised, not dead code.
-- Landed so far: `TimeMap`, `MediaGroup`/`MediaPart`, project v12, validation
-  and `nile show --json --maps` (derived per-track/asset maps). Remaining:
-  importer grouping, the multi-part fixture, and the gate.
+- Landed so far: `TimeMap`, `MediaGroup`/`MediaPart`, project v12, validation,
+  `MediaGroup::asset_map` + `Project::group_time_map` (timeline → file →
+  group), and `nile show --json --maps` (per-track/asset maps plus
+  `group_maps`). Remaining: importer grouping, the multi-part fixture, and the
+  gate.
 - **Gate:** group → timeline → `(part, seek)` → back is exact; a wall time
   inside a trimmed gap maps to "no media"; a multi-part fixture round-trips.
 
