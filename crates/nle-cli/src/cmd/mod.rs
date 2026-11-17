@@ -15,7 +15,8 @@ use nle_core::{
 
 use crate::session::Session;
 use crate::{
-    Cmd, MediaCmd, TrackCmd, TrackKindArg, edit_message, log, parse_speed_arg, say, say_err,
+    AnnotationCmd, Cmd, MediaCmd, TrackCmd, TrackKindArg, edit_message, log, parse_speed_arg, say,
+    say_err,
 };
 
 pub(crate) mod detect;
@@ -363,6 +364,36 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
         Cmd::Media { action } => match action {
             MediaCmd::Ls => None,
             MediaCmd::Rm { id } => Some(Ok(Action::AssetRm { id: *id })),
+        },
+        Cmd::Annotation { action } => match action {
+            AnnotationCmd::Ls { .. } => None,
+            AnnotationCmd::Add {
+                text,
+                asset,
+                group,
+                time,
+            } => Some(
+                parse_signed_time(time)
+                    .map_err(|e| format!("invalid --time {time:?} ({e})"))
+                    .and_then(|time| {
+                        let source = match (asset, group) {
+                            (Some(id), None) => nle_core::SourceRef::Asset { id: *id },
+                            (None, Some(id)) => nle_core::SourceRef::Group { id: *id },
+                            _ => {
+                                return Err(
+                                    "annotation add needs exactly one of --asset or --group"
+                                        .to_string(),
+                                );
+                            }
+                        };
+                        Ok(Action::AnnotationAdd {
+                            anchor: nle_core::Anchor::Source { source, time },
+                            kind: nle_core::AnnotationKind::Note { text: text.clone() },
+                        })
+                    }),
+            ),
+            AnnotationCmd::Rm { id } => Some(Ok(Action::AnnotationRemove { id: *id })),
+            AnnotationCmd::Resolve { id } => Some(Ok(Action::AnnotationResolve { id: *id })),
         },
         _ => None,
     }

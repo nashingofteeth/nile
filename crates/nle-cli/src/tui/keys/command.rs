@@ -8,6 +8,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use nle_core::action::{self, Action, ParseDefaults, ParseError};
+use nle_core::timeline::Segment;
 use nle_core::{frame_of, track_label};
 
 use crate::mpv::Mpv;
@@ -20,7 +21,7 @@ use super::super::{App, Mode, persist_playhead, secs};
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :sequence · :media · :cache · :filmstrip · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :sequence · :media · :cache · :filmstrip · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :annotation · :note · :export · :w · :q";
 
 /// Split a `:import` argument string into paths. Quoted paths keep their
 /// spaces; a backslash escapes the next character, so `a\ b.mp4` works too.
@@ -115,6 +116,7 @@ pub(crate) fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<S
     }
     match verb.as_str() {
         "import" => Some(import_command(app, cmd)),
+        "annotation" => Some(annotation_command(app, &mut f)),
         "show" => Some(show_command(app)),
         "media" => Some(media_ls_command(app)),
         "track" => Some(track_ls_command(app)),
@@ -571,6 +573,7 @@ pub(crate) fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<
         }
         "w" | "write" => Some("edits save automatically — nothing to save".to_string()),
         "help" | "?" => Some(COMMAND_HELP.to_string()),
+        cmd if cmd == "note" || cmd.starts_with("note ") => note_command(app, player, cmd),
         _ => match action::parse(cmd, &parse_defaults(app)) {
             Ok(action) => {
                 // A new track becomes the active one (where the next
@@ -591,6 +594,82 @@ pub(crate) fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<
             Err(ParseError::Unknown(_)) => io_command(app, player, cmd),
         },
     }
+}
+
+/// `:note TEXT` — a note on the clip under the playhead, anchored to its
+/// source time (so later edits cannot move it).
+fn note_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
+    let text = cmd
+        .split_once(char::is_whitespace)
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
+    if text.is_empty() {
+        return Some("usage: :note TEXT (anchors the clip under the playhead)".to_string());
+    }
+    let track = match app.project.timeline.track(app.active_track) {
+        Some(track) => track,
+        None => return Some("no active track".to_string()),
+    };
+    let at = nle_core::grid_time(app.project.fps.as_ref(), app.playhead);
+    let Some(index) = track.index_at(at) else {
+        return Some("the timeline is empty — move onto a clip".to_string());
+    };
+    let Segment::Clip(clip) = &track.segments[index] else {
+        return Some("the playhead is on a gap — move it onto a clip".to_string());
+    };
+    let source = clip.source_at(at - track.start_of(index));
+    let action = Action::AnnotationAdd {
+        anchor: nle_core::Anchor::Source {
+            source: nle_core::SourceRef::Asset { id: clip.asset },
+            time: source,
+        },
+        kind: nle_core::AnnotationKind::Note {
+            text: text.to_string(),
+        },
+    };
+    run_action(app, player, &action);
+    None
+}
+
+/// `:annotation ls` — a short count in the message line, one line per
+/// annotation in the log. Mutations are catalog actions (`:annotation add`,
+/// `rm`, `resolve`) parsed by `action::parse`.
+fn annotation_command(app: &mut App, f: &mut action::Flags) -> String {
+    match f.positional().as_deref() {
+        None | Some("ls") => {}
+        Some(other) => {
+            return format!("unknown annotation command {other:?} — use add, ls, rm or resolve");
+        }
+    }
+    if let Err(e) = f.finish(":annotation ls") {
+        return e.to_string();
+    }
+    let sequence = app.project.active_id();
+    let annotations: Vec<&nle_core::Annotation> = app
+        .project
+        .annotations
+        .iter()
+        .filter(|a| a.sequence == sequence)
+        .collect();
+    if annotations.is_empty() {
+        return format!("no annotations on sequence #{sequence}");
+    }
+    for annotation in &annotations {
+        crate::log::line(&format!(
+            "#{} [{}] {} {:?}",
+            annotation.id,
+            match annotation.status {
+                nle_core::AnnotationStatus::Open => "open",
+                nle_core::AnnotationStatus::Resolved => "resolved",
+            },
+            annotation.label(),
+            annotation.text().unwrap_or(""),
+        ));
+    }
+    format!(
+        "{} annotation(s) on sequence #{sequence} — details in the log",
+        annotations.len()
+    )
 }
 
 /// `:show` — the summary line; the full segment dump goes to the log.

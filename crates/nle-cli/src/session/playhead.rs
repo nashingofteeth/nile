@@ -152,5 +152,8 @@ pub fn reanchors(action: &Action) -> bool {
             | Action::TrackMute { .. }
             | Action::TrackRm { .. }
             | Action::AssetRm { .. }
+            | Action::AnnotationAdd { .. }
+            | Action::AnnotationRemove { .. }
+            | Action::AnnotationResolve { .. }
     )
 }

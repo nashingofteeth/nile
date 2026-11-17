@@ -292,12 +292,58 @@ fn import_otio_group_parts_resolve_moved_clips() {
 }
 
 #[test]
+fn annotations_attach_to_source_and_survive_edits() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&[
+        "annotation",
+        "add",
+        "check the cut",
+        "--asset",
+        "1",
+        "--time",
+        "1",
+    ]);
+    let listing = s.ok(&["annotation", "ls"]);
+    assert!(listing.contains("check the cut"), "{listing}");
+    assert!(listing.contains("[open]"), "{listing}");
+    assert!(listing.contains("asset #1 @ 1 s"), "{listing}");
+
+    let anchor = |s: &Sandbox| -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&s.ok(&["show", "--json"])).unwrap()["annotations"]
+            [0]["anchor"]
+            .clone()
+    };
+    let before = anchor(&s);
+
+    // A source anchor is a media time: splitting the timeline cannot move it.
+    s.ok(&["split", "--at", "1"]);
+    assert_eq!(anchor(&s), before, "split left the source anchor alone");
+
+    s.ok(&["annotation", "resolve", "1"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("[resolved]"));
+    s.ok(&["undo"]);
+    assert!(
+        s.ok(&["annotation", "ls"]).contains("[open]"),
+        "undo reopens it"
+    );
+
+    s.ok(&["annotation", "rm", "1"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("no annotations"));
+    s.ok(&["undo"]);
+    assert!(
+        s.ok(&["annotation", "ls"]).contains("check the cut"),
+        "undo restores a removed note"
+    );
+}
+
+#[test]
 fn show_json_exposes_time_maps_and_groups() {
     let s = Sandbox::new();
     s.base();
     let project: serde_json::Value =
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
-    assert_eq!(project["version"], 12);
+    assert_eq!(project["version"], 13);
     assert_eq!(project["groups"], serde_json::json!([]));
     assert!(
         project.get("time_maps").is_none(),
