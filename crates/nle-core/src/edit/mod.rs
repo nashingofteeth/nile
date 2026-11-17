@@ -144,6 +144,8 @@ pub enum EditError {
     Extend(String),
     #[error("history entry does not apply: {0}")]
     History(String),
+    #[error("annotation #{0} belongs to sequence #{1} — switch to it first")]
+    AnnotationSequence(u32, u32),
     #[error("no frame rate set — add a clip first")]
     NoFps,
     #[error(transparent)]
