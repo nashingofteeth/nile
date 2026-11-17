@@ -17,6 +17,7 @@ pub mod media;
 pub mod otio;
 pub mod project;
 pub mod provenance;
+pub mod report;
 pub mod state;
 pub mod time;
 pub mod timeline;
@@ -49,6 +50,7 @@ pub use project::{
     VideoSettings,
 };
 pub use provenance::{Actor, Provenance};
+pub use report::{FrameLocation, FrameSource, FrameSpan, RenderReport, RenderWindow, SourceSide};
 pub use time::{
     Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, grid_time,
     nominal_fps, parse_rate, parse_signed_time, parse_time, parse_timecode, secs_f64,

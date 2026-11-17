@@ -411,6 +411,8 @@ nile export -o final.mp4                   # balanced: x264 fast CRF 22
 nile export --sequence 2 -o vertical.mp4   # render a non-active timeline too
 nile export -o fast.mp4 --preset preview   # hardware 6M: VideoToolbox/VAAPI
 nile export -o master.mp4 --preset max     # x265 medium CRF 20
+nile report final.mp4                      # frame map written beside the export
+nile report final.mp4 --json               # the full report sidecar
 # Preview uses VideoToolbox on macOS and the first /dev/dri/renderD* on
 # Linux (override with NLE_VAAPI_DEVICE); a hardware failure retries on CPU.
 # Explicit overrides: --encoder cpu|vaapi|qsv|videotoolbox|x265|svt-av1,
