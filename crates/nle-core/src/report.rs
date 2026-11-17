@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::project::Project;
 use crate::time::{Seconds, format_seconds, rational_ser, secs_f64};
-use crate::timeline::{Segment, TransitionSource};
+use crate::timeline::{Segment, TransitionSource, source_time};
 
 /// The report schema version, independent of `nile.json`/history versions.
 pub const REPORT_VERSION: u32 = 1;
@@ -177,7 +177,7 @@ impl RenderReport {
                 timeline,
                 clip: *clip,
                 asset: *asset,
-                source: *source_start + offset * *speed,
+                source: source_time(*source_start, *speed, offset),
             },
             FrameSource::Blend { id, .. } => FrameLocation::Blend { timeline, id: *id },
             FrameSource::Black => FrameLocation::Black { timeline },
