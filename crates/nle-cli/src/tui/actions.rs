@@ -5,7 +5,6 @@
 use std::collections::HashSet;
 
 use nle_core::action::Action;
-use nle_core::time::frame_to_secs;
 use nle_core::timeline::Segment as TimelineSegment;
 #[cfg(test)]
 use nle_core::{Batch, EditError, edit};
@@ -52,9 +51,9 @@ pub(crate) fn seek_clip_end(app: &mut App, player: &dyn Mpv, head: bool) {
     ));
 }
 
-pub(crate) use crate::session::playhead::{Anchor, edit_anchor};
+pub(crate) use crate::session::playhead::edit_anchor;
 #[cfg(test)]
-pub(crate) use crate::session::playhead::{GapAnchor, MediaAnchor};
+pub(crate) use crate::session::playhead::{Anchor, GapAnchor, MediaAnchor};
 
 #[cfg(test)]
 pub(crate) fn clip_anchor(project: &Project, playhead: f64) -> Option<MediaAnchor> {
@@ -65,13 +64,12 @@ pub(crate) fn clip_anchor(project: &Project, playhead: f64) -> Option<MediaAncho
 }
 
 /// Apply the shared media-frame policy to this TUI session's active track.
+/// The tests drive the raw policy over an app; production goes through
+/// `playhead::land`.
+#[cfg(test)]
 pub(crate) fn reanchor_playhead(app: &mut App, anchor: Option<Anchor>) {
     app.playhead =
         crate::session::playhead::reanchor(&app.project, app.playhead, app.active(), anchor);
-}
-
-pub(crate) fn reanchors(action: &Action) -> bool {
-    crate::session::playhead::reanchors(action)
 }
 
 /// The playhead's position on the project's frame grid, as Seconds.
@@ -227,25 +225,19 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
     let playhead_before = app.playhead;
     match app.project.apply_action(action, from) {
         Ok(outcome) => {
-            match outcome.playhead {
-                Some(frame) => {
-                    // Clamp: a redo can restore a position into a shorter
-                    // timeline.
-                    app.playhead =
-                        frame_to_secs(app.project.fps.as_ref(), frame).clamp(0.0, app.last_frame());
-                }
-                // A no-op (a yank) must not move the playhead: the anchor
-                // maps a transition to its *end*, so reanchoring a yank out
-                // of a blend would slide the playhead — and `dd` yanks first.
-                None if outcome.changed && reanchors(action) => reanchor_playhead(app, anchor),
-                // A track or pool change doesn't move the active track's
-                // media, so leave the playhead where it is (just clamped): a
-                // `track rm` re-indexes, and an anchor taken against the old
-                // active would resolve against the wrong track.
-                None if outcome.changed => {
-                    app.playhead = app.playhead.clamp(0.0, app.last_frame());
-                }
-                None => {}
+            // The one landing policy: the action's own frame, else the media
+            // anchor, else the cursor clamped into the new length. A no-op
+            // (a yank) must not move the playhead — `dd` yanks first, and an
+            // anchor on a blend maps to its end.
+            if let Some(at) = crate::session::playhead::land(
+                &app.project,
+                playhead_before,
+                app.active(),
+                anchor,
+                action,
+                &outcome,
+            ) {
+                app.playhead = at;
             }
             if (app.playhead - playhead_before).abs() > 1e-9 {
                 app.follow_timeline();

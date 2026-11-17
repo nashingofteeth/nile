@@ -495,6 +495,13 @@ impl Document {
         if !edit::clamp_project_all(&mut self.project).is_empty() {
             self.project.bump_revision();
         }
+        // The stored playhead is session state, but a file must never hold one
+        // outside `[0, last_frame]`: every front-end reads it back and trusts
+        // it. Clamping here covers a path that forgets to write it back.
+        let last = self.project.last_frame();
+        if self.project.playhead > last {
+            self.project.playhead = last;
+        }
         self.project.validate()?;
         self.project.save(path)
     }
@@ -800,6 +807,24 @@ mod tests {
             seg.duration() <= Seconds::from_integer(4),
             "saved {} s of a 4 s asset",
             crate::time::format_seconds(&seg.duration())
+        );
+    }
+
+    #[test]
+    fn save_clamps_a_playhead_past_the_end() {
+        let mut doc = document();
+        // A front-end that forgot to write the cursor back can leave it past
+        // the end; the file must never hold one, or the next session opens
+        // outside the timeline.
+        doc.project.playhead = Seconds::from_integer(99);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.json");
+        doc.save(&path).unwrap();
+        let loaded = Project::load(&path).unwrap();
+        assert_eq!(loaded.playhead, loaded.last_frame(), "clamped to the end");
+        assert!(
+            loaded.playhead < loaded.timeline.end(),
+            "never `end` itself"
         );
     }
 
