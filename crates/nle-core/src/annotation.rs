@@ -1,8 +1,8 @@
 //! Notes, markers and (later) expectations anchored to source media.
 //!
 //! A source anchor is a media time, not a timeline position: trimming,
-//! splitting or rippling the timeline cannot move it. Timeline anchors are a
-//! later slice and will be clip-relative so edits can re-anchor them.
+//! splitting or rippling the timeline cannot move it. A timeline anchor is
+//! clip-relative (`clip` + `source`), so edits keep it on the same footage.
 
 use serde::{Deserialize, Serialize};
 
@@ -115,14 +115,14 @@ pub(crate) fn reanchor_timeline(
         };
         let Some(start_new) = resolve_point(start, before, after) else {
             warnings.push(format!(
-                "dropped annotation #{}: its clip was removed",
+                "dropped annotation #{}: its clip no longer has that source",
                 annotation.id
             ));
             continue;
         };
         let Some(end_new) = resolve_point(end, before, after) else {
             warnings.push(format!(
-                "dropped annotation #{}: its clip was removed",
+                "dropped annotation #{}: its clip no longer has that source",
                 annotation.id
             ));
             continue;
@@ -132,7 +132,7 @@ pub(crate) fn reanchor_timeline(
             point_position(&end_new, after),
         ) else {
             warnings.push(format!(
-                "dropped annotation #{}: its clip was removed",
+                "dropped annotation #{}: its clip no longer has that source",
                 annotation.id
             ));
             continue;
@@ -218,16 +218,7 @@ fn find_clip(tracks: &[Track], id: u32) -> Option<(usize, usize, &Clip)> {
 }
 
 fn point_position(point: &ClipPoint, tracks: &[Track]) -> Option<Seconds> {
-    for track in tracks {
-        for (index, segment) in track.segments.iter().enumerate() {
-            if let Segment::Clip(clip) = segment
-                && clip.id == point.clip
-            {
-                return Some(track.start_of(index) + clip.timeline_offset_of(point.source));
-            }
-        }
-    }
-    None
+    crate::timeline::clip_position(tracks, point.clip, point.source)
 }
 
 #[cfg(test)]

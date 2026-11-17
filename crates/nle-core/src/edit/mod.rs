@@ -101,6 +101,8 @@ pub enum EditError {
     NoGap,
     #[error("no clip at that position — it is in a gap")]
     NoClip,
+    #[error("a note can't anchor to a blend — move the playhead onto a clip")]
+    AnnotationBlend,
     #[error("no segment at that position — the timeline is empty or the position is outside it")]
     NoSegment,
     #[error("nothing to trim at {0} — the playhead is on a segment edge")]

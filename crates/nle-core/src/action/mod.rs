@@ -723,8 +723,10 @@ pub fn run_action(
                 .track(*track)
                 .ok_or(EditError::TrackNotFound(*track))?;
             let index = track_ref.index_at(at).ok_or(EditError::NoSegment)?;
-            let crate::timeline::Segment::Clip(clip) = &track_ref.segments[index] else {
-                return Err(EditError::NoClip);
+            let clip = match &track_ref.segments[index] {
+                crate::timeline::Segment::Clip(clip) => clip,
+                crate::timeline::Segment::Gap(_) => return Err(EditError::NoClip),
+                crate::timeline::Segment::Transition(_) => return Err(EditError::AnnotationBlend),
             };
             let point = ClipPoint {
                 clip: clip.id,
