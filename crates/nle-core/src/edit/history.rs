@@ -229,7 +229,13 @@ impl History {
         let (id, _) = project.add_asset(path, probe);
         let after = project.media.clone();
         let desc = format!("import asset #{id}");
-        let changed = before != after;
+        // A path already in the pool changed nothing, so it records nothing:
+        // an entry would make `u` consume a step and clear the redo stack.
+        // `add_assets` and `resolve_annotation` skip their no-ops the same way
+        // — the rule belongs here, not in every caller's dedup.
+        if before == after {
+            return (id, desc);
+        }
         self.push_change(Change::Assets(AssetChange {
             before,
             after,
@@ -237,9 +243,7 @@ impl History {
             playhead,
             provenance: self.provenance(),
         }));
-        if changed {
-            project.bump_revision();
-        }
+        project.bump_revision();
         (id, desc)
     }
 

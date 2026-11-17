@@ -320,6 +320,29 @@ fn asset_addition_is_undoable() {
     assert!(p.asset(id).is_some(), "and redoes");
 }
 
+// Importing a path the pool already holds changed nothing, so it must record
+// nothing: an entry would consume an undo step and clear the redo stack. The
+// front-ends dedup first, but the rule is the model's.
+#[test]
+fn reimporting_a_pooled_asset_records_nothing() {
+    let mut p = fixture();
+    let mut h = History::default();
+    let (first, _) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 0);
+    let depth = h.depth();
+    let revision = p.revision;
+
+    let (second, _) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 7);
+    assert_eq!(second, first, "the pooled id comes back");
+    assert_eq!(h.depth(), depth, "no entry for a no-op");
+    assert_eq!(p.revision, revision, "no model write");
+
+    h.undo(&mut p).unwrap();
+    assert!(
+        p.asset(first).is_none(),
+        "one undo still removes the import"
+    );
+}
+
 // A picker import of several files is one undo step: one `u` removes the
 // whole batch, and one redo puts it back.
 #[test]
