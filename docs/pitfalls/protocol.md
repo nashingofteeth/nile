@@ -136,9 +136,12 @@ The nested values reuse the model's serde forms, not a separate wire spelling:
   `{"kind":"marker"}`, and `anchor` is `{"on":"source",
   "source":{"of":"asset","id":1},"time":"1/2"}` (or `"of":"group"`) — the
   persisted `Annotation` forms, not a parallel spelling.
-- `annotation_add_at`: `{track, at, kind}`; the core resolves the clip under
-  `at` to `{"on":"timeline","start":{"clip":1,"source":"1/2"},
-  "end":…}`, so a client needs no project access to build the anchor.
+- `annotation_add_at`: `{track, at, to?, kind}`; `to` is omitted for a point.
+  The core resolves the clips under `at`/`to` to
+  `{"on":"timeline","start":{"clip":1,"source":"1/2"},"end":…}`, so a client
+  needs no project access to build the anchor. A point is a frame reference
+  (half-open); a range end resolves closed at a clip's tail, and a range start
+  at a cut belongs to the following clip.
 - `target`: `{"at":…}`, `{"clip":…}`, `{"segment":…}`.
 - `edge`: `"in"` | `"out"`; `GapLen`/`TransitionLen`: `{"frames":…}`,
   `{"seconds":…}`, `{"percent":…}`.

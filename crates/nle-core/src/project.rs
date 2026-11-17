@@ -885,7 +885,8 @@ impl Project {
         }
         match &annotation.anchor {
             Anchor::Timeline { start, end } => {
-                for point in [start, end] {
+                let points = [(start, false), (end, start != end)];
+                for (point, closed) in points {
                     let clip = self
                         .sequence_clip(annotation.sequence, point.clip)
                         .ok_or_else(|| {
@@ -897,7 +898,12 @@ impl Project {
                                 ),
                             )
                         })?;
-                    if point.source < clip.asset_in || point.source >= clip.asset_out {
+                    let inside = if closed {
+                        point.source <= clip.asset_out
+                    } else {
+                        point.source < clip.asset_out
+                    };
+                    if point.source < clip.asset_in || !inside {
                         return Err(ProjectError::Annotation(
                             annotation.id,
                             format!(
@@ -1820,12 +1826,42 @@ mod tests {
             )
             .is_ok()
         );
+        // A range may end on the clip's tail; the boundary is a position.
+        let tail = p
+            .add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::from_integer(1)),
+                    end: point(Seconds::from_integer(2)),
+                },
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(
+            p.annotation_span(p.annotation(tail).unwrap()),
+            Some((Seconds::from_integer(1), Seconds::from_integer(2)))
+        );
         assert!(matches!(
             p.add_annotation(
                 1,
                 note(),
                 Anchor::Timeline {
                     start: point(Seconds::from_integer(0)),
+                    end: point(Seconds::new(5, 2)),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("no media")
+        ));
+        // A point is a frame reference, not a boundary: the tail is closed
+        // only for a range end.
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::from_integer(2)),
                     end: point(Seconds::from_integer(2)),
                 },
                 provenance(),

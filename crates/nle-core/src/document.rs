@@ -570,6 +570,73 @@ mod tests {
     }
 
     #[test]
+    fn timeline_ranges_resolve_both_ends_and_refuse_a_reverse() {
+        use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
+
+        let mut doc = document();
+        let mut register = None;
+        doc.edit(
+            &crate::Action::AnnotationAddAt {
+                track: 0,
+                at: 0.5,
+                to: Some(1.5),
+                kind: AnnotationKind::Marker,
+            },
+            0.0,
+            &mut register,
+        )
+        .unwrap();
+        let Anchor::Timeline { start, end } = &doc.project.annotations[0].anchor else {
+            panic!("timeline anchor");
+        };
+        assert_eq!(
+            start,
+            &ClipPoint {
+                clip: 1,
+                source: Seconds::new(1, 2)
+            }
+        );
+        assert_eq!(
+            end,
+            &ClipPoint {
+                clip: 1,
+                source: Seconds::new(3, 2)
+            }
+        );
+
+        // Ending on the clip's tail uses the closed boundary.
+        doc.edit(
+            &crate::Action::AnnotationAddAt {
+                track: 0,
+                at: 0.5,
+                to: Some(2.0),
+                kind: AnnotationKind::Marker,
+            },
+            0.0,
+            &mut register,
+        )
+        .unwrap();
+        let Anchor::Timeline { end, .. } = &doc.project.annotations[1].anchor else {
+            panic!("timeline anchor");
+        };
+        assert_eq!(end.source, Seconds::from_integer(2));
+
+        assert!(matches!(
+            doc.edit(
+                &crate::Action::AnnotationAddAt {
+                    track: 0,
+                    at: 1.5,
+                    to: Some(0.5),
+                    kind: AnnotationKind::Marker,
+                },
+                0.0,
+                &mut register,
+            ),
+            Err(EditError::AnnotationRange)
+        ));
+    }
+
+    #[test]
     fn a_dropped_annotation_is_reported_in_the_outcome() {
         use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
 

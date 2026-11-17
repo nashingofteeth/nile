@@ -338,7 +338,8 @@ nile show --sequence 1                    # report another timeline
 # Annotations: source notes are edit-proof; timeline notes follow clips
 nile annotation add "check the cut" --asset 1 --time 1.5
 nile annotation add "mic check" --group 2 --time 3  # group-clock time
-nile annotation add "look here" --timeline --at 2.5 # clip-relative
+nile annotation add "look here" --timeline --at 2.5 # clip-relative point
+nile annotation add "this take" --timeline --at 2 --to 5 # range
 nile annotation ls                        # id, status, anchor and text
 nile annotation resolve 1                 # undoable; rm deletes instead
 nile remove 2                             # by clip id

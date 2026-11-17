@@ -47,6 +47,14 @@ fn annotation_add_keeps_the_nested_kind_shape() {
         }),
         "the action and the persisted annotation share one kind shape"
     );
+
+    let range = round_trip(Action::AnnotationAddAt {
+        track: 0,
+        at: 1.0,
+        to: Some(2.0),
+        kind: AnnotationKind::Marker,
+    });
+    assert_eq!(range["to"], 2.0);
 }
 
 #[test]
@@ -54,6 +62,7 @@ fn annotation_add_at_pins_the_timeline_position() {
     let value = round_trip(Action::AnnotationAddAt {
         track: 0,
         at: 1.5,
+        to: None,
         kind: AnnotationKind::Marker,
     });
     assert_eq!(

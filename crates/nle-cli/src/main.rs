@@ -653,8 +653,21 @@ enum AnnotationCmd {
         #[arg(long, conflicts_with_all = ["asset", "group", "time"])]
         timeline: bool,
         /// Timeline position to pin (with --timeline)
-        #[arg(long, value_name = "TIME", conflicts_with_all = ["asset", "group", "time"])]
+        #[arg(
+            long,
+            value_name = "TIME",
+            conflicts_with_all = ["asset", "group", "time"],
+            requires = "timeline"
+        )]
         at: Option<String>,
+        /// End of a timeline range (with --timeline; default: a point at --at)
+        #[arg(
+            long,
+            value_name = "TIME",
+            conflicts_with_all = ["asset", "group", "time"],
+            requires = "timeline"
+        )]
+        to: Option<String>,
         /// Track for --timeline (1-based; default 1)
         #[arg(long, value_name = "N", default_value_t = 1)]
         track: usize,
@@ -1219,6 +1232,7 @@ mod tests {
                     time: Some("0".into()),
                     timeline: false,
                     at: None,
+                    to: None,
                     track: 1,
                 },
             },
@@ -1230,6 +1244,7 @@ mod tests {
                     time: None,
                     timeline: true,
                     at: Some("1".into()),
+                    to: None,
                     track: 1,
                 },
             },
@@ -1315,6 +1330,29 @@ mod tests {
                 track: 0,
                 at: 0.0,
                 len: GapLen::Seconds(2.0),
+            }
+        );
+        let cmd = Cmd::Annotation {
+            action: AnnotationCmd::Add {
+                text: "range".into(),
+                asset: None,
+                group: None,
+                time: None,
+                timeline: true,
+                at: Some("1".into()),
+                to: Some("2".into()),
+                track: 1,
+            },
+        };
+        assert_eq!(
+            to_action(&cmd).unwrap().unwrap(),
+            Action::AnnotationAddAt {
+                track: 0,
+                at: 1.0,
+                to: Some(2.0),
+                kind: nle_core::AnnotationKind::Note {
+                    text: "range".into(),
+                },
             }
         );
         // Conflicting addressing is refused, not silently picked.
