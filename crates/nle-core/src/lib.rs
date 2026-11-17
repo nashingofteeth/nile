@@ -6,6 +6,7 @@
 //! Keeping it pure means it can be unit-tested exhaustively and instantly.
 
 pub mod action;
+pub mod annotation;
 pub mod detect;
 pub mod document;
 pub mod edit;
@@ -15,6 +16,7 @@ mod group;
 pub mod media;
 pub mod otio;
 pub mod project;
+pub mod provenance;
 pub mod state;
 pub mod time;
 pub mod timeline;
@@ -25,6 +27,7 @@ pub use action::{
     RegisterEntry, Target, TransitionLen, load_register, load_register_without_migration,
     register_path, run_action, save_register, track_label,
 };
+pub use annotation::{Anchor, Annotation, AnnotationKind, AnnotationStatus, SourceRef};
 pub use detect::{Span, reconstruct};
 pub use document::{BatchOutcome, Document, PreviewOutcome};
 pub use edit::{
@@ -45,6 +48,7 @@ pub use project::{
     Asset, Project, ProjectDiff, ProjectError, Sequence, SequenceDiff, SequenceOrigin, TrackDiff,
     VideoSettings,
 };
+pub use provenance::{Actor, Provenance};
 pub use time::{
     Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, grid_time,
     nominal_fps, parse_rate, parse_signed_time, parse_time, parse_timecode, secs_f64,
