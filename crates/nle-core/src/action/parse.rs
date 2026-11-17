@@ -293,12 +293,13 @@ fn reject_target_flags(f: &mut Flags, usage: &str) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// Seconds or timecode, optionally negative (a gap head reaches back
-/// past time 0).
+/// Exact rational seconds for a model time (no float round-trip).
 fn parse_exact(s: &str) -> Result<Seconds, ParseError> {
     parse_signed_time(s).map_err(|e| ParseError::Invalid(format!("invalid time {s:?} ({e})")))
 }
 
+/// Seconds or timecode, optionally negative (a gap head reaches back
+/// past time 0).
 fn parse_pos(s: &str) -> Result<f64, ParseError> {
     parse_signed_time(s)
         .map(|t| secs_f64(&t))
