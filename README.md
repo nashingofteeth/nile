@@ -319,6 +319,10 @@ nile import --group "CAM 3" part1.mp4 part2.mp4
 # one logical recording from ordered parts; one undo removes both
 nile group ls                             # part count and group end
 nile group rm 1                           # undoable; assets stay pooled
+nile annotation add "check the cut" --asset 1 --time 1.5
+# a note on a source frame; timeline edits cannot move it
+nile annotation ls                        # id, status, anchor and text
+nile annotation resolve 1                 # undoable; rm deletes instead
 nile import-edl show.edl --media . --group "CAM 3=cam3_a.mp4,cam3_b.mp4"
 nile import-otio show.otio --group "CAM 3=cam3_a.mp4,cam3_b.mp4"
 # explicit parts join one recording (argument order; repeatable flag)
