@@ -685,3 +685,33 @@ fn annotation_add_timeline_pins_the_clip_under_the_position() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
 }
+
+#[test]
+fn annotation_add_timeline_range_resolves_both_ends() {
+    let path = temp_project_path("annotation-range");
+    asset_project().save(&path).unwrap();
+    let mut app = App::new(asset_project(), path.clone());
+
+    let notice = cmd(&mut app, "annotation add span --timeline --at 0.5 --to 2.5");
+    assert!(notice.contains("added annotation #1"), "{notice}");
+    let annotation = &app.project.annotations[0];
+    let nle_core::Anchor::Timeline { start, end } = &annotation.anchor else {
+        panic!("expected a timeline anchor");
+    };
+    assert_eq!(start.clip, 1);
+    assert_eq!(end.clip, 1);
+    assert_eq!(
+        end.source,
+        Seconds::from_integer(7) / Seconds::from_integer(2)
+    );
+    assert_eq!(
+        app.project.annotation_span(annotation),
+        Some((
+            Seconds::from_integer(1) / Seconds::from_integer(2),
+            Seconds::from_integer(5) / Seconds::from_integer(2)
+        ))
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}

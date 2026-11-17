@@ -553,8 +553,7 @@ shared by the TUI and agents — with no clipgen code present.
   history v21), `nile annotation add|ls|rm|resolve` (including `--timeline`),
   `:note`, and the additive `annotation.list` method. Timeline anchors follow
   trims/splits/ripples, a split re-anchors, and undo restores dropped notes.
-  Remaining: expectation payloads (after the render report) and range
-  creation.
+  Remaining: expectation payloads (after the render report).
 - **Gate:** ripple/split/trim/undo move timeline annotations while source
   annotations stay put; a note round-trips through the protocol and is
   visible in the TUI.

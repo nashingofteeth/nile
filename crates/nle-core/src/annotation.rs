@@ -113,19 +113,28 @@ pub(crate) fn reanchor_timeline(
             kept.push(annotation.clone());
             continue;
         };
-        let Some(start_new) = resolve_point(start, before, after) else {
+        let point = start == end;
+        let start_new = resolve_point(start, before, after, false);
+        let Some(start_new) = start_new else {
             warnings.push(format!(
                 "dropped annotation #{}: its clip no longer has that source",
                 annotation.id
             ));
             continue;
         };
-        let Some(end_new) = resolve_point(end, before, after) else {
-            warnings.push(format!(
-                "dropped annotation #{}: its clip no longer has that source",
-                annotation.id
-            ));
-            continue;
+        let end_new = if point {
+            start_new
+        } else {
+            match resolve_point(end, before, after, true) {
+                Some(end) => end,
+                None => {
+                    warnings.push(format!(
+                        "dropped annotation #{}: its clip no longer has that source",
+                        annotation.id
+                    ));
+                    continue;
+                }
+            }
         };
         let (Some(start_pos), Some(end_pos)) = (
             point_position(&start_new, after),
@@ -154,15 +163,19 @@ pub(crate) fn reanchor_timeline(
     (kept, warnings)
 }
 
-fn resolve_point(point: &ClipPoint, before: &[Track], after: &[Track]) -> Option<ClipPoint> {
+fn resolve_point(
+    point: &ClipPoint,
+    before: &[Track],
+    after: &[Track],
+    closed: bool,
+) -> Option<ClipPoint> {
     let (track_index, segment_index, old) = find_clip(before, point.clip)?;
-    if point.source < old.asset_in || point.source >= old.asset_out {
+    if point.source < old.asset_in || !inside(point.source, old.asset_in, old.asset_out, closed) {
         return None;
     }
     if let Some((_, _, new)) = find_clip(after, point.clip)
         && new.asset == old.asset
-        && point.source >= new.asset_in
-        && point.source < new.asset_out
+        && inside(point.source, new.asset_in, new.asset_out, closed)
     {
         return Some(ClipPoint {
             clip: new.id,
@@ -185,8 +198,7 @@ fn resolve_point(point: &ClipPoint, before: &[Track], after: &[Track]) -> Option
             Segment::Clip(clip)
                 if clip.id != old.id
                     && clip.asset == old.asset
-                    && point.source >= clip.asset_in
-                    && point.source < clip.asset_out
+                    && inside(point.source, clip.asset_in, clip.asset_out, closed)
                     && (clip.asset_in == old.asset_in || clip.asset_out == old.asset_out) =>
             {
                 let start = track.start_of(index);
@@ -202,6 +214,10 @@ fn resolve_point(point: &ClipPoint, before: &[Track], after: &[Track]) -> Option
         clip: first.id,
         source: point.source,
     })
+}
+
+fn inside(source: Seconds, start: Seconds, end: Seconds, closed: bool) -> bool {
+    source >= start && if closed { source <= end } else { source < end }
 }
 
 fn find_clip(tracks: &[Track], id: u32) -> Option<(usize, usize, &Clip)> {
@@ -312,6 +328,44 @@ mod tests {
     }
 
     #[test]
+    fn a_range_follows_a_ripple_and_splits_across_a_cut() {
+        let before = vec![track(vec![clip(1, 1, 0, 10)])];
+        let range = note(1, (1, 2), (1, 8));
+
+        let after = vec![track(vec![
+            Segment::Gap(crate::timeline::Gap { duration: s(3) }),
+            clip(1, 1, 0, 10),
+        ])];
+        let (kept, warnings) = reanchor_timeline(std::slice::from_ref(&range), &before, &after);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            kept[0].anchor, range.anchor,
+            "both endpoints follow the clip"
+        );
+
+        let split = vec![track(vec![clip(1, 1, 0, 5), clip(2, 1, 5, 10)])];
+        let (kept, warnings) = reanchor_timeline(&[range], &before, &split);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(matches!(
+            kept[0].anchor,
+            Anchor::Timeline {
+                start: ClipPoint { clip: 1, .. },
+                end: ClipPoint { clip: 2, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn a_range_with_one_endpoint_gone_is_dropped() {
+        let before = vec![track(vec![clip(1, 1, 0, 10)])];
+        // A trim consumes the tail, including the range's end.
+        let after = vec![track(vec![clip(1, 1, 0, 6)])];
+        let (kept, warnings) = reanchor_timeline(&[note(1, (1, 2), (1, 8))], &before, &after);
+        assert!(kept.is_empty());
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
     fn a_split_reanchors_to_the_piece_that_holds_the_source() {
         let before = vec![track(vec![clip(1, 1, 0, 10)])];
         // Split at source 5: left keeps id 1, right is id 2.
@@ -379,6 +433,16 @@ mod tests {
         ])];
         let (kept, warnings) = reanchor_timeline(&[note(1, (1, 5), (1, 5))], &before, &after);
         assert!(kept.is_empty(), "the note did not move to the later copy");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_point_on_the_tail_is_dropped_by_a_trim() {
+        let before = vec![track(vec![clip(1, 1, 0, 10)])];
+        // Trim the tail to source 8: source 9 is gone, so the point is too.
+        let after = vec![track(vec![clip(1, 1, 0, 8)])];
+        let (kept, warnings) = reanchor_timeline(&[note(1, (1, 9), (1, 9))], &before, &after);
+        assert!(kept.is_empty());
         assert_eq!(warnings.len(), 1);
     }
 
