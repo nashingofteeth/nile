@@ -628,6 +628,17 @@ pub(crate) fn cmd_annotation_ls(project_path: &Path, sequence: Option<u32>) -> R
                     format!("group #{id} @ {} s", format_seconds(time))
                 }
             },
+            nle_core::Anchor::Timeline { .. } => match project.annotation_span(annotation) {
+                Some((start, end)) if start == end => {
+                    format!("timeline {} s", format_seconds(&start))
+                }
+                Some((start, end)) => format!(
+                    "timeline {}–{} s",
+                    format_seconds(&start),
+                    format_seconds(&end)
+                ),
+                None => "timeline (unresolved)".to_string(),
+            },
         };
         let status = match annotation.status {
             nle_core::AnnotationStatus::Open => "open",

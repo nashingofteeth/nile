@@ -29,7 +29,7 @@ pub enum ParseError {
 }
 
 /// Boolean options (everything else takes a value).
-const BOOL_FLAGS: &[&str] = &["ripple", "range"];
+const BOOL_FLAGS: &[&str] = &["ripple", "range", "timeline"];
 
 /// Short flags the CLI uses, spelled `-o` in the `:cmd` line too
 /// (`:export -o out.mp4`). Only the ones that exist on the CLI.
@@ -661,6 +661,21 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     let text = f.positional().ok_or_else(|| {
                         ParseError::Invalid(":annotation add needs TEXT".to_string())
                     })?;
+                    let timeline = f.take_bool("timeline");
+                    if timeline {
+                        let at = opt_time(&mut f, "at")?.or(d.at).ok_or_else(|| {
+                            ParseError::Invalid(
+                                ":annotation add --timeline needs --at T".to_string(),
+                            )
+                        })?;
+                        let track = parse_track(&mut f, d)?;
+                        f.finish(":annotation add TEXT --timeline [--at T] [--track N]")?;
+                        return Ok(Action::AnnotationAddAt {
+                            track,
+                            at,
+                            kind: AnnotationKind::Note { text },
+                        });
+                    }
                     let asset = opt_u32(&mut f, "asset")?;
                     let group = opt_u32(&mut f, "group")?;
                     let source = match (asset, group) {

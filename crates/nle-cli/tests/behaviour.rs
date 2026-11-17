@@ -338,12 +338,46 @@ fn annotations_attach_to_source_and_survive_edits() {
 }
 
 #[test]
+fn timeline_annotations_follow_their_clip_across_edits() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["annotation", "add", "pin", "--timeline", "--at", "1"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("timeline 1 s"));
+
+    // A ripple gap moves the material (and the note) one second right.
+    s.ok(&["gap", "--at", "0", "--frames", "30"]);
+    assert!(
+        s.ok(&["annotation", "ls"]).contains("timeline 2 s"),
+        "the note follows the clip"
+    );
+    s.ok(&["undo"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("timeline 1 s"));
+
+    // Split at the note: the right piece owns source 1, so the anchor moves
+    // to it without changing the timeline position.
+    s.ok(&["split", "--at", "1"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let anchor = &project["annotations"][0]["anchor"];
+    let piece = anchor["start"]["clip"].as_u64().expect("clip id");
+    assert_ne!(piece, 1, "the note re-anchored to the split-off piece");
+    assert_eq!(anchor["start"]["source"], "1/1");
+    assert!(s.ok(&["annotation", "ls"]).contains("timeline 1 s"));
+
+    // Deleting the clip drops the note; undo brings both back.
+    s.ok(&["delete", "--clip", &piece.to_string()]);
+    assert!(s.ok(&["annotation", "ls"]).contains("no annotations"));
+    s.ok(&["undo"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("timeline 1 s"));
+}
+
+#[test]
 fn show_json_exposes_time_maps_and_groups() {
     let s = Sandbox::new();
     s.base();
     let project: serde_json::Value =
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
-    assert_eq!(project["version"], 13);
+    assert_eq!(project["version"], 14);
     assert_eq!(project["groups"], serde_json::json!([]));
     assert!(
         project.get("time_maps").is_none(),
