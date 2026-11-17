@@ -187,15 +187,15 @@ pub(crate) fn run_export(
             nle_ffmpeg::export(&project, spec)
         }
     };
-    let (plan, fallback) = match run(&spec) {
-        Ok(plan) => (plan, false),
+    let (plan, fallback, encoder) = match run(&spec) {
+        Ok(plan) => (plan, false, spec.encoder),
         Err(e) if spec.encoder.is_hardware() => {
             log::line(&format!(
                 "{} export failed ({e}); retrying on CPU",
                 spec.encoder.label()
             ));
             let cpu = options.cpu_fallback(&spec);
-            (run(&cpu)?, true)
+            (run(&cpu)?, true, cpu.encoder)
         }
         Err(e) => return Err(e.into()),
     };
@@ -213,8 +213,21 @@ pub(crate) fn run_export(
     let skipped = skipped
         .map(|why| format!(" · single ({why})"))
         .unwrap_or_default();
+    let report =
+        nle_core::RenderReport::build(&project, output, frames, Some(encoder.label().to_string()));
+    let report_path = nle_core::RenderReport::sidecar_path(output);
+    let report_note = match report.save(&report_path) {
+        Ok(()) => format!(" · report {}", report_path.display()),
+        Err(e) => {
+            log::line(&format!(
+                "report {} not written: {e}",
+                report_path.display()
+            ));
+            " · report failed".to_string()
+        }
+    };
     Ok(format!(
-        "✓ {}  ({} s · {} frames @ {}/{}) · {tier}{fallback}{skipped}",
+        "✓ {}  ({} s · {} frames @ {}/{}) · {tier}{fallback}{skipped}{report_note}",
         output.display(),
         shown,
         frames,

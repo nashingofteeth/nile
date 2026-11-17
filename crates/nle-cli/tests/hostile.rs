@@ -638,6 +638,7 @@ fn odd_media() {
                     "99",
                 ]],
             ),
+            ("report a missing output", &[&["report", "nope.mp4"]]),
             ("annotation rm 99", &[&["annotation", "rm", "99"]]),
             ("annotation resolve 99", &[&["annotation", "resolve", "99"]]),
             (
@@ -657,6 +658,15 @@ fn odd_media() {
             ),
         ],
     );
+}
+
+#[test]
+fn a_corrupt_report_is_refused() {
+    let s = Sandbox::new();
+    s.write("bad.mp4.report.json", "{ not json");
+    let out = s.run(&["report", "bad.mp4"]);
+    assert!(!out.status.success(), "a corrupt report must fail");
+    assert!(!merged(&out).contains("panicked"), "{}", merged(&out));
 }
 
 #[test]

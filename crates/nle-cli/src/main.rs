@@ -404,6 +404,14 @@ enum Cmd {
         #[command(subcommand)]
         action: AnnotationCmd,
     },
+    /// Print the report written beside an exported file
+    Report {
+        /// The exported video (or its .report.json)
+        file: PathBuf,
+        /// Print the full report JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Timeline tracks: list, add, mute, remove
     Track {
         #[command(subcommand)]
@@ -805,7 +813,7 @@ use cmd::media::{cmd_probe, cmd_trim};
 use cmd::project::cmd_edit;
 use cmd::project::{
     cmd_add, cmd_annotation_ls, cmd_cache, cmd_default, cmd_edl, cmd_group, cmd_init, cmd_media_ls,
-    cmd_seek, cmd_sequence, cmd_show, cmd_track_ls,
+    cmd_report, cmd_seek, cmd_sequence, cmd_show, cmd_track_ls,
 };
 use cmd::{run_cli_action, to_action};
 
@@ -829,6 +837,11 @@ fn main() -> Result<()> {
             anyhow::bail!("`nile default` takes the project as its FILE argument, not --project");
         }
         return cmd_default(&cwd, file.as_deref(), *unset);
+    }
+    // A report belongs to the output file, not the project: read it without
+    // requiring a project in the current directory.
+    if let Cmd::Report { file, json } = &cli.command {
+        return cmd_report(file, *json);
     }
     let project = match cli.project.clone() {
         Some(project) => project,
@@ -882,6 +895,7 @@ fn main() -> Result<()> {
         Cmd::Annotation {
             action: AnnotationCmd::Ls { sequence },
         } => return cmd_annotation_ls(&project, *sequence),
+        Cmd::Report { file, json } => return cmd_report(file, *json),
         Cmd::ImportEdl {
             file,
             media,
