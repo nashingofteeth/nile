@@ -12,8 +12,11 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   with a warning. The drop is recorded in the track change, so undo restores
   it. Adding or growing a blend also consumes the source from its neighbour,
   and a blend side has no anchor identity, so a note held in those frames
-  drops with the same warning. Ranges are start/end points; creation makes a
-  point.
+  drops with the same warning. A timeline endpoint is closed at the clip's
+  tail (`[asset_in, asset_out]`), so a range can end on a cut: the start
+  belongs to the following clip, the end to the preceding clip's tail.
+  Creation supports points and ranges (`--to`); `annotation ls` resolves the
+  span.
 - **Ids are project-wide, the list is scoped by `sequence`.** `nile
   annotation ls` defaults to the active sequence; `--sequence N` reads
   another. Adding always writes to the active sequence's history, and
