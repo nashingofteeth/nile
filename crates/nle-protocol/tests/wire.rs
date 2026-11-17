@@ -7,10 +7,11 @@ use std::path::PathBuf;
 
 use nle_core::{Action, Project, ProjectDiff, Seconds, TransitionKind, TransitionLen};
 use nle_protocol::{
-    Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Id,
-    METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage, Notification, Outcome, PARSE_ERROR,
-    PROTOCOL_VERSION, PlayheadReply, Preview, REVISION_CONFLICT, Reply, Request, Response,
-    RevisionConflict, RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
+    AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS,
+    INVALID_REQUEST, Id, METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage, Notification,
+    Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply, Preview, REVISION_CONFLICT, Reply,
+    Request, Response, RevisionConflict, RpcError, SequenceList, SequenceReply, SequenceSummary,
+    Server,
 };
 use serde_json::{Value, json};
 
@@ -160,6 +161,10 @@ impl Handler for Fake {
                 depth: 0,
                 at: *at,
             })),
+            Call::AnnotationList { sequence } => Ok(Reply::Annotations(AnnotationList {
+                sequence: sequence.unwrap_or(1),
+                annotations: Vec::new(),
+            })),
         }
     }
 
@@ -257,6 +262,7 @@ fn all_calls() -> Vec<Call> {
         Call::PlayheadSet {
             at: Seconds::new(3, 2),
         },
+        Call::AnnotationList { sequence: Some(1) },
     ]
 }
 

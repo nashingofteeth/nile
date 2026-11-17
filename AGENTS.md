@@ -24,6 +24,7 @@ build — see "Learning Rust along the way".
 | transitions, blends | `docs/pitfalls/transitions.md` |
 | `nle-protocol`, `serve`, wire methods | `docs/pitfalls/protocol.md` |
 | sequences, selection, `nile sequence` | `docs/pitfalls/sequences.md` |
+| annotations, `nile annotation` | `docs/pitfalls/annotations.md` |
 | the borrow checker or clippy | `docs/rust-notes.md` |
 
 Low-dependency stance: **the current set is frozen.** No new runtime

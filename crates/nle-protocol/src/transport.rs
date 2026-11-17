@@ -20,7 +20,8 @@ use nle_core::{Action, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
 use crate::call::{
-    Call, Hello, MediaList, Outcome, PlayheadReply, Preview, Reply, SequenceList, SequenceReply,
+    AnnotationList, Call, Hello, MediaList, Outcome, PlayheadReply, Preview, Reply, SequenceList,
+    SequenceReply,
 };
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
@@ -317,6 +318,13 @@ impl<R: BufRead, W: Write> Client<R, W> {
             paths,
         })? {
             Reply::Media(media) => Ok(media),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn annotations(&mut self, sequence: Option<u32>) -> Result<AnnotationList, ClientError> {
+        match self.call(Call::AnnotationList { sequence })? {
+            Reply::Annotations(list) => Ok(list),
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }
