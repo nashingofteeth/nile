@@ -1,6 +1,7 @@
 //! The `:cmd` grammar: flags, defaults and the action parser. It is the same
 //! grammar the CLI uses — `to_action` calls this, not a second parser.
 
+use crate::annotation::{Anchor, AnnotationKind, SourceRef};
 use crate::edit::EditError;
 use crate::time::{Seconds, frames_to_seconds, parse_signed_time, secs_f64};
 use crate::timeline::{Effect, MAX_TIMELINE_SECONDS, TrackKind, TransitionKind};
@@ -290,6 +291,11 @@ fn reject_target_flags(f: &mut Flags, usage: &str) -> Result<(), ParseError> {
         )));
     }
     Ok(())
+}
+
+/// Exact rational seconds for a model time (no float round-trip).
+fn parse_exact(s: &str) -> Result<Seconds, ParseError> {
+    parse_signed_time(s).map_err(|e| ParseError::Invalid(format!("invalid time {s:?} ({e})")))
 }
 
 /// Seconds or timecode, optionally negative (a gap head reaches back
@@ -640,6 +646,76 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                         index,
                     })
                 }
+            }
+        }
+        "annotation" => {
+            let sub = f.positional().ok_or_else(|| {
+                ParseError::Invalid(
+                    "usage: :annotation add TEXT (--asset N | --group N) --time T | \
+                     :annotation ls | :annotation rm N | :annotation resolve N"
+                        .to_string(),
+                )
+            })?;
+            match sub.as_str() {
+                "add" => {
+                    let text = f.positional().ok_or_else(|| {
+                        ParseError::Invalid(":annotation add needs TEXT".to_string())
+                    })?;
+                    let asset = opt_u32(&mut f, "asset")?;
+                    let group = opt_u32(&mut f, "group")?;
+                    let source = match (asset, group) {
+                        (Some(id), None) => SourceRef::Asset { id },
+                        (None, Some(id)) => SourceRef::Group { id },
+                        _ => {
+                            return Err(ParseError::Invalid(
+                                ":annotation add needs exactly one of --asset N or --group N"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let time = f
+                        .take("time")
+                        .ok_or_else(|| {
+                            ParseError::Invalid(
+                                ":annotation add needs --time T (source time)".to_string(),
+                            )
+                        })
+                        .and_then(|t| parse_exact(&t))?;
+                    f.finish(":annotation add TEXT (--asset N | --group N) --time T")?;
+                    Ok(Action::AnnotationAdd {
+                        anchor: Anchor::Source { source, time },
+                        kind: AnnotationKind::Note { text },
+                    })
+                }
+                "rm" => {
+                    let id = f
+                        .positional()
+                        .ok_or_else(|| ParseError::Invalid(":annotation rm needs ID".to_string()))?
+                        .parse::<u32>()
+                        .map_err(|_| {
+                            ParseError::Invalid(":annotation rm expects a number".to_string())
+                        })?;
+                    f.finish(":annotation rm ID")?;
+                    Ok(Action::AnnotationRemove { id })
+                }
+                "resolve" => {
+                    let id = f
+                        .positional()
+                        .ok_or_else(|| {
+                            ParseError::Invalid(":annotation resolve needs ID".to_string())
+                        })?
+                        .parse::<u32>()
+                        .map_err(|_| {
+                            ParseError::Invalid(":annotation resolve expects a number".to_string())
+                        })?;
+                    f.finish(":annotation resolve ID")?;
+                    Ok(Action::AnnotationResolve { id })
+                }
+                // A read, handled by the front-end (the TUI lists it).
+                "ls" => Err(ParseError::Unknown("annotation".to_string())),
+                other => Err(ParseError::Invalid(format!(
+                    "unknown annotation command {other:?} — use add, ls, rm or resolve"
+                ))),
             }
         }
         "delete" | "del" => {

@@ -572,3 +572,65 @@ fn ctrl_t_toggles_the_filmstrip_rows() {
     assert!(!app.filmstrip_enabled);
     assert_eq!(app.message, "filmstrips off");
 }
+
+#[test]
+fn note_anchors_the_clip_under_the_playhead() {
+    let path = temp_project_path("note-command");
+    asset_project().save(&path).unwrap();
+    let mut app = App::new(asset_project(), path.clone());
+    app.playhead = 1.0; // clip #1 starts at 0, asset_in 1 → source 2 s
+
+    let notice = cmd(&mut app, "note check the cut");
+    assert!(notice.contains("added annotation #1"), "{notice}");
+    let annotation = &app.project.annotations[0];
+    match &annotation.anchor {
+        nle_core::Anchor::Source {
+            source: nle_core::SourceRef::Asset { id },
+            time,
+        } => {
+            assert_eq!(*id, 1);
+            assert_eq!(*time, Seconds::from_integer(2));
+        }
+        other => panic!("unexpected anchor {other:?}"),
+    }
+    assert_eq!(app.project.depth(), 1, "one undo step");
+
+    // A source anchor is a media time: splitting under it keeps it put.
+    cmd(&mut app, "split --at 2");
+    assert_eq!(app.project.annotations.len(), 1);
+    assert!(cmd(&mut app, "annotation ls").contains("1 annotation(s)"));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
+fn annotation_ls_reads_the_requested_sequence() {
+    let path = temp_project_path("annotation-ls-sequence");
+    let mut p = asset_project();
+    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    p.add_annotation(
+        second,
+        nle_core::AnnotationKind::Note {
+            text: "on the vertical".into(),
+        },
+        nle_core::Anchor::Source {
+            source: nle_core::SourceRef::Asset { id: 1 },
+            time: Seconds::from_integer(0),
+        },
+        nle_core::Provenance {
+            actor: nle_core::Actor::Human,
+            at: 0,
+        },
+    )
+    .unwrap();
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+
+    assert!(cmd(&mut app, "annotation ls").contains("no annotations"));
+    assert!(cmd(&mut app, "annotation ls --sequence 2").contains("1 annotation(s)"));
+    assert!(cmd(&mut app, "annotation ls --sequence 99").contains("not found"));
+    assert!(cmd(&mut app, "annotation ls --sequence nope").contains("expects a number"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}

@@ -24,6 +24,7 @@ mod transitions;
 mod trim;
 mod util;
 
+pub use crate::provenance::{Actor, Provenance};
 pub use clamp::{clamp_project, clamp_project_all, clamp_to_media, purge_stumps};
 pub use clip::{
     delete_clip_by_id, delete_clip_by_id_on, delete_clip_ripple_by_id, delete_clip_ripple_by_id_on,
@@ -40,8 +41,8 @@ pub use extend::{
     extend_gap_end_on, extend_gap_head, extend_gap_head_on, extend_gap_tail, extend_gap_tail_on,
 };
 pub use history::{
-    Actor, AssetChange, Atom, Change, GroupChange, Histories, HistoriesState, History,
-    HistoryState, MediaGroupsChange, Provenance, TrackChange, TracksChange, UndoOutcome,
+    AnnotationsChange, AssetChange, Atom, Change, GroupChange, Histories, HistoriesState, History,
+    HistoryState, MediaGroupsChange, TrackChange, TracksChange, UndoOutcome,
 };
 pub use speed::{set_speed, set_speed_on};
 pub use transitions::{add_transition, retime_transition_on, transition_at};
@@ -64,8 +65,8 @@ pub const MAX_HISTORY: usize = 100;
 /// v15 follows the effects carried on a transition side; v16 carries each
 /// change's `{ actor, at }` provenance; v17 keys the stacks by sequence;
 /// v18 adds grouped changes (one undo step for a batch of actions);
-/// v19 adds media-group creation/removal.
-pub const HISTORY_VERSION: u32 = 19;
+/// v19 adds media-group creation/removal; v20 adds annotations.
+pub const HISTORY_VERSION: u32 = 20;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -143,6 +144,8 @@ pub enum EditError {
     Extend(String),
     #[error("history entry does not apply: {0}")]
     History(String),
+    #[error("annotation #{0} belongs to sequence #{1} — switch to it first")]
+    AnnotationSequence(u32, u32),
     #[error("no frame rate set — add a clip first")]
     NoFps,
     #[error(transparent)]

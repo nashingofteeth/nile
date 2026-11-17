@@ -399,6 +399,11 @@ enum Cmd {
         #[command(subcommand)]
         action: GroupCmd,
     },
+    /// Notes and markers anchored to source media
+    Annotation {
+        #[command(subcommand)]
+        action: AnnotationCmd,
+    },
     /// Timeline tracks: list, add, mute, remove
     Track {
         #[command(subcommand)]
@@ -628,6 +633,41 @@ enum MediaCmd {
     },
 }
 
+/// Annotation subcommands.
+#[derive(Debug, Subcommand)]
+enum AnnotationCmd {
+    /// Add a note anchored to a source time
+    Add {
+        /// Note text
+        text: String,
+        /// Source asset id (from `nile media ls`)
+        #[arg(long, group = "source")]
+        asset: Option<u32>,
+        /// Media group id; --time is then on the group clock
+        #[arg(long, group = "source")]
+        group: Option<u32>,
+        /// Source time (seconds or timecode)
+        #[arg(long, value_name = "TIME")]
+        time: String,
+    },
+    /// List annotations (id, status, anchor, text)
+    Ls {
+        /// Sequence id (default: the active one)
+        #[arg(long)]
+        sequence: Option<u32>,
+    },
+    /// Remove an annotation
+    Rm {
+        /// Annotation id (from `nile annotation ls`)
+        id: u32,
+    },
+    /// Mark an annotation resolved
+    Resolve {
+        /// Annotation id
+        id: u32,
+    },
+}
+
 /// Media-group subcommands.
 #[derive(Debug, Subcommand)]
 enum GroupCmd {
@@ -742,8 +782,8 @@ use cmd::media::{cmd_probe, cmd_trim};
 #[cfg(feature = "tui")]
 use cmd::project::cmd_edit;
 use cmd::project::{
-    cmd_add, cmd_cache, cmd_default, cmd_edl, cmd_group, cmd_init, cmd_media_ls, cmd_seek,
-    cmd_sequence, cmd_show, cmd_track_ls,
+    cmd_add, cmd_annotation_ls, cmd_cache, cmd_default, cmd_edl, cmd_group, cmd_init, cmd_media_ls,
+    cmd_seek, cmd_sequence, cmd_show, cmd_track_ls,
 };
 use cmd::{run_cli_action, to_action};
 
@@ -817,6 +857,9 @@ fn main() -> Result<()> {
             action: MediaCmd::Ls,
         } => return cmd_media_ls(&project),
         Cmd::Group { action } => return cmd_group(&project, action),
+        Cmd::Annotation {
+            action: AnnotationCmd::Ls { sequence },
+        } => return cmd_annotation_ls(&project, *sequence),
         Cmd::ImportEdl {
             file,
             media,
@@ -1158,6 +1201,20 @@ mod tests {
                 contrast: None,
                 saturation: None,
                 path: None,
+            },
+            Cmd::Annotation {
+                action: AnnotationCmd::Add {
+                    text: "hi".into(),
+                    asset: Some(1),
+                    group: None,
+                    time: "0".into(),
+                },
+            },
+            Cmd::Annotation {
+                action: AnnotationCmd::Rm { id: 1 },
+            },
+            Cmd::Annotation {
+                action: AnnotationCmd::Resolve { id: 1 },
             },
         ];
         let mut seen = vec![false; nle_core::action::SLOTS];

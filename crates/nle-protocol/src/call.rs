@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use nle_core::{Action, Project, ProjectDiff, Seconds, Sequence, VideoSettings};
+use nle_core::{Action, Annotation, Project, ProjectDiff, Seconds, Sequence, VideoSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -95,6 +95,11 @@ wire_catalog! {
             #[serde(with = "nle_core::time::rational_ser")]
             at: Seconds,
         } = "playhead.set";
+        /// Notes and markers for one sequence (default: the active one).
+        AnnotationList {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            sequence: Option<u32>,
+        } = "annotation.list";
     }
 }
 
@@ -188,6 +193,7 @@ pub enum Reply {
     Sequences(SequenceList),
     Sequence(SequenceReply),
     Media(MediaList),
+    Annotations(AnnotationList),
     Preview(Preview),
     Playhead(PlayheadReply),
 }
@@ -202,6 +208,7 @@ impl Reply {
             Reply::Sequences(_) => "sequences",
             Reply::Sequence(_) => "sequence",
             Reply::Media(_) => "media",
+            Reply::Annotations(_) => "annotations",
             Reply::Preview(_) => "preview",
             Reply::Playhead(_) => "playhead",
         }
@@ -228,6 +235,10 @@ impl Reply {
                     RpcError::internal(format!("media reply is not serializable: {e}"))
                 })
             }
+            (Reply::Annotations(list), Call::AnnotationList { .. }) => serde_json::to_value(list)
+                .map_err(|e| {
+                    RpcError::internal(format!("annotation reply is not serializable: {e}"))
+                }),
             (Reply::Playhead(at), Call::PlayheadSet { .. }) => {
                 serde_json::to_value(at).map_err(|e| {
                     RpcError::internal(format!("playhead reply is not serializable: {e}"))
@@ -262,6 +273,7 @@ impl Reply {
             Call::MediaList | Call::MediaAdd { .. } => {
                 serde_json::from_value(result).map(Reply::Media)
             }
+            Call::AnnotationList { .. } => serde_json::from_value(result).map(Reply::Annotations),
             Call::PlayheadSet { .. } => serde_json::from_value(result).map(Reply::Playhead),
             Call::ActionPreview { .. } => serde_json::from_value(result).map(Reply::Preview),
             Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {
@@ -292,6 +304,27 @@ pub struct Outcome {
         skip_serializing_if = "Option::is_none"
     )]
     pub playhead: Option<Seconds>,
+}
+
+/// Notes and markers for one sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationList {
+    pub sequence: u32,
+    pub annotations: Vec<Annotation>,
+}
+
+impl AnnotationList {
+    pub fn of(project: &Project, sequence: u32) -> Self {
+        Self {
+            sequence,
+            annotations: project
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.sequence == sequence)
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 /// One sequence as the protocol reports it. `active` lives on the enclosing

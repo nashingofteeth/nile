@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+use crate::annotation::{Anchor, Annotation, AnnotationKind, SourceRef};
 use crate::group::{MediaGroup, MediaPart};
 use crate::media::RawProbe;
+use crate::provenance::Provenance;
 use crate::time::{Seconds, format_seconds, grid_time, rational_ser, secs_f64};
 use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 use crate::timemap::{TimeMap, TimeMapError};
@@ -28,8 +30,8 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// v9 stores each transition side's effects (they render the neighbour);
 /// v10 stores the monotonic model `revision`;
 /// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
-/// v12 adds logical media groups.
-pub const PROJECT_VERSION: u32 = 12;
+/// v12 adds logical media groups; v13 adds annotations.
+pub const PROJECT_VERSION: u32 = 13;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -71,6 +73,18 @@ pub enum ProjectError {
         "asset #{0} is used by media group(s) {1:?} — remove or edit them first (nile group rm ID)"
     )]
     AssetInGroup(u32, Vec<u32>),
+    #[error("annotation #{0} not found")]
+    AnnotationNotFound(u32),
+    #[error("annotation #{0}: {1}")]
+    Annotation(u32, String),
+    #[error(
+        "asset #{0} is used by annotation(s) {1:?} — remove them first (nile annotation rm ID)"
+    )]
+    AssetInAnnotation(u32, Vec<u32>),
+    #[error(
+        "media group #{0} is used by annotation(s) {1:?} — remove them first (nile annotation rm ID)"
+    )]
+    GroupInAnnotation(u32, Vec<u32>),
 }
 
 /// Output sequence settings (set from the first clip, changeable later).
@@ -196,6 +210,9 @@ pub struct Project {
     /// Logical recordings assembled from ordered media parts.
     #[serde(default)]
     pub groups: Vec<MediaGroup>,
+    /// Notes and markers, project-wide (the `sequence` field scopes each one).
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
     /// One or more editable timelines.
     #[serde(default)]
     pub sequences: Vec<Sequence>,
@@ -236,6 +253,7 @@ impl Project {
             revision: 0,
             media: Vec::new(),
             groups: Vec::new(),
+            annotations: Vec::new(),
             sequences: vec![Sequence::new(1, "Sequence 1")],
             active: 1,
         }
@@ -397,6 +415,10 @@ impl Project {
 
     /// Remove a media group by id, returning it.
     pub fn remove_group(&mut self, id: u32) -> Result<MediaGroup, ProjectError> {
+        let annotations = self.group_annotation_usage(id);
+        if !annotations.is_empty() {
+            return Err(ProjectError::GroupInAnnotation(id, annotations));
+        }
         let pos = self
             .groups
             .iter()
@@ -550,6 +572,18 @@ impl Project {
             }
             self.validate_group(group)?;
         }
+        for (i, annotation) in self.annotations.iter().enumerate() {
+            if self.annotations[..i]
+                .iter()
+                .any(|other| other.id == annotation.id)
+            {
+                return Err(ProjectError::Annotation(
+                    annotation.id,
+                    "duplicated id".to_string(),
+                ));
+            }
+            self.validate_annotation(annotation)?;
+        }
         for sequence in &self.sequences {
             if sequence
                 .fps
@@ -683,12 +717,179 @@ impl Project {
         if !groups.is_empty() {
             return Err(ProjectError::AssetInGroup(id, groups));
         }
+        let annotations = self.asset_annotation_usage(id);
+        if !annotations.is_empty() {
+            return Err(ProjectError::AssetInAnnotation(id, annotations));
+        }
         let pos = self
             .media
             .iter()
             .position(|a| a.id == id)
             .ok_or(ProjectError::AssetNotFound(id))?;
         Ok(self.media.remove(pos))
+    }
+
+    /// The annotation with `id`.
+    pub fn annotation(&self, id: u32) -> Option<&Annotation> {
+        self.annotations.iter().find(|a| a.id == id)
+    }
+
+    /// Annotations scoped to `sequence`, in project order.
+    pub fn annotations_for(&self, sequence: u32) -> impl Iterator<Item = &Annotation> + '_ {
+        self.annotations
+            .iter()
+            .filter(move |annotation| annotation.sequence == sequence)
+    }
+
+    /// Replace one sequence's annotations, leaving every other sequence (and
+    /// its relative order) in place. Undo snapshots are sequence-scoped, so a
+    /// write on one sequence can never invalidate another stack's entry.
+    pub(crate) fn replace_annotations(&mut self, sequence: u32, annotations: Vec<Annotation>) {
+        let first = self
+            .annotations
+            .iter()
+            .position(|annotation| annotation.sequence == sequence);
+        self.annotations
+            .retain(|annotation| annotation.sequence != sequence);
+        let at = first
+            .unwrap_or(self.annotations.len())
+            .min(self.annotations.len());
+        self.annotations.splice(at..at, annotations);
+    }
+
+    /// Annotation ids that anchor directly to asset `id`.
+    pub fn asset_annotation_usage(&self, id: u32) -> Vec<u32> {
+        self.annotations
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &a.anchor,
+                    Anchor::Source {
+                        source: SourceRef::Asset { id: asset },
+                        ..
+                    } if *asset == id
+                )
+            })
+            .map(|a| a.id)
+            .collect()
+    }
+
+    /// Annotation ids that anchor to media group `id`.
+    pub fn group_annotation_usage(&self, id: u32) -> Vec<u32> {
+        self.annotations
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &a.anchor,
+                    Anchor::Source {
+                        source: SourceRef::Group { id: group },
+                        ..
+                    } if *group == id
+                )
+            })
+            .map(|a| a.id)
+            .collect()
+    }
+
+    /// Add an annotation to `sequence`, returning its project-wide id.
+    pub fn add_annotation(
+        &mut self,
+        sequence: u32,
+        kind: AnnotationKind,
+        anchor: Anchor,
+        provenance: Provenance,
+    ) -> Result<u32, ProjectError> {
+        let id = self.next_annotation_id();
+        let annotation = Annotation {
+            id,
+            sequence,
+            kind,
+            anchor,
+            provenance,
+            status: crate::annotation::AnnotationStatus::Open,
+        };
+        self.validate_annotation(&annotation)?;
+        self.annotations.push(annotation);
+        Ok(id)
+    }
+
+    /// Remove an annotation, returning it.
+    pub fn remove_annotation(&mut self, id: u32) -> Result<Annotation, ProjectError> {
+        let pos = self
+            .annotations
+            .iter()
+            .position(|a| a.id == id)
+            .ok_or(ProjectError::AnnotationNotFound(id))?;
+        Ok(self.annotations.remove(pos))
+    }
+
+    /// Mark an annotation resolved. Returns whether anything changed.
+    pub fn resolve_annotation(&mut self, id: u32) -> Result<bool, ProjectError> {
+        let annotation = self
+            .annotations
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or(ProjectError::AnnotationNotFound(id))?;
+        if annotation.status == crate::annotation::AnnotationStatus::Resolved {
+            return Ok(false);
+        }
+        annotation.status = crate::annotation::AnnotationStatus::Resolved;
+        Ok(true)
+    }
+
+    fn next_annotation_id(&self) -> u32 {
+        self.annotations.iter().map(|a| a.id).max().unwrap_or(0) + 1
+    }
+
+    fn validate_annotation(&self, annotation: &Annotation) -> Result<(), ProjectError> {
+        if self.sequence(annotation.sequence).is_none() {
+            return Err(ProjectError::Annotation(
+                annotation.id,
+                format!("sequence #{} not found", annotation.sequence),
+            ));
+        }
+        if let AnnotationKind::Note { text } = &annotation.kind
+            && text.trim().is_empty()
+        {
+            return Err(ProjectError::Annotation(
+                annotation.id,
+                "a note needs text".to_string(),
+            ));
+        }
+        match &annotation.anchor {
+            Anchor::Source { source, time } => {
+                if *time < Seconds::from_integer(0) {
+                    return Err(ProjectError::Annotation(
+                        annotation.id,
+                        format!("negative source time {}", format_seconds(time)),
+                    ));
+                }
+                let (asset, file_time) = match source {
+                    SourceRef::Asset { id } => (*id, *time),
+                    SourceRef::Group { id } => {
+                        let group = self.group(*id).ok_or(ProjectError::GroupNotFound(*id))?;
+                        group.group_time(time).ok_or_else(|| {
+                            ProjectError::Annotation(
+                                annotation.id,
+                                format!("group #{} has no media at {}", id, format_seconds(time)),
+                            )
+                        })?
+                    }
+                };
+                let asset = self.pooled(asset)?;
+                if !asset.duration().is_some_and(|end| file_time < end) {
+                    return Err(ProjectError::Annotation(
+                        annotation.id,
+                        format!(
+                            "asset #{} has no media at {}",
+                            asset.id,
+                            format_seconds(&file_time)
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn next_asset_id(&self) -> u32 {
@@ -722,6 +923,9 @@ pub struct ProjectDiff {
     pub assets_added: Vec<u32>,
     pub assets_removed: Vec<u32>,
     pub assets_changed: Vec<u32>,
+    pub annotations_added: Vec<u32>,
+    pub annotations_removed: Vec<u32>,
+    pub annotations_changed: Vec<u32>,
 }
 
 impl ProjectDiff {
@@ -732,6 +936,9 @@ impl ProjectDiff {
             && self.assets_added.is_empty()
             && self.assets_removed.is_empty()
             && self.assets_changed.is_empty()
+            && self.annotations_added.is_empty()
+            && self.annotations_removed.is_empty()
+            && self.annotations_changed.is_empty()
     }
 }
 
@@ -824,6 +1031,23 @@ impl Project {
         for id in after_assets.keys() {
             if !before_assets.contains_key(id) {
                 diff.assets_added.push(*id);
+            }
+        }
+
+        let before_annotations: std::collections::BTreeMap<u32, &Annotation> =
+            self.annotations.iter().map(|a| (a.id, a)).collect();
+        let after_annotations: std::collections::BTreeMap<u32, &Annotation> =
+            after.annotations.iter().map(|a| (a.id, a)).collect();
+        for (id, annotation) in &before_annotations {
+            match after_annotations.get(id) {
+                Some(after) if *annotation != *after => diff.annotations_changed.push(*id),
+                Some(_) => {}
+                None => diff.annotations_removed.push(*id),
+            }
+        }
+        for id in after_annotations.keys() {
+            if !before_annotations.contains_key(id) {
+                diff.annotations_added.push(*id);
             }
         }
         diff
@@ -1115,7 +1339,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 12);
+        assert_eq!(PROJECT_VERSION, 13);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);
@@ -1358,6 +1582,206 @@ mod tests {
             p.group_time_map(99, 0, group, asset),
             Err(ProjectError::SequenceNotFound(99))
         ));
+    }
+
+    fn provenance() -> Provenance {
+        Provenance {
+            actor: crate::Actor::Human,
+            at: 0,
+        }
+    }
+
+    #[test]
+    fn annotations_validate_their_source_anchor() {
+        let mut p = Project::new();
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        let note = |text: &str| AnnotationKind::Note {
+            text: text.to_string(),
+        };
+        let id = p
+            .add_annotation(
+                1,
+                note("hello"),
+                Anchor::Source {
+                    source: SourceRef::Asset { id: asset },
+                    time: Seconds::new(3, 2),
+                },
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(p.annotation(id).unwrap().text(), Some("hello"));
+
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note(" "),
+                Anchor::Source {
+                    source: SourceRef::Asset { id: asset },
+                    time: Seconds::from_integer(0),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("needs text")
+        ));
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note("past the end"),
+                Anchor::Source {
+                    source: SourceRef::Asset { id: asset },
+                    time: Seconds::from_integer(2),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("no media")
+        ));
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note("negative"),
+                Anchor::Source {
+                    source: SourceRef::Asset { id: asset },
+                    time: -Seconds::from_integer(1),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("negative")
+        ));
+
+        let group = p
+            .add_group(
+                "CAM 3",
+                vec![MediaPart {
+                    asset,
+                    group_start: Seconds::from_integer(0),
+                    file_start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(2),
+                }],
+            )
+            .unwrap();
+        p.add_annotation(
+            1,
+            note("on the group clock"),
+            Anchor::Source {
+                source: SourceRef::Group { id: group },
+                time: Seconds::from_integer(1),
+            },
+            provenance(),
+        )
+        .unwrap();
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note("group end is exclusive"),
+                Anchor::Source {
+                    source: SourceRef::Group { id: group },
+                    time: Seconds::from_integer(2),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("no media")
+        ));
+        assert!(matches!(
+            p.add_annotation(
+                99,
+                note("missing sequence"),
+                Anchor::Source {
+                    source: SourceRef::Asset { id: asset },
+                    time: Seconds::from_integer(0),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("sequence #99")
+        ));
+    }
+
+    #[test]
+    fn annotations_guard_the_asset_and_group_they_anchor_to() {
+        let mut p = Project::new();
+        let (used, _) = p.add_asset(
+            "/media/used.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        let (spare, _) = p.add_asset(
+            "/media/spare.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        let id = p
+            .add_annotation(
+                1,
+                AnnotationKind::Marker,
+                Anchor::Source {
+                    source: SourceRef::Asset { id: used },
+                    time: Seconds::from_integer(0),
+                },
+                provenance(),
+            )
+            .unwrap();
+        assert!(matches!(
+            p.remove_asset(used),
+            Err(ProjectError::AssetInAnnotation(asset, ref ids))
+                if asset == used && ids == &vec![id]
+        ));
+        assert!(p.asset(used).is_some(), "the asset survives the refusal");
+
+        let group = p
+            .add_group(
+                "CAM 3",
+                vec![MediaPart {
+                    asset: spare,
+                    group_start: Seconds::from_integer(0),
+                    file_start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(2),
+                }],
+            )
+            .unwrap();
+        let group_annotation = p
+            .add_annotation(
+                1,
+                AnnotationKind::Marker,
+                Anchor::Source {
+                    source: SourceRef::Group { id: group },
+                    time: Seconds::from_integer(1),
+                },
+                provenance(),
+            )
+            .unwrap();
+        assert!(matches!(
+            p.remove_group(group),
+            Err(ProjectError::GroupInAnnotation(id, ref ids))
+                if id == group && ids == &vec![group_annotation]
+        ));
+        assert!(p.group(group).is_some(), "the group survives the refusal");
+    }
+
+    #[test]
+    fn annotations_round_trip_through_the_project_file() {
+        let mut p = Project::new();
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("10", 320, 240, "30/1", false),
+        );
+        p.add_annotation(
+            1,
+            AnnotationKind::Note {
+                text: "check the cut".into(),
+            },
+            Anchor::Source {
+                source: SourceRef::Asset { id: asset },
+                time: Seconds::new(5, 2),
+            },
+            provenance(),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nile.json");
+        p.save(&path).unwrap();
+        let loaded = Project::load(&path).unwrap();
+        assert_eq!(loaded.annotations, p.annotations);
+        assert_eq!(loaded.annotations[0].text(), Some("check the cut"));
     }
 
     #[test]

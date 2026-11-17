@@ -597,6 +597,58 @@ pub(crate) fn cmd_group(project_path: &Path, action: &GroupCmd) -> Result<()> {
     }
 }
 
+/// `nile annotation ls [--sequence ID]` — notes and markers, newest id last.
+pub(crate) fn cmd_annotation_ls(project_path: &Path, sequence: Option<u32>) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let sequence = sequence.unwrap_or(project.active_id());
+    project
+        .sequence(sequence)
+        .ok_or(nle_core::ProjectError::SequenceNotFound(sequence))?;
+    let annotations: Vec<&nle_core::Annotation> = project
+        .annotations
+        .iter()
+        .filter(|a| a.sequence == sequence)
+        .collect();
+    if annotations.is_empty() {
+        say!("no annotations on sequence #{sequence} — `nile annotation add TEXT`");
+        return Ok(());
+    }
+    say!(
+        "{} — {} annotation(s) on sequence #{sequence}",
+        project_path.display(),
+        annotations.len()
+    );
+    for annotation in annotations {
+        let anchor = match &annotation.anchor {
+            nle_core::Anchor::Source { source, time } => match source {
+                nle_core::SourceRef::Asset { id } => {
+                    format!("asset #{id} @ {} s", format_seconds(time))
+                }
+                nle_core::SourceRef::Group { id } => {
+                    format!("group #{id} @ {} s", format_seconds(time))
+                }
+            },
+        };
+        let status = match annotation.status {
+            nle_core::AnnotationStatus::Open => "open",
+            nle_core::AnnotationStatus::Resolved => "resolved",
+        };
+        match &annotation.kind {
+            nle_core::AnnotationKind::Note { text } => say!(
+                "  #{:<3} [{status}] {:<6} {anchor} — {text:?}",
+                annotation.id,
+                "note"
+            ),
+            nle_core::AnnotationKind::Marker => say!(
+                "  #{:<3} [{status}] {:<6} {anchor}",
+                annotation.id,
+                "marker"
+            ),
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_track_ls(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
     say!(
