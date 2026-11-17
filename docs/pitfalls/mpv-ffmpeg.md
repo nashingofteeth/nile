@@ -63,3 +63,8 @@ just no longer drags the audio clock with it.
 - A helper that emits a filter chain must push its output label too: the
   multi-track audio pad emitted its `anullsrc…` chain but forgot the label,
   and ffmpeg reported a filter with an unconnected pad.
+- A LUT path needs two escapes in this order: option-level (`\`, `:`, `'` each
+  take a backslash), then the graph quote, where `'` is `'\''`. Escaping only
+  the graph level makes `a:b.cube` fail (exit 234) and `it's.cube` open the
+  wrong file. Guards: `a_lut_path_survives_the_option_and_graph_parsers`, and
+  the end-to-end `a_lut_path_with_metacharacters_exports`.
