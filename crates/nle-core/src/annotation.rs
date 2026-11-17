@@ -155,11 +155,11 @@ pub(crate) fn reanchor_timeline(
 }
 
 fn resolve_point(point: &ClipPoint, before: &[Track], after: &[Track]) -> Option<ClipPoint> {
-    let old = find_clip(before, point.clip)?;
+    let (track_index, segment_index, old) = find_clip(before, point.clip)?;
     if point.source < old.asset_in || point.source >= old.asset_out {
         return None;
     }
-    if let Some(new) = find_clip(after, point.clip)
+    if let Some((_, _, new)) = find_clip(after, point.clip)
         && new.asset == old.asset
         && point.source >= new.asset_in
         && point.source < new.asset_out
@@ -169,18 +169,28 @@ fn resolve_point(point: &ClipPoint, before: &[Track], after: &[Track]) -> Option
             source: point.source,
         });
     }
-    // A split replaces one clip with two: the source point now lives in the
-    // new piece. Require a unique match so a reused asset cannot guess.
-    let mut candidates = after
+
+    // A split replaces one clip with two on the same track, inside the old
+    // clip's timeline span and sharing one source boundary. Restricting the
+    // fallback this far keeps a duplicate take elsewhere (another track, or
+    // later on the same track) from silently stealing the note.
+    let old_start = before[track_index].start_of(segment_index);
+    let old_end = old_start + old.duration();
+    let track = after.get(track_index)?;
+    let mut candidates = track
+        .segments
         .iter()
-        .flat_map(|track| &track.segments)
-        .filter_map(|segment| match segment {
+        .enumerate()
+        .filter_map(|(index, segment)| match segment {
             Segment::Clip(clip)
-                if clip.asset == old.asset
+                if clip.id != old.id
+                    && clip.asset == old.asset
                     && point.source >= clip.asset_in
-                    && point.source < clip.asset_out =>
+                    && point.source < clip.asset_out
+                    && (clip.asset_in == old.asset_in || clip.asset_out == old.asset_out) =>
             {
-                Some(clip)
+                let start = track.start_of(index);
+                (start >= old_start && start + clip.duration() <= old_end).then_some(clip)
             }
             _ => None,
         });
@@ -194,14 +204,17 @@ fn resolve_point(point: &ClipPoint, before: &[Track], after: &[Track]) -> Option
     })
 }
 
-fn find_clip(tracks: &[Track], id: u32) -> Option<&Clip> {
-    tracks
-        .iter()
-        .flat_map(|track| &track.segments)
-        .find_map(|segment| match segment {
-            Segment::Clip(clip) if clip.id == id => Some(clip),
-            _ => None,
-        })
+fn find_clip(tracks: &[Track], id: u32) -> Option<(usize, usize, &Clip)> {
+    for (track_index, track) in tracks.iter().enumerate() {
+        for (segment_index, segment) in track.segments.iter().enumerate() {
+            if let Segment::Clip(clip) = segment
+                && clip.id == id
+            {
+                return Some((track_index, segment_index, clip));
+            }
+        }
+    }
+    None
 }
 
 fn point_position(point: &ClipPoint, tracks: &[Track]) -> Option<Seconds> {
@@ -351,10 +364,38 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_take_on_another_track_does_not_steal_a_note() {
+        let before = vec![
+            track(vec![clip(1, 1, 0, 10)]),
+            track(vec![clip(2, 1, 0, 10)]),
+        ];
+        // The owning clip is gone; the same footage on another track is not
+        // its split sibling.
+        let after = vec![track(Vec::new()), track(vec![clip(2, 1, 0, 10)])];
+        let (kept, warnings) = reanchor_timeline(&[note(1, (1, 5), (1, 5))], &before, &after);
+        assert!(kept.is_empty(), "the note did not teleport to track 2");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_copy_outside_the_old_span_does_not_steal_a_note() {
+        let before = vec![track(vec![clip(1, 1, 0, 10), clip(3, 1, 0, 10)])];
+        // Deleting clip #1 leaves a gap; the later copy starts after the old
+        // span, so it is not a split sibling.
+        let after = vec![track(vec![
+            Segment::Gap(crate::timeline::Gap { duration: s(10) }),
+            clip(3, 1, 0, 10),
+        ])];
+        let (kept, warnings) = reanchor_timeline(&[note(1, (1, 5), (1, 5))], &before, &after);
+        assert!(kept.is_empty(), "the note did not move to the later copy");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
     fn an_ambiguous_reused_asset_is_dropped() {
-        let before = vec![track(vec![clip(1, 1, 0, 10)])];
-        // The old id is gone and two new clips cover the same source (a
-        // duplicate); neither is evidence for which one owns the note.
+        let before = vec![track(vec![clip(1, 1, 0, 20)])];
+        // Two new pieces inside the old span both read that source; neither
+        // is evidence for which one owns the note.
         let after = vec![track(vec![clip(2, 1, 0, 10), clip(3, 1, 0, 10)])];
         let (kept, warnings) = reanchor_timeline(&[note(1, (1, 5), (1, 5))], &before, &after);
         assert!(kept.is_empty(), "two candidates are not evidence");
