@@ -42,8 +42,8 @@ pub enum TrackKind {
 /// serializable and safe to hand to the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
-    /// A crop window, as percentages of the source frame: `x`/`y` are the
-    /// top-left corner, `w`/`h` the window size. The kept picture stays where
+    /// A crop window, as percentages of the picture at this point in the
+    /// chain: `x`/`y` are the top-left corner, `w`/`h` the window size. The kept picture stays where
     /// it is; the surrounding strips become transparent, so an upper track
     /// shows through them (black when nothing is below).
     Crop { x: f64, y: f64, w: f64, h: f64 },
@@ -78,19 +78,29 @@ impl Effect {
         }
     }
 
-    /// Every parameter is finite and inside its range. Non-finite values
-    /// cannot be represented in the project JSON (serde writes them as
-    /// `null`), so refuse them at the model boundary.
-    pub fn is_valid(&self) -> bool {
+    /// Why this effect cannot be persisted, or `None` when it is valid.
+    pub fn validation_error(&self) -> Option<&'static str> {
         if !self.is_finite() {
-            return false;
+            return Some("effect parameter is non-finite");
         }
         match self {
-            Effect::Crop { x, y, w, h } => {
-                *x >= 0.0 && *y >= 0.0 && *w > 0.0 && *h > 0.0 && x + w <= 100.0 && y + h <= 100.0
+            Effect::Crop { x, y, w, h }
+                if *x < 0.0
+                    || *y < 0.0
+                    || *w <= 0.0
+                    || *h <= 0.0
+                    || x + w > 100.0
+                    || y + h > 100.0 =>
+            {
+                Some("effect parameter is out of range")
             }
-            _ => true,
+            _ => None,
         }
+    }
+
+    /// Every parameter is finite and inside its range.
+    pub fn is_valid(&self) -> bool {
+        self.validation_error().is_none()
     }
 
     /// Every numeric parameter is finite.
@@ -130,7 +140,7 @@ impl Effect {
 
     /// The ffmpeg filters for a whole chain, comma-joined (empty when nothing
     /// renders). The picture box is threaded through: `scale` resizes the
-    /// current box about its centre, `crop` insets the box's edges, and colour
+    /// current box about its centre, `crop` selects a window inside it, and colour
     /// effects leave it alone. Anything outside the box is transparent, so a
     /// lower track shows through (black when none does — the classic
     /// single-track graph drops alpha at the end).
@@ -787,8 +797,8 @@ impl Timeline {
                         if c.speed <= Seconds::from_integer(0) {
                             return Err(bad("clip has a non-positive speed"));
                         }
-                        if c.effects.iter().any(|e| !e.is_valid()) {
-                            return Err(bad("effect has a non-finite parameter"));
+                        if let Some(why) = c.effects.iter().find_map(Effect::validation_error) {
+                            return Err(bad(why));
                         }
                     }
                     Segment::Gap(g) => {
@@ -819,8 +829,9 @@ impl Timeline {
                                         "transition side has a non-positive source span",
                                     ));
                                 }
-                                if effects.iter().any(|e| !e.is_valid()) {
-                                    return Err(bad("effect has a non-finite parameter"));
+                                if let Some(why) = effects.iter().find_map(Effect::validation_error)
+                                {
+                                    return Err(bad(why));
                                 }
                             }
                         }
@@ -893,6 +904,48 @@ mod tests {
         });
         t.tracks[0].segments.push(Segment::Clip(c));
         assert!(matches!(t.validate(), Err(TimelineError::Corrupt(_))));
+    }
+
+    #[test]
+    fn out_of_range_effect_parameters_report_the_range() {
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        // Finite, but the window runs past the picture.
+        c.effects.push(Effect::Crop {
+            x: 90.0,
+            y: 0.0,
+            w: 50.0,
+            h: 100.0,
+        });
+        t.tracks[0].segments.push(Segment::Clip(c));
+        match t.validate() {
+            Err(TimelineError::Corrupt(message)) => {
+                assert!(message.contains("out of range"), "{message}");
+            }
+            other => panic!("expected a range refusal, got {other:?}"),
+        }
+
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        c.effects.push(Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: f64::NAN,
+            h: 100.0,
+        });
+        t.tracks[0].segments.push(Segment::Clip(c));
+        match t.validate() {
+            Err(TimelineError::Corrupt(message)) => {
+                assert!(message.contains("non-finite"), "{message}");
+            }
+            other => panic!("expected a finite refusal, got {other:?}"),
+        }
     }
 
     #[test]

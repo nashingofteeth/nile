@@ -378,8 +378,8 @@ pub struct EffectArgs {
     /// size; scale 100 = unchanged).
     pub w: Option<f64>,
     pub h: Option<f64>,
-    /// crop/offset: x/y as percentages of the canvas (crop top-left; offset
-    /// 0 = no move).
+    /// crop/offset: x/y as percentages of the picture at that point (crop
+    /// top-left; offset 0 = no move).
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub brightness: Option<f64>,
@@ -402,6 +402,16 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
         "crop" => {
             let x = pct(a.x, "crop x", 0.0, 0.0, 100.0)?;
             let y = pct(a.y, "crop y", 0.0, 0.0, 100.0)?;
+            if 100.0 - x < 1.0 {
+                return Err(ParseError::Invalid(
+                    "crop x leaves less than 1% width".to_string(),
+                ));
+            }
+            if 100.0 - y < 1.0 {
+                return Err(ParseError::Invalid(
+                    "crop y leaves less than 1% height".to_string(),
+                ));
+            }
             let w = pct(a.w, "crop width", 100.0 - x, 1.0, 100.0)?;
             let h = pct(a.h, "crop height", 100.0 - y, 1.0, 100.0)?;
             if x + w > 100.0 {
