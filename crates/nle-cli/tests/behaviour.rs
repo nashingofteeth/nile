@@ -458,7 +458,7 @@ fn show_json_exposes_time_maps_and_groups() {
     s.base();
     let project: serde_json::Value =
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
-    assert_eq!(project["version"], 14);
+    assert_eq!(project["version"], 15);
     assert_eq!(project["groups"], serde_json::json!([]));
     assert!(
         project.get("time_maps").is_none(),
@@ -918,7 +918,7 @@ fn a_crop_masks_in_place_and_reveals_what_is_below() {
     s.ok(&["init", "--force"]);
     s.ok(&["import", "red.mp4", "green.mp4"]);
     s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
-    s.ok(&["effect", "crop", "--clip", "1", "--left", "50"]);
+    s.ok(&["effect", "crop", "--clip", "1", "--x", "50", "--w", "50"]);
     s.export("solo.mp4");
     // 320×240: the left half is masked, the kept half does not zoom.
     s.assert_px_at(
@@ -972,7 +972,7 @@ fn a_crop_masks_in_place_and_reveals_what_is_below() {
         "--out",
         "2",
     ]);
-    s.ok(&["effect", "crop", "--clip", "2", "--left", "50"]);
+    s.ok(&["effect", "crop", "--clip", "2", "--x", "50", "--w", "50"]);
     s.export("over.mp4");
     s.assert_px_at(
         "over.mp4",
@@ -1675,7 +1675,7 @@ fn effect_index_replaces_or_refuses() {
     let s = Sandbox::new();
     s.base();
     s.ok(&["effect", "eq", "--clip", "1", "--brightness", "0.1"]);
-    s.ok(&["effect", "crop", "--clip", "1", "--left", "10"]);
+    s.ok(&["effect", "crop", "--clip", "1", "--x", "10", "--w", "90"]);
     // [eq, crop]: row 0 becomes scale, in place.
     s.ok(&[
         "effect", "scale", "--clip", "1", "--index", "0", "--w", "50", "--h", "50",
@@ -1685,7 +1685,7 @@ fn effect_index_replaces_or_refuses() {
 
     // A kind already held by another row is refused (one per kind).
     let out = s.err(&[
-        "effect", "crop", "--clip", "1", "--index", "0", "--left", "10",
+        "effect", "crop", "--clip", "1", "--index", "0", "--x", "10", "--w", "90",
     ]);
     assert!(out.contains("already has a crop"), "{out}");
 
@@ -1947,7 +1947,7 @@ fn a_cropped_overlay_previews_the_composite() {
         "--out",
         "2",
     ]);
-    s.ok(&["effect", "crop", "--clip", "2", "--left", "50"]);
+    s.ok(&["effect", "crop", "--clip", "2", "--x", "50", "--w", "50"]);
     let edl = s.edl();
     assert!(
         edl.contains("red.mp4"),
@@ -2044,7 +2044,7 @@ fn cli_only_guards() {
     );
 
     s.base();
-    let out = s.err(&["effect", "crop", "--clip", "1", "--left", "101"]);
+    let out = s.err(&["effect", "crop", "--clip", "1", "--x", "101"]);
     assert!(
         out.contains("0–100"),
         "an out-of-range crop inset is refused:\n{out}"
