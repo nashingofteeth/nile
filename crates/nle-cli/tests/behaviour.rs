@@ -507,6 +507,57 @@ fn show_json_exposes_time_maps_and_groups() {
 }
 
 #[test]
+fn export_writes_a_frame_map_beside_the_output() {
+    let s = Sandbox::new();
+    s.base();
+    let summary = s.export_report("mapped.mp4");
+    assert!(
+        summary.contains("report mapped.mp4.report.json"),
+        "{summary}"
+    );
+
+    let sidecar = nle_core::RenderReport::sidecar_path(&s.file("mapped.mp4"));
+    let report = nle_core::RenderReport::load(&sidecar).expect("report sidecar");
+    assert_eq!(report.sequence, 1);
+    assert_eq!(report.frame_count, s.frame_count("mapped.mp4"));
+    assert_eq!(
+        report
+            .frame_map
+            .last()
+            .map(|span| span.start_frame + span.frames),
+        Some(report.frame_count),
+        "the map covers the output"
+    );
+
+    let frame = report.locate(15).expect("frame 15");
+    assert!(
+        matches!(
+            frame,
+            nle_core::FrameLocation::Clip { asset: 1, source, .. }
+                if source == nle_core::Seconds::new(1, 2)
+        ),
+        "{frame:?}"
+    );
+
+    let listing = s.ok(&["report", "mapped.mp4"]);
+    assert!(listing.contains("180 frames @ 30/1"), "{listing}");
+    assert!(listing.contains("6 s"), "{listing}");
+    let json = s.ok(&["report", "mapped.mp4", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("report JSON");
+    assert_eq!(value["frame_count"], report.frame_count);
+    assert!(
+        value["frame_map"]
+            .as_array()
+            .is_some_and(|spans| !spans.is_empty())
+    );
+
+    // The report belongs to the output, not the project: remove the project
+    // and it still reads.
+    std::fs::remove_file(s.file(P)).unwrap();
+    assert!(s.ok(&["report", "mapped.mp4"]).contains("180 frames"));
+}
+
+#[test]
 fn cli_undo_follows_the_active_sequence() {
     let s = Sandbox::new();
     s.base();
