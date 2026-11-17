@@ -9,14 +9,15 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+use crate::annotation::{Anchor, Annotation, AnnotationKind};
 use crate::group::MediaGroup;
 use crate::media::RawProbe;
 use crate::project::{Asset, Project};
+use crate::provenance::{Actor, Provenance};
 use crate::time::Seconds;
 use crate::timeline::{
     Clip, Effect, Gap, Segment, Track, Transition, TransitionKind, TransitionSource,
@@ -25,37 +26,6 @@ use crate::timeline::{
 use super::clamp::clamp_project;
 use super::util::video_track_index;
 use super::{Batch, EditError, EditOp, HISTORY_VERSION, MAX_HISTORY};
-
-/// Who made a recorded change. The protocol will mark agent/analysis edits;
-/// the TUI and one-shot CLI default to a human.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum Actor {
-    #[default]
-    Human,
-    Agent(String),
-    Analysis(String),
-}
-
-/// When and by whom a change was recorded. The human-readable label is the
-/// change's existing `desc`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Provenance {
-    pub actor: Actor,
-    /// Unix epoch milliseconds.
-    pub at: u64,
-}
-
-impl Provenance {
-    fn now(actor: &Actor) -> Self {
-        Self {
-            actor: actor.clone(),
-            at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-        }
-    }
-}
 
 /// Undo/redo stack of project changes. `apply` (timeline) and the asset
 /// add/remove methods (pool) are the only ways in: each snapshots the
@@ -314,6 +284,74 @@ impl History {
         }));
         project.bump_revision();
         Ok(desc)
+    }
+
+    /// Add a source-anchored annotation and record the list.
+    pub fn add_annotation(
+        &mut self,
+        project: &mut Project,
+        sequence: u32,
+        kind: AnnotationKind,
+        anchor: Anchor,
+        playhead: i64,
+    ) -> Result<u32, EditError> {
+        let before = project.annotations.clone();
+        let id = project.add_annotation(sequence, kind, anchor, self.provenance())?;
+        let desc = format!("add annotation #{id}");
+        self.push_change(Change::Annotations(AnnotationsChange {
+            before,
+            after: project.annotations.clone(),
+            desc,
+            playhead,
+            provenance: self.provenance(),
+        }));
+        project.bump_revision();
+        Ok(id)
+    }
+
+    /// Remove an annotation and record the list.
+    pub fn remove_annotation(
+        &mut self,
+        project: &mut Project,
+        id: u32,
+        playhead: i64,
+    ) -> Result<String, EditError> {
+        let before = project.annotations.clone();
+        let removed = project.remove_annotation(id)?;
+        let desc = format!("remove annotation #{}", removed.id);
+        self.push_change(Change::Annotations(AnnotationsChange {
+            before,
+            after: project.annotations.clone(),
+            desc: desc.clone(),
+            playhead,
+            provenance: self.provenance(),
+        }));
+        project.bump_revision();
+        Ok(desc)
+    }
+
+    /// Mark an annotation resolved. Resolving an already-resolved one is a
+    /// no-op: it records nothing, so undo does not step through dead entries.
+    pub fn resolve_annotation(
+        &mut self,
+        project: &mut Project,
+        id: u32,
+        playhead: i64,
+    ) -> Result<(String, bool), EditError> {
+        let before = project.annotations.clone();
+        if !project.resolve_annotation(id)? {
+            return Ok((format!("annotation #{id} is already resolved"), false));
+        }
+        let desc = format!("resolve annotation #{id}");
+        self.push_change(Change::Annotations(AnnotationsChange {
+            before,
+            after: project.annotations.clone(),
+            desc: desc.clone(),
+            playhead,
+            provenance: self.provenance(),
+        }));
+        project.bump_revision();
+        Ok((desc, true))
     }
 
     /// Set the actor recorded on subsequent changes.
@@ -677,6 +715,7 @@ pub enum Change {
     Assets(AssetChange),
     Group(GroupChange),
     MediaGroups(MediaGroupsChange),
+    Annotations(AnnotationsChange),
 }
 
 impl Change {
@@ -687,6 +726,7 @@ impl Change {
             Change::Assets(c) => &c.desc,
             Change::Group(c) => &c.desc,
             Change::MediaGroups(c) => &c.desc,
+            Change::Annotations(c) => &c.desc,
         }
     }
 
@@ -697,6 +737,7 @@ impl Change {
             Change::Assets(c) => c.playhead,
             Change::Group(c) => c.playhead,
             Change::MediaGroups(c) => c.playhead,
+            Change::Annotations(c) => c.playhead,
         }
     }
 
@@ -707,6 +748,7 @@ impl Change {
             Change::Assets(c) => &c.provenance,
             Change::Group(c) => &c.provenance,
             Change::MediaGroups(c) => &c.provenance,
+            Change::Annotations(c) => &c.provenance,
         }
     }
 }
@@ -768,6 +810,16 @@ pub struct GroupChange {
 pub struct MediaGroupsChange {
     pub before: Vec<MediaGroup>,
     pub after: Vec<MediaGroup>,
+    pub desc: String,
+    pub playhead: i64,
+    pub provenance: Provenance,
+}
+
+/// An annotation-list edit: adding, removing or resolving an annotation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationsChange {
+    pub before: Vec<Annotation>,
+    pub after: Vec<Annotation>,
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
@@ -880,6 +932,7 @@ fn substitute(project: &mut Project, change: &Change, forward: bool) -> Result<(
         Change::Tracks(c) => substitute_tracks(project, c, forward)?,
         Change::Assets(c) => substitute_assets(project, c, forward)?,
         Change::MediaGroups(c) => substitute_groups(project, c, forward)?,
+        Change::Annotations(c) => substitute_annotations(project, c, forward)?,
         Change::Group(c) => {
             if forward {
                 for change in &c.changes {
@@ -964,6 +1017,27 @@ fn substitute_groups(
 
 /// Verify the live media pool matches one side of `change` (exact equality,
 /// including probes) and substitute the other.
+/// Verify the live annotation list matches one side of `change` (exact
+/// equality) and substitute the other.
+fn substitute_annotations(
+    project: &mut Project,
+    change: &AnnotationsChange,
+    forward: bool,
+) -> Result<(), EditError> {
+    let (expected, write) = if forward {
+        (&change.before, &change.after)
+    } else {
+        (&change.after, &change.before)
+    };
+    if project.annotations != *expected {
+        return Err(EditError::History(
+            "annotations changed outside the undo stack".to_string(),
+        ));
+    }
+    project.annotations = write.clone();
+    Ok(())
+}
+
 fn substitute_assets(
     project: &mut Project,
     change: &AssetChange,

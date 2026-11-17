@@ -18,6 +18,7 @@ use std::ops::Deref;
 use std::path::Path;
 
 use crate::action::{self, Action, Outcome, Register};
+use crate::annotation::{Anchor, AnnotationKind};
 use crate::edit::{self, Actor, Batch, EditError, Histories, History, UndoOutcome};
 use crate::project::{Project, ProjectDiff, ProjectError, VideoSettings};
 use crate::time::{Seconds, frame_of};
@@ -372,6 +373,41 @@ impl Document {
         self.histories
             .get_mut(active)
             .remove_group(&mut self.project, id, playhead)
+    }
+
+    /// Add an annotation to the active sequence.
+    pub fn add_annotation(
+        &mut self,
+        kind: AnnotationKind,
+        anchor: Anchor,
+        playhead: i64,
+    ) -> Result<u32, EditError> {
+        let active = self.project.active_id();
+        self.histories.get_mut(active).add_annotation(
+            &mut self.project,
+            active,
+            kind,
+            anchor,
+            playhead,
+        )
+    }
+
+    pub fn remove_annotation(&mut self, id: u32, playhead: i64) -> Result<String, EditError> {
+        let active = self.project.active_id();
+        self.histories
+            .get_mut(active)
+            .remove_annotation(&mut self.project, id, playhead)
+    }
+
+    pub fn resolve_annotation(
+        &mut self,
+        id: u32,
+        playhead: i64,
+    ) -> Result<(String, bool), EditError> {
+        let active = self.project.active_id();
+        self.histories
+            .get_mut(active)
+            .resolve_annotation(&mut self.project, id, playhead)
     }
 
     /// Add assets and a media group as one undo step. `files` is the full
