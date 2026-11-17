@@ -549,6 +549,10 @@ shared by the TUI and agents — with no clipgen code present.
   `wordsComplete`, `absent`, `noSliver`, …) evaluated against a render
   report. Protocol + TUI add/list/resolve; provenance shows human/model/
   analysis.
+- Landed so far: source-anchored notes and markers (project v13, history
+  v20), `nile annotation add|ls|rm|resolve`, `:note`, and the additive
+  `annotation.list` method. Remaining: clip-relative timeline anchors and
+  remapping, expectation payloads, and the gate.
 - **Gate:** ripple/split/trim/undo move timeline annotations while source
   annotations stay put; a note round-trips through the protocol and is
   visible in the TUI.
