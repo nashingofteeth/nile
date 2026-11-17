@@ -44,7 +44,7 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v12, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v14, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
@@ -479,8 +479,8 @@ shared by the TUI and agents — with no clipgen code present.
 - `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
   land now; derived sequences come later but must be traceable from day one.
 - Export takes a sequence; proxy/export caches key per sequence.
-- Landed: v12 projects with shared media and media groups, v19 per-sequence
-  histories with
+- Landed: v14 projects with shared media, media groups and annotations, v21
+  per-sequence histories with
   grouped batches, `nile sequence ls|add|use`, `:sequence`, and `--sequence`
   on `show`/`edl`/`export` (it reads another timeline without switching). The
   protocol resolves the sequence in step 2 (`sequence.*`).
@@ -523,7 +523,7 @@ shared by the TUI and agents — with no clipgen code present.
   every analysis consumer need.
 - Importers emit maps alongside clips from the start; `nile show --json --maps`
   exposes the mapping so it is exercised, not dead code.
-- Landed: `TimeMap`, `MediaGroup`/`MediaPart`, project v12, validation,
+- Landed: `TimeMap`, `MediaGroup`/`MediaPart`, project v14, validation,
   `MediaGroup::asset_map` + `Project::group_time_map` (timeline → file →
   group), `nile show --json --maps` (per-track/asset maps plus `group_maps`),
   and importer grouping: `nile import --group NAME FILES…` adds the assets and
@@ -549,10 +549,12 @@ shared by the TUI and agents — with no clipgen code present.
   `wordsComplete`, `absent`, `noSliver`, …) evaluated against a render
   report. Protocol + TUI add/list/resolve; provenance shows human/model/
   analysis.
-- Landed so far: source-anchored notes and markers (project v13, history
-  v20), `nile annotation add|ls|rm|resolve`, `:note`, and the additive
-  `annotation.list` method. Remaining: clip-relative timeline anchors and
-  remapping, expectation payloads, and the gate.
+- Landed: source- and clip-relative timeline notes and markers (project v14,
+  history v21), `nile annotation add|ls|rm|resolve` (including `--timeline`),
+  `:note`, and the additive `annotation.list` method. Timeline anchors follow
+  trims/splits/ripples, a split re-anchors, and undo restores dropped notes.
+  Remaining: expectation payloads (after the render report) and range
+  creation.
 - **Gate:** ripple/split/trim/undo move timeline annotations while source
   annotations stay put; a note round-trips through the protocol and is
   visible in the TUI.
