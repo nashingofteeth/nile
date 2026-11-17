@@ -668,11 +668,13 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                                 ":annotation add --timeline needs --at T".to_string(),
                             )
                         })?;
+                        let to = opt_time(&mut f, "to")?;
                         let track = parse_track(&mut f, d)?;
-                        f.finish(":annotation add TEXT --timeline [--at T] [--track N]")?;
+                        f.finish(":annotation add TEXT --timeline [--at T] [--to T] [--track N]")?;
                         return Ok(Action::AnnotationAddAt {
                             track,
                             at,
+                            to,
                             kind: AnnotationKind::Note { text },
                         });
                     }

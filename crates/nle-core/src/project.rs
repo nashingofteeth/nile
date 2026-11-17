@@ -897,7 +897,7 @@ impl Project {
                                 ),
                             )
                         })?;
-                    if point.source < clip.asset_in || point.source >= clip.asset_out {
+                    if point.source < clip.asset_in || point.source > clip.asset_out {
                         return Err(ProjectError::Annotation(
                             annotation.id,
                             format!(
@@ -1820,13 +1820,29 @@ mod tests {
             )
             .is_ok()
         );
+        // A range may end on the clip's tail; the boundary is a position.
+        let tail = p
+            .add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::from_integer(1)),
+                    end: point(Seconds::from_integer(2)),
+                },
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(
+            p.annotation_span(p.annotation(tail).unwrap()),
+            Some((Seconds::from_integer(1), Seconds::from_integer(2)))
+        );
         assert!(matches!(
             p.add_annotation(
                 1,
                 note(),
                 Anchor::Timeline {
                     start: point(Seconds::from_integer(0)),
-                    end: point(Seconds::from_integer(2)),
+                    end: point(Seconds::new(5, 2)),
                 },
                 provenance(),
             ),

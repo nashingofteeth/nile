@@ -374,6 +374,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 time,
                 timeline,
                 at,
+                to,
                 track,
             } => Some((|| {
                 if *timeline {
@@ -383,6 +384,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     return Ok(Action::AnnotationAddAt {
                         track: cli_index(*track, "--track")?,
                         at: cli_time(at)?,
+                        to: to.as_deref().map(cli_time).transpose()?,
                         kind: nle_core::AnnotationKind::Note { text: text.clone() },
                     });
                 }
