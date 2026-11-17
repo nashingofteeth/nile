@@ -27,7 +27,7 @@ use nle_core::{Project, Seconds};
 use nle_ffmpeg::trim::run_ffmpeg_opt;
 use nle_ffmpeg::{Encoder, ExportSpec, export_range_quiet};
 
-use crate::cmd::export::ExportOptions;
+use crate::cmd::export::{ExportOptions, write_report};
 use crate::cmd::media::parse_f64;
 use crate::log;
 use crate::proxy::{self, PruneReport};
@@ -133,8 +133,21 @@ pub(crate) fn run(
     let frames = nle_ffmpeg::frame_count(output)
         .unwrap_or_else(|| (secs_f64(&project.timeline.end()) * secs_f64(&fps)).round() as i64);
     let fallback = if fallback { " · CPU fallback" } else { "" };
+    let windows: Vec<nle_core::RenderWindow> = chunks
+        .iter()
+        .filter_map(|chunk| {
+            let start = (secs_f64(&chunk.a) * secs_f64(&fps)).round() as i64;
+            let end = (secs_f64(&chunk.b) * secs_f64(&fps)).round() as i64;
+            (end > start).then_some(nle_core::RenderWindow {
+                start_frame: start,
+                frames: end - start,
+                encoder: Some(encoder.label().to_string()),
+            })
+        })
+        .collect();
+    let report = write_report(project, output, frames, encoder, Some(windows));
     Ok(Some(format!(
-        "✓ {}  ({} s · {} frames @ {}/{}) · {}{fallback} · {workers}-way",
+        "✓ {}  ({} s · {} frames @ {}/{}) · {}{fallback} · {workers}-way{report}",
         output.display(),
         shown,
         frames,
