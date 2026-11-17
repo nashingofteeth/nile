@@ -31,8 +31,8 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// v10 stores the monotonic model `revision`;
 /// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
 /// v12 adds logical media groups; v13 adds annotations; v14 adds
-/// clip-relative timeline anchors.
-pub const PROJECT_VERSION: u32 = 14;
+/// clip-relative timeline anchors; v15 stores crop as a window.
+pub const PROJECT_VERSION: u32 = 15;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -1280,10 +1280,10 @@ mod tests {
         let mut p = sample_project();
         if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
             c.effects.push(Effect::Crop {
-                left: 25.936_916_977_875_356,
-                right: -51.972_412_671_360_22,
-                top: 109.115_355_159_373_05,
-                bottom: 137.207_469_284_410_93,
+                x: 25.936_916_977_875_356,
+                y: 109.115_355_159_373_05,
+                w: 100.0 - 25.936_916_977_875_356 - -51.972_412_671_360_22,
+                h: 100.0 - 109.115_355_159_373_05 - 137.207_469_284_410_93,
             });
         }
         let json = serde_json::to_string(&p).unwrap();
@@ -1404,7 +1404,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 14);
+        assert_eq!(PROJECT_VERSION, 15);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);

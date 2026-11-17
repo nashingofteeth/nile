@@ -75,7 +75,7 @@ pub(crate) fn render_fx(f: &mut Frame, area: Rect, app: &App) {
 pub(crate) fn form_hint(kind: &str) -> &'static str {
     match kind {
         "crop" => {
-            "edge inset % (0 = frame edge, 100 = opposite edge); \
+            "crop window % (x/y = top-left, w/h = size); \
              the cut area shows below, else black"
         }
         "scale" => {

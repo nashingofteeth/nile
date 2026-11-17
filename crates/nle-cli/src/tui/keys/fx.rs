@@ -158,10 +158,10 @@ pub(crate) fn form_for(kind: &'static str) -> FxForm {
     };
     let fields = match kind {
         "crop" => vec![
-            field("left %", Some("0"), FieldKind::Float, Some('l')),
-            field("right %", Some("0"), FieldKind::Float, Some('r')),
-            field("top %", Some("0"), FieldKind::Float, Some('t')),
-            field("bottom %", Some("0"), FieldKind::Float, Some('b')),
+            field("x %", Some("0"), FieldKind::Float, Some('x')),
+            field("y %", Some("0"), FieldKind::Float, Some('y')),
+            field("width %", None, FieldKind::Float, Some('w')),
+            field("height %", None, FieldKind::Float, Some('h')),
         ],
         "scale" => vec![
             field("width %", Some("100"), FieldKind::Float, Some('w')),
@@ -204,15 +204,7 @@ pub(crate) fn form_for_effect(effect: &Effect, index: usize) -> FxForm {
         form.aspect = *w / *h;
     }
     let values: Vec<String> = match effect {
-        Effect::Crop {
-            left,
-            right,
-            top,
-            bottom,
-        } => [left, right, top, bottom]
-            .into_iter()
-            .map(|v| v.to_string())
-            .collect(),
+        Effect::Crop { x, y, w, h } => [x, y, w, h].into_iter().map(|v| v.to_string()).collect(),
         Effect::Scale { w, h } => vec![w.to_string(), h.to_string()],
         Effect::Offset { x, y } => vec![x.to_string(), y.to_string()],
         Effect::Eq {
@@ -440,10 +432,10 @@ pub(crate) fn form_effect(form: &FxForm) -> Result<Effect, String> {
     };
     let args = match form.kind {
         "crop" => EffectArgs {
-            left: opt_float(0, "left")?,
-            right: opt_float(1, "right")?,
-            top: opt_float(2, "top")?,
-            bottom: opt_float(3, "bottom")?,
+            x: opt_float(0, "x")?,
+            y: opt_float(1, "y")?,
+            w: opt_float(2, "width")?,
+            h: opt_float(3, "height")?,
             ..Default::default()
         },
         "scale" => EffectArgs {

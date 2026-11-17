@@ -1272,10 +1272,10 @@ mod tests {
     fn a_masked_layer_over_picture_is_a_composite() {
         for effect in [
             Effect::Crop {
-                left: 10.0,
-                right: 0.0,
-                top: 0.0,
-                bottom: 0.0,
+                x: 10.0,
+                y: 0.0,
+                w: 100.0 - 10.0 - 0.0,
+                h: 100.0 - 0.0 - 0.0,
             },
             Effect::Scale { w: 50.0, h: 50.0 },
             Effect::Offset { x: 10.0, y: 0.0 },
@@ -1313,10 +1313,10 @@ mod tests {
         let mut p = composite_project();
         if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
             c.effects = vec![Effect::Crop {
-                left: 10.0,
-                right: 0.0,
-                top: 0.0,
-                bottom: 0.0,
+                x: 10.0,
+                y: 0.0,
+                w: 100.0 - 10.0 - 0.0,
+                h: 100.0 - 0.0 - 0.0,
             }];
         }
         p.timeline.tracks[0].segments = vec![TimelineSegment::Gap(TimelineGap {

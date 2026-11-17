@@ -103,7 +103,7 @@ $N --project nile.json add sun.mp4 --at 4 --in 0 --out 1 >/dev/null
 # A dissolve at the cut, effects on both neighbours and the last clip, then a
 # speed change that shortens the tail.
 $N --project nile.json transition --at 2 --frames 30 >/dev/null
-$N --project nile.json effect crop --clip 1 --left 40 >/dev/null
+$N --project nile.json effect crop --clip 1 --x 40 --w 60 >/dev/null
 $N --project nile.json effect eq --clip 3 --saturation 0 >/dev/null
 $N --project nile.json speed 3 200 >/dev/null
 # An upper track: scale it down (the transparent pad reveals the sea), then
@@ -111,7 +111,7 @@ $N --project nile.json speed 3 200 >/dev/null
 $N --project nile.json track add video >/dev/null
 $N --project nile.json add sun.mp4 --track 2 --at 2.1 --in 0 --out 0.8 >/dev/null
 $N --project nile.json effect scale --clip 5 --w 50 --h 50 >/dev/null
-$N --project nile.json effect crop --clip 5 --left 30 >/dev/null
+$N --project nile.json effect crop --clip 5 --x 30 --w 70 >/dev/null
 $N --project nile.json effect offset --clip 5 --x 0 --y -20 >/dev/null
 $N --project nile.json track add audio >/dev/null
 $N --project nile.json add sea.mp4 --track 3 --in 0 --out 2 >/dev/null
@@ -169,7 +169,7 @@ crop_edge=$(px 0.5 demo.mp4 2 180)
 crop_kept=$(px 0.5 demo.mp4 300 180)
 crop_raw=$(px 0.5 sky.mp4 300 180)
 if dark "$crop_edge" && near "$crop_kept" "$crop_raw" 24; then
-  echo "  ✓ crop left 40 masks the edge (${crop_edge}) and keeps the sky in place (${crop_kept})"
+  echo "  ✓ crop x 40 masks the left edge (${crop_edge}) and keeps the sky in place (${crop_kept})"
 else
   echo "  ✗ crop wrong (masked ${crop_edge}, kept ${crop_kept}, source ${crop_raw})"; exit 1
 fi

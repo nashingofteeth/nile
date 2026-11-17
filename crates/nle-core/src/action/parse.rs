@@ -362,7 +362,7 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 /// The `:effect` / `nile effect` usage string — one spelling for both
 /// front-ends.
 pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] [--index N] \
-     crop --left P --right P --top P --bottom P (%: 0 = edge, 100 = opposite) | \
+     crop --x P --y P --w P --h P (% window: x/y top-left, w/h size) | \
      scale --w P --h P (%: 100 = unchanged) | \
      offset --x P --y P (% of the way to the edge; ±100 = off-screen) | \
      eq [--brightness --contrast --saturation] | lut --path P | \
@@ -374,16 +374,12 @@ pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] [--index N] \
 /// between them.
 #[derive(Debug, Clone, Default)]
 pub struct EffectArgs {
-    /// scale: width/height as percentages of the source frame (default 100).
+    /// crop/scale: width/height as percentages of the source (crop window
+    /// size; scale 100 = unchanged).
     pub w: Option<f64>,
     pub h: Option<f64>,
-    /// crop: edge insets as percentages (0 = the frame edge, 100 = the
-    /// opposite edge; the two sides of an axis must sum to under 100).
-    pub left: Option<f64>,
-    pub right: Option<f64>,
-    pub top: Option<f64>,
-    pub bottom: Option<f64>,
-    /// offset: position shift as percentages of the canvas (0 = no move).
+    /// crop/offset: x/y as percentages of the canvas (crop top-left; offset
+    /// 0 = no move).
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub brightness: Option<f64>,
@@ -404,26 +400,21 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
     };
     match kind {
         "crop" => {
-            let left = pct(a.left, "crop left", 0.0, 0.0, 100.0)?;
-            let right = pct(a.right, "crop right", 0.0, 0.0, 100.0)?;
-            let top = pct(a.top, "crop top", 0.0, 0.0, 100.0)?;
-            let bottom = pct(a.bottom, "crop bottom", 0.0, 0.0, 100.0)?;
-            if left + right >= 100.0 {
+            let x = pct(a.x, "crop x", 0.0, 0.0, 100.0)?;
+            let y = pct(a.y, "crop y", 0.0, 0.0, 100.0)?;
+            let w = pct(a.w, "crop width", 100.0 - x, 1.0, 100.0)?;
+            let h = pct(a.h, "crop height", 100.0 - y, 1.0, 100.0)?;
+            if x + w > 100.0 {
                 return Err(ParseError::Invalid(
-                    "crop left + right must be under 100%".to_string(),
+                    "crop x + width must be at most 100%".to_string(),
                 ));
             }
-            if top + bottom >= 100.0 {
+            if y + h > 100.0 {
                 return Err(ParseError::Invalid(
-                    "crop top + bottom must be under 100%".to_string(),
+                    "crop y + height must be at most 100%".to_string(),
                 ));
             }
-            Ok(Effect::Crop {
-                left,
-                right,
-                top,
-                bottom,
-            })
+            Ok(Effect::Crop { x, y, w, h })
         }
         "scale" => Ok(Effect::Scale {
             w: pct(a.w, "scale width", 100.0, 1.0, 1000.0)?,
@@ -626,10 +617,6 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     let args = EffectArgs {
                         w: opt_time(&mut f, "w")?,
                         h: opt_time(&mut f, "h")?,
-                        left: opt_time(&mut f, "left")?,
-                        right: opt_time(&mut f, "right")?,
-                        top: opt_time(&mut f, "top")?,
-                        bottom: opt_time(&mut f, "bottom")?,
                         x: opt_time(&mut f, "x")?,
                         y: opt_time(&mut f, "y")?,
                         brightness: opt_time(&mut f, "brightness")?,
