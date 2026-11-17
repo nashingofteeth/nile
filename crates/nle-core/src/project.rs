@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::annotation::{Anchor, Annotation, AnnotationKind, ClipPoint, SourceRef};
+use crate::annotation::{Anchor, Annotation, AnnotationKind, SourceRef};
 use crate::group::{MediaGroup, MediaPart};
 use crate::media::RawProbe;
 use crate::provenance::Provenance;
@@ -755,8 +755,9 @@ impl Project {
             return None;
         };
         let sequence = self.sequence(annotation.sequence)?;
-        let start = sequence_point(sequence, start)?;
-        let end = sequence_point(sequence, end)?;
+        let start =
+            crate::timeline::clip_position(&sequence.timeline.tracks, start.clip, start.source)?;
+        let end = crate::timeline::clip_position(&sequence.timeline.tracks, end.clip, end.source)?;
         (start <= end).then_some((start, end))
     }
 
@@ -970,20 +971,6 @@ impl Project {
     }
 }
 
-/// Absolute timeline position of a clip point inside `sequence`.
-fn sequence_point(sequence: &Sequence, point: &ClipPoint) -> Option<Seconds> {
-    for track in &sequence.timeline.tracks {
-        for (index, segment) in track.segments.iter().enumerate() {
-            if let crate::timeline::Segment::Clip(clip) = segment
-                && clip.id == point.clip
-            {
-                return Some(track.start_of(index) + clip.timeline_offset_of(point.source));
-            }
-        }
-    }
-    None
-}
-
 /// A structural before/after diff for previews. Actions cannot add or
 /// remove a sequence today, but the fields keep the type useful if they do.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -1129,6 +1116,7 @@ impl Project {
 mod tests {
     use super::*;
     use crate::Clip;
+    use crate::annotation::ClipPoint;
     use crate::edit::{self, History};
     use crate::media::{RawFormat, RawStream};
     use crate::time::Seconds;

@@ -589,6 +589,13 @@ fn odd_media() {
                 &[&["annotation", "add", "pin", "--timeline", "--at", "3.5"]],
             ),
             (
+                "annotation add timeline on a blend",
+                &[
+                    &["transition", "--at", "2"],
+                    &["annotation", "add", "pin", "--timeline", "--at", "2"],
+                ],
+            ),
+            (
                 "annotation add timeline track 99",
                 &[&[
                     "annotation",

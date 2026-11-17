@@ -466,6 +466,21 @@ impl Clip {
     }
 }
 
+/// Absolute timeline position of `clip`'s `source` time, across tracks.
+/// One helper so the annotation resolver and the model agree.
+pub fn clip_position(tracks: &[Track], clip: u32, source: Seconds) -> Option<Seconds> {
+    for track in tracks {
+        for (index, segment) in track.segments.iter().enumerate() {
+            if let Segment::Clip(c) = segment
+                && c.id == clip
+            {
+                return Some(track.start_of(index) + c.timeline_offset_of(source));
+            }
+        }
+    }
+    None
+}
+
 /// A stretch of nothing: black + silence. Leading, interior, and
 /// trailing space are all just Gap segments.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

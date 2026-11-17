@@ -597,6 +597,34 @@ pub(crate) fn cmd_group(project_path: &Path, action: &GroupCmd) -> Result<()> {
     }
 }
 
+/// How one annotation's anchor reads in a listing (shared with the TUI).
+pub(crate) fn annotation_anchor_label(
+    project: &Project,
+    annotation: &nle_core::Annotation,
+) -> String {
+    match &annotation.anchor {
+        nle_core::Anchor::Source { source, time } => match source {
+            nle_core::SourceRef::Asset { id } => {
+                format!("asset #{id} @ {} s", format_seconds(time))
+            }
+            nle_core::SourceRef::Group { id } => {
+                format!("group #{id} @ {} s", format_seconds(time))
+            }
+        },
+        nle_core::Anchor::Timeline { .. } => match project.annotation_span(annotation) {
+            Some((start, end)) if start == end => {
+                format!("timeline {} s", format_seconds(&start))
+            }
+            Some((start, end)) => format!(
+                "timeline {}–{} s",
+                format_seconds(&start),
+                format_seconds(&end)
+            ),
+            None => "timeline (unresolved)".to_string(),
+        },
+    }
+}
+
 /// `nile annotation ls [--sequence ID]` — notes and markers, newest id last.
 pub(crate) fn cmd_annotation_ls(project_path: &Path, sequence: Option<u32>) -> Result<()> {
     let project = Project::load(project_path)?;
@@ -619,27 +647,7 @@ pub(crate) fn cmd_annotation_ls(project_path: &Path, sequence: Option<u32>) -> R
         annotations.len()
     );
     for annotation in annotations {
-        let anchor = match &annotation.anchor {
-            nle_core::Anchor::Source { source, time } => match source {
-                nle_core::SourceRef::Asset { id } => {
-                    format!("asset #{id} @ {} s", format_seconds(time))
-                }
-                nle_core::SourceRef::Group { id } => {
-                    format!("group #{id} @ {} s", format_seconds(time))
-                }
-            },
-            nle_core::Anchor::Timeline { .. } => match project.annotation_span(annotation) {
-                Some((start, end)) if start == end => {
-                    format!("timeline {} s", format_seconds(&start))
-                }
-                Some((start, end)) => format!(
-                    "timeline {}–{} s",
-                    format_seconds(&start),
-                    format_seconds(&end)
-                ),
-                None => "timeline (unresolved)".to_string(),
-            },
-        };
+        let anchor = annotation_anchor_label(&project, annotation);
         let status = match annotation.status {
             nle_core::AnnotationStatus::Open => "open",
             nle_core::AnnotationStatus::Resolved => "resolved",
