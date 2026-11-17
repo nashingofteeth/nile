@@ -33,8 +33,9 @@ use nle_core::{
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
-    Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage, Outcome as WireOutcome,
-    PlayheadReply, Preview, Reply, RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
+    AnnotationList, Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage,
+    Outcome as WireOutcome, PlayheadReply, Preview, Reply, RpcError, SequenceList, SequenceReply,
+    SequenceSummary, Server,
 };
 
 use crate::session::{Session, playhead};
@@ -297,6 +298,7 @@ impl Handler for ServeHandler {
                 paths,
             } => self.media_add(*base_revision, paths),
             Call::PlayheadSet { at } => self.playhead_set(*at),
+            Call::AnnotationList { sequence } => self.annotation_list(*sequence),
         }
     }
 
@@ -316,6 +318,17 @@ impl ServeHandler {
             .iter()
             .position(|track| track.kind == TrackKind::Video)
             .unwrap_or(0)
+    }
+
+    fn annotation_list(&self, sequence: Option<u32>) -> Result<Reply, RpcError> {
+        let project = self.session.project();
+        let sequence = sequence.unwrap_or_else(|| project.active_id());
+        if project.sequence(sequence).is_none() {
+            return Err(RpcError::invalid_params(format!(
+                "sequence #{sequence} not found"
+            )));
+        }
+        Ok(Reply::Annotations(AnnotationList::of(project, sequence)))
     }
 
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {

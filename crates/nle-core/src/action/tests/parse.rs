@@ -29,6 +29,9 @@ fn every_action_has_a_colon_spelling() {
         "delete --from-seg 1 --to-seg 2",
         "yank --from-seg 1 --to-seg 2",
         "paste --range --at 3",
+        "annotation add hi --asset 1 --time 0",
+        "annotation rm 1",
+        "annotation resolve 1",
     ];
     let mut seen = vec![false; SLOTS];
     for spec in SPECS {

@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::annotation::{Anchor, AnnotationKind};
 use crate::edit::{self, EditError, EditOp, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
@@ -133,6 +134,19 @@ pub enum Action {
         track: usize,
         at: f64,
     },
+    /// Add a source-anchored note or marker (`:note`).
+    AnnotationAdd {
+        anchor: Anchor,
+        kind: AnnotationKind,
+    },
+    /// Remove an annotation by id.
+    AnnotationRemove {
+        id: u32,
+    },
+    /// Mark an annotation resolved.
+    AnnotationResolve {
+        id: u32,
+    },
     /// Retime a clip; the track ripples to fit (`R`, `:speed`). `rate` is the
     /// model rate (1 = normal); the front-ends take a percentage.
     SetSpeed {
@@ -235,13 +249,16 @@ impl Action {
             Action::DeleteRange { .. } => 20,
             Action::YankRange { .. } => 21,
             Action::PasteRange { .. } => 22,
+            Action::AnnotationAdd { .. } => 23,
+            Action::AnnotationRemove { .. } => 24,
+            Action::AnnotationResolve { .. } => 25,
         }
     }
 }
 
 /// How many slots the catalog has — the coverage tests assert exactly
 /// this many are reachable from each spelling.
-pub const SLOTS: usize = 23;
+pub const SLOTS: usize = 26;
 
 /// One representative action per [`Action::slot`], in slot order. Shared by
 /// the core wire test and the protocol's wire walk, so a new variant cannot be
@@ -338,6 +355,17 @@ pub fn sample_actions() -> Vec<Action> {
             end: 1,
         },
         Action::PasteRange { track: 0, at: 3.0 },
+        Action::AnnotationAdd {
+            anchor: Anchor::Source {
+                source: crate::annotation::SourceRef::Asset { id: 1 },
+                time: Seconds::from_integer(0),
+            },
+            kind: AnnotationKind::Note {
+                text: "note".into(),
+            },
+        },
+        Action::AnnotationRemove { id: 1 },
+        Action::AnnotationResolve { id: 1 },
     ]
 }
 
@@ -653,6 +681,40 @@ pub fn run_action(
             Ok(Outcome {
                 desc,
                 changed: true,
+                playhead: None,
+            })
+        }
+        Action::AnnotationAdd { anchor, kind } => {
+            let playhead = frame_of(project.fps.as_ref(), from);
+            let sequence = project.active_id();
+            let id = history.add_annotation(
+                project,
+                sequence,
+                kind.clone(),
+                anchor.clone(),
+                playhead,
+            )?;
+            Ok(Outcome {
+                desc: format!("added annotation #{id}"),
+                changed: true,
+                playhead: None,
+            })
+        }
+        Action::AnnotationRemove { id } => {
+            let playhead = frame_of(project.fps.as_ref(), from);
+            let desc = history.remove_annotation(project, *id, playhead)?;
+            Ok(Outcome {
+                desc,
+                changed: true,
+                playhead: None,
+            })
+        }
+        Action::AnnotationResolve { id } => {
+            let playhead = frame_of(project.fps.as_ref(), from);
+            let (desc, changed) = history.resolve_annotation(project, *id, playhead)?;
+            Ok(Outcome {
+                desc,
+                changed,
                 playhead: None,
             })
         }

@@ -572,3 +572,33 @@ fn ctrl_t_toggles_the_filmstrip_rows() {
     assert!(!app.filmstrip_enabled);
     assert_eq!(app.message, "filmstrips off");
 }
+
+#[test]
+fn note_anchors_the_clip_under_the_playhead() {
+    let path = temp_project_path("note-command");
+    asset_project().save(&path).unwrap();
+    let mut app = App::new(asset_project(), path.clone());
+    app.playhead = 1.0; // clip #1 starts at 0, asset_in 1 → source 2 s
+
+    let notice = cmd(&mut app, "note check the cut");
+    assert!(notice.contains("added annotation #1"), "{notice}");
+    let annotation = &app.project.annotations[0];
+    match &annotation.anchor {
+        nle_core::Anchor::Source {
+            source: nle_core::SourceRef::Asset { id },
+            time,
+        } => {
+            assert_eq!(*id, 1);
+            assert_eq!(*time, Seconds::from_integer(2));
+        }
+        other => panic!("unexpected anchor {other:?}"),
+    }
+    assert_eq!(app.project.depth(), 1, "one undo step");
+
+    // A source anchor is a media time: splitting under it keeps it put.
+    cmd(&mut app, "split --at 2");
+    assert_eq!(app.project.annotations.len(), 1);
+    assert!(cmd(&mut app, "annotation ls").contains("1 annotation(s)"));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}

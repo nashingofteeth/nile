@@ -35,7 +35,7 @@ fn protocol_server_round_trip() {
 
     let hello = call(&mut serve, 1, "hello", None);
     assert_eq!(hello["result"]["protocol"], 5);
-    assert_eq!(hello["result"]["project_version"], 12);
+    assert_eq!(hello["result"]["project_version"], 13);
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
         hello["result"]["methods"]
@@ -1041,4 +1041,70 @@ fn serve_reanchors_the_playhead_like_the_tui() {
     let show = call(&mut serve, 4, "project.show", None);
     assert_eq!(active(&show["result"])["playhead"], "1/1");
     assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn annotation_list_and_add_over_the_protocol() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let empty = call(&mut serve, 2, "annotation.list", None);
+    assert_eq!(empty["result"]["sequence"], 1);
+    assert!(
+        empty["result"]["annotations"]
+            .as_array()
+            .expect("annotations")
+            .is_empty()
+    );
+
+    let applied = call(
+        &mut serve,
+        3,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "actions": [{
+                "action": "annotation_add",
+                "anchor": {
+                    "on": "source",
+                    "source": {"of": "asset", "id": 1},
+                    "time": "1/2"
+                },
+                "kind": {"kind": "note", "text": "check the cut"}
+            }]
+        })),
+    );
+    assert_eq!(applied["result"]["changed"], true);
+    let event = serve.read();
+    assert_eq!(event["method"], "project.changed");
+    assert_eq!(event["params"]["revision"], revision + 1);
+
+    let listed = call(
+        &mut serve,
+        4,
+        "annotation.list",
+        Some(json!({"sequence": 1})),
+    );
+    let annotations = listed["result"]["annotations"]
+        .as_array()
+        .expect("annotations");
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(annotations[0]["kind"]["text"], "check the cut");
+    assert_eq!(annotations[0]["anchor"]["source"]["id"], 1);
+    assert_eq!(annotations[0]["status"], "open");
+
+    let missing = call(
+        &mut serve,
+        5,
+        "annotation.list",
+        Some(json!({"sequence": 99})),
+    );
+    assert_eq!(missing["error"]["code"], -32602);
+
+    let status = serve.finish();
+    assert!(status.success(), "nile serve exited: {status:?}");
+    assert!(sandbox.ok(&["annotation", "ls"]).contains("check the cut"));
 }

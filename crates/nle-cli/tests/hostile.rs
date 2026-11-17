@@ -547,6 +547,49 @@ fn odd_media() {
                 &[&["import-otio", "nope.otio", "--group", "CAM=a,,b"]],
             ),
             (
+                "annotation add a missing asset",
+                &[&["annotation", "add", "note", "--asset", "99", "--time", "0"]],
+            ),
+            (
+                "annotation add a bad time",
+                &[&[
+                    "annotation",
+                    "add",
+                    "note",
+                    "--asset",
+                    "1",
+                    "--time",
+                    "nope",
+                ]],
+            ),
+            (
+                "annotation add two sources",
+                &[&[
+                    "annotation",
+                    "add",
+                    "note",
+                    "--asset",
+                    "1",
+                    "--group",
+                    "1",
+                    "--time",
+                    "0",
+                ]],
+            ),
+            (
+                "annotation add empty text",
+                &[&["annotation", "add", "   ", "--asset", "1", "--time", "0"]],
+            ),
+            ("annotation rm 99", &[&["annotation", "rm", "99"]]),
+            ("annotation resolve 99", &[&["annotation", "resolve", "99"]]),
+            (
+                "annotation add then rm",
+                &[
+                    &["annotation", "add", "note", "--asset", "1", "--time", "0"],
+                    &["annotation", "rm", "1"],
+                ],
+            ),
+            (
                 "trim --out past the file",
                 &[&["trim", "red.mp4", "--in", "0", "--out", "99", "-o", "t.mp4"]],
             ),
