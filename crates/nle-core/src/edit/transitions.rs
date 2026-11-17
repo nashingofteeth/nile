@@ -241,7 +241,7 @@ pub fn retime_transition_on(
                     detail: format!("clip #{} has no more tail", c.id),
                 });
             }
-            let left = (new_in - c.asset_in) / c.speed;
+            let left = c.timeline_offset_of(new_in);
             if at_least_a_frame(project, &left).is_err() {
                 return Err(EditError::BlendNoHandle {
                     id: trans.id,
@@ -286,7 +286,7 @@ pub fn retime_transition_on(
                     detail: format!("clip #{} has no more head", c.id),
                 });
             }
-            let right = (c.asset_out - new_out) / c.speed;
+            let right = c.duration() - c.timeline_offset_of(new_out);
             if at_least_a_frame(project, &right).is_err() {
                 return Err(EditError::BlendNoHandle {
                     id: trans.id,
