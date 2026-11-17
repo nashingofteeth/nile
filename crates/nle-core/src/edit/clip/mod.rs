@@ -81,8 +81,60 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
 
 /// The ops appending `payload` at/past the track end: the void between the
 /// track's end and the playhead becomes a gap — coalesced with the payload when
-/// it is itself a gap, so the track never holds two adjacent gap segments.
-pub(super) fn append_at_end(ti: usize, len: usize, void: Seconds, payload: Segment) -> Vec<EditOp> {
+/// it is itself a gap, and absorbed by the trailing gap when the track already
+/// ends in one, so the track never holds two adjacent gap segments.
+///
+/// Takes the track rather than its length: the caller cannot pass a length that
+/// disagrees with the segments the void is merged into.
+pub(super) fn append_at_end(
+    ti: usize,
+    track: &Track,
+    void: Seconds,
+    payload: Segment,
+) -> Vec<EditOp> {
+    let len = track.segments.len();
+    if let (Some(have), Some(last)) = (
+        match track.segments.last() {
+            Some(Segment::Gap(g)) => Some(g.duration),
+            _ => None,
+        },
+        track.segments.last(),
+    ) {
+        // A trailing gap already covers the track's end: grow it by the void
+        // and let a gap payload merge into it, instead of inserting a second
+        // gap beside it.
+        let zero = Seconds::from_integer(0);
+        let span = if void > zero { void } else { zero };
+        let grown = have + span;
+        return match payload {
+            Segment::Gap(pg) => vec![EditOp::Replace {
+                track: ti,
+                index: len - 1,
+                before: last.clone(),
+                after: Segment::Gap(Gap {
+                    duration: grown + pg.duration,
+                }),
+            }],
+            payload if span > zero => vec![
+                EditOp::Replace {
+                    track: ti,
+                    index: len - 1,
+                    before: last.clone(),
+                    after: Segment::Gap(Gap { duration: grown }),
+                },
+                EditOp::Insert {
+                    track: ti,
+                    index: len,
+                    segment: payload,
+                },
+            ],
+            payload => vec![EditOp::Insert {
+                track: ti,
+                index: len,
+                segment: payload,
+            }],
+        };
+    }
     if void <= Seconds::from_integer(0) {
         return vec![EditOp::Insert {
             track: ti,
@@ -165,7 +217,7 @@ pub fn paste_on(
     if track.segments.is_empty() || t >= track.end() {
         let void = t - track.end();
         return Ok(Batch {
-            ops: append_at_end(ti, track.segments.len(), void, pasted.clone()),
+            ops: append_at_end(ti, track, void, pasted.clone()),
             desc: format!("paste at {}", stamp(project, &t)),
         });
     }
@@ -339,7 +391,7 @@ pub fn insert_gap_on(
     if track.segments.is_empty() || t >= track.end() {
         let void = t - track.end();
         return Ok(Batch {
-            ops: append_at_end(ti, track.segments.len(), void, gap),
+            ops: append_at_end(ti, track, void, gap),
             desc: format!("insert gap at {}", stamp(project, &t)),
         });
     }
@@ -435,7 +487,7 @@ pub fn paste_ripple_on(
         return Ok(Batch {
             ops: append_at_end(
                 ti,
-                track.segments.len(),
+                track,
                 void,
                 pasted_piece(snapshot, project.next_clip_id()),
             ),

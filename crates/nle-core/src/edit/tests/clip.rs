@@ -638,6 +638,58 @@ fn appending_past_the_end_coalesces_gaps() {
     h.apply(&mut p, batch, 0).unwrap();
     no_adjacent_gaps(&p);
     assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+
+    // A track that already ENDS in a gap is the case the fixture above misses:
+    // the void must join that gap, never sit beside it.
+    let trailing_gap = || {
+        let mut p = fixture(); // [C1 0..2][gap 2..3][C2 3..5]
+        p.timeline.video_track_mut().unwrap().segments.truncate(2);
+        p
+    };
+
+    // Inserted gap: 1 s gap + 4 s void + 1 s gap → one 6 s gap.
+    let mut p = trailing_gap();
+    let mut h = History::default();
+    let batch = insert_gap(&p, 7.0, 30).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    no_adjacent_gaps(&p);
+    assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+    assert_eq!(
+        p.timeline.video_track().unwrap().segments.len(),
+        2,
+        "the payload merged into the trailing gap"
+    );
+
+    // Pasted gap payload: the same merge.
+    let mut p = trailing_gap();
+    let mut h = History::default();
+    let batch = paste(&p, &gap, 7.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    no_adjacent_gaps(&p);
+    assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+
+    // Pasted clip: the trailing gap grows to the playhead, then the clip lands.
+    for ripple in [false, true] {
+        let mut p = trailing_gap();
+        let mut h = History::default();
+        let snapshot = Segment::Clip(clip_by_id(&p, 1));
+        let batch = if ripple {
+            paste_ripple(&p, &snapshot, 7.0)
+        } else {
+            paste(&p, &snapshot, 7.0)
+        }
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        no_adjacent_gaps(&p);
+        let segs = &p.timeline.video_track().unwrap().segments;
+        assert_eq!(segs.len(), 3, "the gap stayed one segment");
+        assert_eq!(
+            segs[1].duration(),
+            Seconds::from_integer(5),
+            "1 s + 4 s void"
+        );
+        assert_eq!(p.timeline.end(), Seconds::from_integer(9), "7 + a 2 s clip");
+    }
 }
 
 // A ripple paste inside a gap whose start is off the frame grid drops the
