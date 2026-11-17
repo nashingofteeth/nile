@@ -324,28 +324,16 @@ enum Cmd {
         /// default: rm's last row, add appends)
         #[arg(long, value_name = "N")]
         index: Option<usize>,
-        /// scale: width as a percentage of the source (100 = unchanged)
+        /// crop/scale: width as a percentage (crop window; scale 100 = unchanged)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         w: Option<f64>,
-        /// scale: height as a percentage of the source (100 = unchanged)
+        /// crop/scale: height as a percentage (crop window; scale 100 = unchanged)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         h: Option<f64>,
-        /// crop: inset from the left edge (0 = the edge, 100 = the opposite)
-        #[arg(long, value_name = "P", allow_negative_numbers = true)]
-        left: Option<f64>,
-        /// crop: inset from the right edge (percent)
-        #[arg(long, value_name = "P", allow_negative_numbers = true)]
-        right: Option<f64>,
-        /// crop: inset from the top edge (percent)
-        #[arg(long, value_name = "P", allow_negative_numbers = true)]
-        top: Option<f64>,
-        /// crop: inset from the bottom edge (percent)
-        #[arg(long, value_name = "P", allow_negative_numbers = true)]
-        bottom: Option<f64>,
-        /// offset: horizontal shift (percent of the distance to the edge)
+        /// crop/offset: x percentage (crop top-left; offset shift)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         x: Option<f64>,
-        /// offset: vertical shift (percent of the distance to the edge)
+        /// crop/offset: y percentage (crop top-left; offset shift)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         y: Option<f64>,
         /// eq brightness (0 is neutral)
@@ -1194,10 +1182,6 @@ mod tests {
                 index: None,
                 w: None,
                 h: None,
-                left: Some(10.0),
-                right: Some(10.0),
-                top: None,
-                bottom: None,
                 x: None,
                 y: None,
                 brightness: None,
@@ -1212,10 +1196,6 @@ mod tests {
                 index: Some(0),
                 w: None,
                 h: None,
-                left: None,
-                right: None,
-                top: None,
-                bottom: None,
                 x: None,
                 y: None,
                 brightness: None,
@@ -1230,10 +1210,6 @@ mod tests {
                 index: None,
                 w: None,
                 h: None,
-                left: None,
-                right: None,
-                top: None,
-                bottom: None,
                 x: None,
                 y: None,
                 brightness: None,

@@ -42,18 +42,11 @@ pub enum TrackKind {
 /// serializable and safe to hand to the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
-    /// `crop`, as percentages of the source frame per edge: `left` moves the
-    /// left edge toward the right, `right` the right edge toward the left (and
-    /// the same for `top`/`bottom`). 0 is the frame edge, 100 the opposite
-    /// edge; the two sides of an axis must sum to less than 100. The kept
-    /// picture stays where it is; the trimmed strips become transparent, so
-    /// an upper track shows through them (black when nothing is below).
-    Crop {
-        left: f64,
-        right: f64,
-        top: f64,
-        bottom: f64,
-    },
+    /// A crop window, as percentages of the picture at this point in the
+    /// chain: `x`/`y` are the top-left corner, `w`/`h` the window size. The kept picture stays where
+    /// it is; the surrounding strips become transparent, so an upper track
+    /// shows through them (black when nothing is below).
+    Crop { x: f64, y: f64, w: f64, h: f64 },
     /// `scale`, as percentages of the picture at this point in the chain
     /// (100 = unchanged). Below 100% it shrinks about its centre and pads
     /// transparently, so a lower track shows through; above 100% is a zoom.
@@ -85,17 +78,35 @@ impl Effect {
         }
     }
 
-    /// Every numeric parameter is finite. Non-finite values cannot be
-    /// represented in the project JSON (serde writes them as `null`), so
-    /// refuse them at the model boundary.
+    /// Why this effect cannot be persisted, or `None` when it is valid.
+    pub fn validation_error(&self) -> Option<&'static str> {
+        if !self.is_finite() {
+            return Some("effect parameter is non-finite");
+        }
+        match self {
+            Effect::Crop { x, y, w, h }
+                if *x < 0.0
+                    || *y < 0.0
+                    || *w <= 0.0
+                    || *h <= 0.0
+                    || x + w > 100.0
+                    || y + h > 100.0 =>
+            {
+                Some("effect parameter is out of range")
+            }
+            _ => None,
+        }
+    }
+
+    /// Every parameter is finite and inside its range.
+    pub fn is_valid(&self) -> bool {
+        self.validation_error().is_none()
+    }
+
+    /// Every numeric parameter is finite.
     pub fn is_finite(&self) -> bool {
         match self {
-            Effect::Crop {
-                left,
-                right,
-                top,
-                bottom,
-            } => [left, right, top, bottom].iter().all(|v| v.is_finite()),
+            Effect::Crop { x, y, w, h } => [x, y, w, h].iter().all(|v| v.is_finite()),
             Effect::Scale { w, h } => w.is_finite() && h.is_finite(),
             Effect::Offset { x, y } => x.is_finite() && y.is_finite(),
             Effect::Eq {
@@ -110,12 +121,7 @@ impl Effect {
     /// The parameters as one line — the panel's detail column.
     pub fn details(&self) -> String {
         match self {
-            Effect::Crop {
-                left,
-                right,
-                top,
-                bottom,
-            } => format!("l{left} r{right} t{top} b{bottom}"),
+            Effect::Crop { x, y, w, h } => format!("{w}×{h} @ {x},{y}"),
             Effect::Scale { w, h } => format!("{w}% × {h}%"),
             Effect::Offset { x, y } => format!("x {x}% · y {y}%"),
             Effect::Eq {
@@ -134,7 +140,7 @@ impl Effect {
 
     /// The ffmpeg filters for a whole chain, comma-joined (empty when nothing
     /// renders). The picture box is threaded through: `scale` resizes the
-    /// current box about its centre, `crop` insets the box's edges, and colour
+    /// current box about its centre, `crop` selects a window inside it, and colour
     /// effects leave it alone. Anything outside the box is transparent, so a
     /// lower track shows through (black when none does — the classic
     /// single-track graph drops alpha at the end).
@@ -166,16 +172,11 @@ impl Effect {
     /// drifting apart.
     fn apply(&self, canvas: (u32, u32), content: Content) -> (String, Content) {
         match self {
-            Effect::Crop {
-                left,
-                right,
-                top,
-                bottom,
-            } => {
+            Effect::Crop { x, y, w, h } => {
                 if content.is_empty() {
                     return (String::new(), content); // already invisible
                 }
-                let next = crop_content(*left, *right, *top, *bottom, content);
+                let next = crop_content(*x, *y, *w, *h, content);
                 if next == content {
                     return (String::new(), content); // no inset: nothing to mask
                 }
@@ -266,19 +267,24 @@ fn transparent_filter() -> String {
     "format=yuva420p,colorchannelmixer=rr=0:gg=0:bb=0:aa=0".to_string()
 }
 
-/// Inset `content` by percentages of its *own* width/height: each edge moves
-/// that percent of the box toward its opposite edge. Clamped so a hand-edited
-/// project can't crop past the picture.
-fn crop_content(left: f64, right: f64, top: f64, bottom: f64, content: Content) -> Content {
+/// A window inside `content`: `x`/`y` are percentages from its top-left and
+/// `w`/`h` percentages of its size. Clamped so a hand-edited project cannot
+/// crop past the picture.
+fn crop_content(x: f64, y: f64, w: f64, h: f64, content: Content) -> Content {
     if content.is_empty() {
         return content;
     }
-    let inset =
-        |size: i64, pct: f64| ((size as f64 * pct / 100.0).round() as i64).clamp(0, size.max(0));
-    let (l, r) = (inset(content.w, left), inset(content.w, right));
-    let (t, b) = (inset(content.h, top), inset(content.h, bottom));
-    let w = (content.w - l - r).clamp(2, content.w.max(2));
-    let h = (content.h - t - b).clamp(2, content.h.max(2));
+    let pct = |size: i64, value: f64| {
+        ((size as f64 * value / 100.0).round() as i64).clamp(0, size.max(0))
+    };
+    let left = pct(content.w, x).min(content.w);
+    let top = pct(content.h, y).min(content.h);
+    let width = pct(content.w, w).clamp(2, content.w.max(2));
+    let height = pct(content.h, h).clamp(2, content.h.max(2));
+    let w = width.min((content.w - left).max(2));
+    let h = height.min((content.h - top).max(2));
+    let l = left;
+    let t = top;
     Content {
         x: content.x + l.min((content.w - w).max(0)),
         y: content.y + t.min((content.h - h).max(0)),
@@ -791,8 +797,8 @@ impl Timeline {
                         if c.speed <= Seconds::from_integer(0) {
                             return Err(bad("clip has a non-positive speed"));
                         }
-                        if c.effects.iter().any(|e| !e.is_finite()) {
-                            return Err(bad("effect has a non-finite parameter"));
+                        if let Some(why) = c.effects.iter().find_map(Effect::validation_error) {
+                            return Err(bad(why));
                         }
                     }
                     Segment::Gap(g) => {
@@ -823,8 +829,9 @@ impl Timeline {
                                         "transition side has a non-positive source span",
                                     ));
                                 }
-                                if effects.iter().any(|e| !e.is_finite()) {
-                                    return Err(bad("effect has a non-finite parameter"));
+                                if let Some(why) = effects.iter().find_map(Effect::validation_error)
+                                {
+                                    return Err(bad(why));
                                 }
                             }
                         }
@@ -890,13 +897,55 @@ mod tests {
             _ => unreachable!(),
         };
         c.effects.push(Effect::Crop {
-            left: 10.0,
-            right: f64::NAN,
-            top: 0.0,
-            bottom: 0.0,
+            x: 10.0,
+            y: 0.0,
+            w: f64::NAN,
+            h: 100.0,
         });
         t.tracks[0].segments.push(Segment::Clip(c));
         assert!(matches!(t.validate(), Err(TimelineError::Corrupt(_))));
+    }
+
+    #[test]
+    fn out_of_range_effect_parameters_report_the_range() {
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        // Finite, but the window runs past the picture.
+        c.effects.push(Effect::Crop {
+            x: 90.0,
+            y: 0.0,
+            w: 50.0,
+            h: 100.0,
+        });
+        t.tracks[0].segments.push(Segment::Clip(c));
+        match t.validate() {
+            Err(TimelineError::Corrupt(message)) => {
+                assert!(message.contains("out of range"), "{message}");
+            }
+            other => panic!("expected a range refusal, got {other:?}"),
+        }
+
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        c.effects.push(Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: f64::NAN,
+            h: 100.0,
+        });
+        t.tracks[0].segments.push(Segment::Clip(c));
+        match t.validate() {
+            Err(TimelineError::Corrupt(message)) => {
+                assert!(message.contains("non-finite"), "{message}");
+            }
+            other => panic!("expected a finite refusal, got {other:?}"),
+        }
     }
 
     #[test]

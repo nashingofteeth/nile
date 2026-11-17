@@ -23,7 +23,7 @@ fn every_action_has_a_colon_spelling() {
         "undo",
         "redo",
         "transition --at 3",
-        "effect crop --clip 1 --left 10",
+        "effect crop --clip 1 --x 10 --w 90",
         "effect rm --clip 1 --index 0",
         "effect clear --clip 1",
         "delete --from-seg 1 --to-seg 2",
@@ -170,9 +170,9 @@ fn effect_index_replaces_a_row() {
 // edge, 100 = the other edge. 25 off each side of 1920×1080 masks the
 // outer quarter but keeps the middle half in place.
 #[test]
-fn crop_is_percentage_insets() {
+fn crop_is_a_percentage_window() {
     let Action::AddEffect { effect, .. } = parse(
-        "effect crop --clip 1 --left 25 --right 25 --top 25 --bottom 25",
+        "effect crop --clip 1 --x 25 --y 25 --w 50 --h 50",
         &defaults(),
     )
     .unwrap() else {
@@ -181,10 +181,10 @@ fn crop_is_percentage_insets() {
     assert_eq!(
         effect,
         Effect::Crop {
-            left: 25.0,
-            right: 25.0,
-            top: 25.0,
-            bottom: 25.0
+            x: 25.0,
+            y: 25.0,
+            w: 100.0 - 25.0 - 25.0,
+            h: 100.0 - 25.0 - 25.0
         }
     );
     assert_eq!(
@@ -192,20 +192,22 @@ fn crop_is_percentage_insets() {
         "format=yuva420p,crop=960:540:480:270,\
          pad=1920:1080:480:270:color=black@0"
     );
-    assert_eq!(effect.details(), "l25 r25 t25 b25");
+    assert_eq!(effect.details(), "50×50 @ 25,25");
 
-    // Omitting all four leaves the frame unchanged (defaults 0) — and
-    // unlike the old zoom crop, it renders no filter at all.
+    // Omitting the window leaves the frame unchanged (full size) and
+    // renders no filter at all.
     let Action::AddEffect { effect, .. } = parse("effect crop --clip 1", &defaults()).unwrap()
     else {
         panic!("expected an effect")
     };
     assert_eq!(Effect::chain(&[effect], (1920, 1080)), "");
 
-    // Asymmetric insets: 10% of 1920 = 192; 25% of 1080 = 270.
-    let Action::AddEffect { effect, .. } =
-        parse("effect crop --clip 1 --left 10 --top 25", &defaults()).unwrap()
-    else {
+    // An asymmetric window: x 10% of 1920 = 192; y 25% of 1080 = 270.
+    let Action::AddEffect { effect, .. } = parse(
+        "effect crop --clip 1 --x 10 --y 25 --w 90 --h 75",
+        &defaults(),
+    )
+    .unwrap() else {
         panic!("expected an effect")
     };
     assert_eq!(
@@ -255,17 +257,17 @@ fn scale_is_percentages_with_a_100_default() {
     );
 }
 
-// Crop after scale insets the *scaled picture*, not the full canvas:
-// "scale 50, crop 30% left" removes 30% of the small picture.
+// Crop after scale resolves against the *scaled picture*, not the canvas:
+// "scale 50, crop x 30%" removes the left 30% of the small picture.
 #[test]
 fn crop_after_scale_resolves_against_the_scaled_picture() {
     let effects = vec![
         Effect::Scale { w: 50.0, h: 50.0 },
         Effect::Crop {
-            left: 30.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 0.0,
+            x: 30.0,
+            y: 0.0,
+            w: 100.0 - 30.0 - 0.0,
+            h: 100.0 - 0.0 - 0.0,
         },
     ];
     // 320×240 → a 160×120 picture at (80,60); 30% of 160 = 48 px.
@@ -338,10 +340,10 @@ fn offset_counts_the_distance_to_the_edge() {
     let effects = vec![
         Effect::Scale { w: 50.0, h: 50.0 },
         Effect::Crop {
-            left: 30.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 0.0,
+            x: 30.0,
+            y: 0.0,
+            w: 100.0 - 30.0 - 0.0,
+            h: 100.0 - 0.0 - 0.0,
         },
         Effect::Offset { x: 80.0, y: 0.0 },
     ];
@@ -357,10 +359,10 @@ fn offset_counts_the_distance_to_the_edge() {
     let off = vec![
         Effect::Scale { w: 50.0, h: 50.0 },
         Effect::Crop {
-            left: 30.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 0.0,
+            x: 30.0,
+            y: 0.0,
+            w: 100.0 - 30.0 - 0.0,
+            h: 100.0 - 0.0 - 0.0,
         },
         Effect::Offset { x: 100.0, y: 0.0 },
     ];
@@ -374,9 +376,12 @@ fn offset_counts_the_distance_to_the_edge() {
 fn bad_effect_percentages_are_refused() {
     let d = ParseDefaults::default();
     for spec in [
-        "effect crop --clip 1 --left 101",
-        "effect crop --clip 1 --left 50 --right 50",
-        "effect crop --clip 1 --top 60 --bottom 40",
+        "effect crop --clip 1 --x 101",
+        "effect crop --clip 1 --x 100",
+        "effect crop --clip 1 --x 99.5",
+        "effect crop --clip 1 --y 100",
+        "effect crop --clip 1 --x 60 --w 50",
+        "effect crop --clip 1 --y 60 --h 50",
         "effect scale --clip 1 --w 0",
         "effect scale --clip 1 --h 1001",
         "effect offset --clip 1 --x 101",
@@ -386,6 +391,14 @@ fn bad_effect_percentages_are_refused() {
             matches!(parse(spec, &d), Err(ParseError::Invalid(_))),
             "{spec:?} was accepted"
         );
+    }
+    for (spec, word) in [
+        ("effect crop --clip 1 --x 100", "crop x leaves"),
+        ("effect crop --clip 1 --x 99.5", "crop x leaves"),
+        ("effect crop --clip 1 --y 100", "crop y leaves"),
+    ] {
+        let err = parse(spec, &d).unwrap_err().to_string();
+        assert!(err.contains(word), "{spec:?}: {err}");
     }
 }
 

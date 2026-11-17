@@ -297,11 +297,11 @@ on a copy and never changes the project.
 - Deleting a clip or gap beside a blend removes the blend too: `dd` leaves the
   target’s visible span as a gap, `D` ripples it away, and the other side’s
   borrowed length is restored.
-- Crop insets percentages toward the opposite edge (0 = edge, 100 = opposite;
-  the two sides of an axis must total under 100). Scale is a percentage of the
-  picture at that point (100 = unchanged); scaling down pads transparently.
-  Offset moves a percentage of the way to the edge (100 = fully off-screen).
-  Effects compose in the order added; crop resolves after scale.
+- Crop is a window: `x`/`y` are the top-left and `w`/`h` the size, as
+  percentages of the picture at that point (`crop` after `scale` uses the
+  scaled picture). Scale is a percentage of the same box (100 = unchanged);
+  scaling down pads transparently. Offset moves a percentage of the way to
+  the edge (100 = fully off-screen). Effects compose in the order added.
 - LUT effects are CLI-only in the TUI for now: `:effect lut --path FILE`.
 
 ## CLI
@@ -376,7 +376,7 @@ back past time 0). `nile show` prints `[i]` segment indices and `#n` clip ids.
 ### Effects
 
 ```sh
-nile effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
+nile effect crop --clip 3 --x 10 --y 5 --w 80 --h 90
 nile effect scale --clip 3 --w 50 --h 50
 nile effect offset --clip 3 --x 10 --y -5
 nile effect eq --clip 3 --brightness -0.2  # contrast/saturation default to 1

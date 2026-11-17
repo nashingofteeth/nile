@@ -66,8 +66,8 @@ pub const MAX_HISTORY: usize = 100;
 /// change's `{ actor, at }` provenance; v17 keys the stacks by sequence;
 /// v18 adds grouped changes (one undo step for a batch of actions);
 /// v19 adds media-group creation/removal; v20 adds annotations; v21 scopes
-/// timeline annotations into track changes.
-pub const HISTORY_VERSION: u32 = 21;
+/// timeline annotations into track changes; v22 stores crop as a window.
+pub const HISTORY_VERSION: u32 = 22;
 
 #[derive(Debug, Error)]
 pub enum EditError {

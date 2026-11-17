@@ -518,7 +518,7 @@ fn effect_command_adds_an_effect() {
     app.loaded = true;
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key(':'));
-    for c in "effect crop --clip 1 --left 10".chars() {
+    for c in "effect crop --clip 1 --x 10 --w 90".chars() {
         handle_key(&mut app, &fake, key(c));
     }
     handle_key(
@@ -533,10 +533,10 @@ fn effect_command_adds_an_effect() {
     assert_eq!(
         c.effects,
         vec![nle_core::timeline::Effect::Crop {
-            left: 10.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 0.0
+            x: 10.0,
+            y: 0.0,
+            w: 100.0 - 10.0 - 0.0,
+            h: 100.0 - 0.0 - 0.0
         }]
     );
 }

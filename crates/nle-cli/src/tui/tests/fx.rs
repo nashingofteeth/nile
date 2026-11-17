@@ -14,10 +14,10 @@ fn effects_panel_drops_the_selected_row_and_undo_restores_it() {
     app.playhead = 1.0;
     let scale = nle_core::timeline::Effect::Scale { w: 2.0, h: 2.0 };
     let crop = nle_core::timeline::Effect::Crop {
-        left: 10.0,
-        right: 10.0,
-        top: 0.0,
-        bottom: 0.0,
+        x: 10.0,
+        y: 0.0,
+        w: 100.0 - 10.0 - 10.0,
+        h: 100.0 - 0.0 - 0.0,
     };
     set_effects(&mut app, 1, vec![scale.clone(), crop.clone()]);
 
@@ -67,10 +67,10 @@ fn effects_panel_digits_open_a_row() {
         1,
         vec![
             Effect::Crop {
-                left: 10.0,
-                right: 0.0,
-                top: 0.0,
-                bottom: 0.0,
+                x: 10.0,
+                y: 0.0,
+                w: 100.0 - 10.0 - 0.0,
+                h: 100.0 - 0.0 - 0.0,
             },
             Effect::Eq {
                 brightness: 0.0,
@@ -128,7 +128,7 @@ fn effects_panel_form_takes_values_and_exits() {
         app.mode
     );
 
-    // An inset over 100 is refused at apply time and keeps the form open.
+    // An x over 100 is refused at apply time and keeps the form open.
     handle_key(
         &mut app,
         &fake,
@@ -139,13 +139,13 @@ fn effects_panel_form_takes_values_and_exits() {
     }
     handle_key(&mut app, &fake, enter); // applies from the first field
     assert!(
-        app.message.contains("left must be 0–100"),
+        app.message.contains("crop x must be 0–100"),
         "{}",
         app.message
     );
     assert!(fx_state(&app).unwrap().form.is_some(), "still editing");
 
-    // Cancel, reopen, and inset 10% from the left and right. Only tab
+    // Cancel, reopen, and set x/y to 10%. Only tab
     // moves between fields; enter always commits.
     handle_key(&mut app, &fake, esc);
     handle_key(&mut app, &fake, key('c'));
@@ -181,10 +181,10 @@ fn effects_panel_form_takes_values_and_exits() {
     assert_eq!(
         clip_of(&app.project, 1).effects.last(),
         Some(&Effect::Crop {
-            left: 10.0,
-            right: 10.0,
-            top: 0.0,
-            bottom: 0.0
+            x: 10.0,
+            y: 10.0,
+            w: 90.0,
+            h: 90.0
         })
     );
 }
@@ -225,9 +225,9 @@ fn effect_form_letters_jump_and_tab_moves() {
     handle_key(&mut app, &fake, key('x'));
     handle_key(&mut app, &fake, key('c'));
 
-    handle_key(&mut app, &fake, key('b'));
+    handle_key(&mut app, &fake, key('h'));
     let focus = |app: &App| fx_state(app).unwrap().form.as_ref().unwrap().focus;
-    assert_eq!(focus(&app), 3, "b jumps to bottom");
+    assert_eq!(focus(&app), 3, "h jumps to height");
     for c in "12".chars() {
         handle_key(&mut app, &fake, key(c));
     }
@@ -240,10 +240,10 @@ fn effect_form_letters_jump_and_tab_moves() {
     assert_eq!(
         clip_of(&app.project, 1).effects.last(),
         Some(&Effect::Crop {
-            left: 0.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 12.0
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 12.0
         })
     );
 }
@@ -431,10 +431,10 @@ fn selecting_an_effect_opens_it_for_editing() {
     app.loaded = true;
     app.playhead = 1.0;
     let old = Effect::Crop {
-        left: 30.0,
-        right: 0.0,
-        top: 0.0,
-        bottom: 0.0,
+        x: 30.0,
+        y: 0.0,
+        w: 100.0 - 30.0 - 0.0,
+        h: 100.0 - 0.0 - 0.0,
     };
     set_effects(&mut app, 1, vec![old.clone()]);
     handle_key(&mut app, &fake, key('x'));
@@ -446,8 +446,8 @@ fn selecting_an_effect_opens_it_for_editing() {
     assert_eq!(form.fields[0].value, "", "the input starts blank");
     assert_eq!(form.fields[0].previous.as_deref(), Some("30"));
 
-    // Change only the right inset; left keeps its previous 30.
-    handle_key(&mut app, &fake, key('r'));
+    // Change only the window width; x keeps its previous 30.
+    handle_key(&mut app, &fake, key('w'));
     for c in "10".chars() {
         handle_key(&mut app, &fake, key(c));
     }
@@ -455,10 +455,10 @@ fn selecting_an_effect_opens_it_for_editing() {
     assert_eq!(
         clip_of(&app.project, 1).effects,
         vec![Effect::Crop {
-            left: 30.0,
-            right: 10.0,
-            top: 0.0,
-            bottom: 0.0
+            x: 30.0,
+            y: 0.0,
+            w: 10.0,
+            h: 100.0
         }]
     );
     assert!(app.message.starts_with("edit crop"), "{}", app.message);
@@ -531,10 +531,10 @@ fn the_edit_form_shows_the_old_value_beside_a_blank_input() {
     use ratatui::backend::TestBackend;
     let mut app = App::new(asset_project(), temp_project_path("t"));
     let effect = Effect::Crop {
-        left: 30.0,
-        right: 0.0,
-        top: 0.0,
-        bottom: 0.0,
+        x: 30.0,
+        y: 0.0,
+        w: 100.0 - 30.0 - 0.0,
+        h: 100.0 - 0.0 - 0.0,
     };
     app.mode = Mode::Fx(FxState {
         clip: 1,
@@ -565,10 +565,10 @@ fn adding_an_existing_kind_opens_it_for_editing() {
         &mut app,
         1,
         vec![Effect::Crop {
-            left: 30.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 0.0,
+            x: 30.0,
+            y: 0.0,
+            w: 100.0 - 30.0 - 0.0,
+            h: 100.0 - 0.0 - 0.0,
         }],
     );
     handle_key(&mut app, &fake, key('x'));
@@ -578,7 +578,7 @@ fn adding_an_existing_kind_opens_it_for_editing() {
     assert_eq!(form.editing, Some(0), "c edits the applied crop");
     assert_eq!(form.fields[0].previous.as_deref(), Some("30"));
 
-    handle_key(&mut app, &fake, key('r'));
+    handle_key(&mut app, &fake, key('w'));
     for c in "10".chars() {
         handle_key(&mut app, &fake, key(c));
     }
@@ -586,10 +586,10 @@ fn adding_an_existing_kind_opens_it_for_editing() {
     assert_eq!(
         clip_of(&app.project, 1).effects,
         vec![Effect::Crop {
-            left: 30.0,
-            right: 10.0,
-            top: 0.0,
-            bottom: 0.0
+            x: 30.0,
+            y: 0.0,
+            w: 10.0,
+            h: 100.0
         }],
         "still one crop row"
     );
@@ -608,16 +608,16 @@ fn an_existing_duplicate_edits_the_selected_row() {
         1,
         vec![
             Effect::Crop {
-                left: 10.0,
-                right: 0.0,
-                top: 0.0,
-                bottom: 0.0,
+                x: 10.0,
+                y: 0.0,
+                w: 100.0 - 10.0 - 0.0,
+                h: 100.0 - 0.0 - 0.0,
             },
             Effect::Crop {
-                left: 20.0,
-                right: 0.0,
-                top: 0.0,
-                bottom: 0.0,
+                x: 20.0,
+                y: 0.0,
+                w: 100.0 - 20.0 - 0.0,
+                h: 100.0 - 0.0 - 0.0,
             },
         ],
     );
@@ -644,10 +644,10 @@ fn the_effects_panel_shows_rows_or_an_empty_hint() {
         1,
         vec![
             nle_core::timeline::Effect::Crop {
-                left: 10.0,
-                right: 10.0,
-                top: 10.0,
-                bottom: 10.0,
+                x: 10.0,
+                y: 10.0,
+                w: 100.0 - 10.0 - 10.0,
+                h: 100.0 - 10.0 - 10.0,
             },
             nle_core::timeline::Effect::Eq {
                 brightness: 0.1,
@@ -669,7 +669,7 @@ fn the_effects_panel_shows_rows_or_an_empty_hint() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("effects → clip #1"), "{text}");
-    assert!(text.contains("l10 r10 t10 b10"), "{text}");
+    assert!(text.contains("80×80 @ 10,10"), "{text}");
     assert!(text.contains("b 0.1 · c 1 · s 1"), "{text}");
 
     app.mode = Mode::Fx(FxState {
@@ -713,7 +713,7 @@ fn effect_forms_hint_their_expected_input() {
             .join("\n")
     };
     for (kind, hint) in [
-        ("crop", "opposite edge"),
+        ("crop", "top-left"),
         ("scale", "100 keeps the size"),
         ("offset", "0 keeps the position"),
         ("eq", "contrast 1"),
@@ -733,4 +733,46 @@ fn effect_forms_hint_their_expected_input() {
             );
         }
     }
+}
+
+#[test]
+fn moving_a_full_width_crop_shrinks_it_to_the_edge() {
+    let fake = FakeMpv::new();
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let mut app = App::new(asset_project(), temp_project_path("fx-crop-x"));
+    app.loaded = true;
+    app.playhead = 1.0;
+    set_effects(
+        &mut app,
+        1,
+        vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        }],
+    );
+
+    handle_key(&mut app, &fake, key('x'));
+    handle_key(&mut app, &fake, enter); // open the applied crop for editing
+    handle_key(
+        &mut app,
+        &fake,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+    );
+    for c in "10".chars() {
+        handle_key(&mut app, &fake, key(c));
+    }
+    handle_key(&mut app, &fake, enter);
+
+    assert_eq!(
+        clip_of(&app.project, 1).effects,
+        vec![Effect::Crop {
+            x: 10.0,
+            y: 0.0,
+            w: 90.0,
+            h: 100.0
+        }],
+        "a blank width shrinks to the edge"
+    );
 }
