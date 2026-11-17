@@ -364,8 +364,10 @@ fn timeline_annotations_follow_their_clip_across_edits() {
     assert_eq!(anchor["start"]["source"], "1/1");
     assert!(s.ok(&["annotation", "ls"]).contains("timeline 1 s"));
 
-    // Deleting the clip drops the note; undo brings both back.
-    s.ok(&["delete", "--clip", &piece.to_string()]);
+    // Deleting the clip drops the note; the one-shot edit reports it, and
+    // undo brings both back.
+    let dropped = s.ok(&["delete", "--clip", &piece.to_string()]);
+    assert!(dropped.contains("dropped annotation"), "{dropped}");
     assert!(s.ok(&["annotation", "ls"]).contains("no annotations"));
     s.ok(&["undo"]);
     assert!(s.ok(&["annotation", "ls"]).contains("timeline 1 s"));

@@ -181,9 +181,10 @@ impl Document {
         }
     }
 
-    /// Run one catalog action, recording it in the history. Clamp notes are
-    /// discarded here; the preview path drains them through
-    /// [`Document::edit_actions`].
+    /// Run one catalog action, recording it in the history. Clamp notes and
+    /// dropped-annotation warnings are appended to the outcome's description:
+    /// a one-shot CLI/TUI edit has no other channel for them (the preview
+    /// path returns them structured through [`Document::edit_actions`]).
     pub fn edit(
         &mut self,
         action: &Action,
@@ -191,8 +192,13 @@ impl Document {
         register: &mut Option<Register>,
     ) -> Result<Outcome, EditError> {
         self.clear_warnings();
-        let outcome = self.edit_action(action, from, register);
-        self.clear_warnings();
+        let mut outcome = self.edit_action(action, from, register);
+        let warnings = self.drain_warnings();
+        if let Ok(outcome) = &mut outcome
+            && !warnings.is_empty()
+        {
+            outcome.desc = format!("{} — {}", outcome.desc, warnings.join("; "));
+        }
         outcome
     }
 
@@ -561,6 +567,46 @@ mod tests {
             effects: Vec::new(),
         })];
         Document::new(p)
+    }
+
+    #[test]
+    fn a_dropped_annotation_is_reported_in_the_outcome() {
+        use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
+
+        let mut doc = document();
+        doc.add_annotation(
+            AnnotationKind::Marker,
+            Anchor::Timeline {
+                start: ClipPoint {
+                    clip: 1,
+                    source: Seconds::new(1, 2),
+                },
+                end: ClipPoint {
+                    clip: 1,
+                    source: Seconds::new(1, 2),
+                },
+            },
+            0,
+        )
+        .unwrap();
+        let mut register = None;
+        let outcome = doc
+            .edit(
+                &crate::Action::Delete {
+                    track: 0,
+                    target: crate::action::Target::Clip(1),
+                    ripple: false,
+                },
+                0.0,
+                &mut register,
+            )
+            .unwrap();
+        assert!(
+            outcome.desc.contains("dropped annotation #1"),
+            "{}",
+            outcome.desc
+        );
+        assert!(doc.project.annotations.is_empty());
     }
 
     #[test]

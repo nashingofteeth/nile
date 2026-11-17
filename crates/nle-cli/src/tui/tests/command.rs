@@ -668,6 +668,7 @@ fn annotation_add_timeline_pins_the_clip_under_the_position() {
         panic!("still a timeline anchor");
     };
     assert_ne!(start.clip, 1);
+    let piece = start.clip;
     assert_eq!(
         app.project.annotation_span(annotation),
         Some((
@@ -675,6 +676,11 @@ fn annotation_add_timeline_pins_the_clip_under_the_position() {
             Seconds::from_integer(5) / Seconds::from_integer(2)
         ))
     );
+
+    // Deleting the clip drops the note and says so in the message line.
+    let dropped = cmd(&mut app, &format!("delete --clip {piece}"));
+    assert!(dropped.contains("dropped annotation"), "{dropped}");
+    assert!(app.project.annotations.is_empty());
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
