@@ -372,26 +372,39 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 asset,
                 group,
                 time,
-            } => Some(
-                parse_signed_time(time)
-                    .map_err(|e| format!("invalid --time {time:?} ({e})"))
-                    .and_then(|time| {
-                        let source = match (asset, group) {
-                            (Some(id), None) => nle_core::SourceRef::Asset { id: *id },
-                            (None, Some(id)) => nle_core::SourceRef::Group { id: *id },
-                            _ => {
-                                return Err(
-                                    "annotation add needs exactly one of --asset or --group"
-                                        .to_string(),
-                                );
-                            }
-                        };
-                        Ok(Action::AnnotationAdd {
-                            anchor: nle_core::Anchor::Source { source, time },
-                            kind: nle_core::AnnotationKind::Note { text: text.clone() },
-                        })
-                    }),
-            ),
+                timeline,
+                at,
+                track,
+            } => Some((|| {
+                if *timeline {
+                    let at = at
+                        .as_deref()
+                        .ok_or("annotation add --timeline needs --at TIME")?;
+                    return Ok(Action::AnnotationAddAt {
+                        track: cli_index(*track, "--track")?,
+                        at: cli_time(at)?,
+                        kind: nle_core::AnnotationKind::Note { text: text.clone() },
+                    });
+                }
+                let time = time
+                    .as_deref()
+                    .ok_or("annotation add needs --time T (source time)")?;
+                let time = parse_signed_time(time)
+                    .map_err(|e| format!("invalid --time {time:?} ({e})"))?;
+                let source = match (asset, group) {
+                    (Some(id), None) => nle_core::SourceRef::Asset { id: *id },
+                    (None, Some(id)) => nle_core::SourceRef::Group { id: *id },
+                    _ => {
+                        return Err(
+                            "annotation add needs exactly one of --asset or --group".to_string()
+                        );
+                    }
+                };
+                Ok(Action::AnnotationAdd {
+                    anchor: nle_core::Anchor::Source { source, time },
+                    kind: nle_core::AnnotationKind::Note { text: text.clone() },
+                })
+            })()),
             AnnotationCmd::Rm { id } => Some(Ok(Action::AnnotationRemove { id: *id })),
             AnnotationCmd::Resolve { id } => Some(Ok(Action::AnnotationResolve { id: *id })),
         },

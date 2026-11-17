@@ -636,7 +636,7 @@ enum MediaCmd {
 /// Annotation subcommands.
 #[derive(Debug, Subcommand)]
 enum AnnotationCmd {
-    /// Add a note anchored to a source time
+    /// Add a note anchored to a source time or a timeline position
     Add {
         /// Note text
         text: String,
@@ -647,8 +647,17 @@ enum AnnotationCmd {
         #[arg(long, group = "source")]
         group: Option<u32>,
         /// Source time (seconds or timecode)
-        #[arg(long, value_name = "TIME")]
-        time: String,
+        #[arg(long, value_name = "TIME", required_unless_present = "timeline")]
+        time: Option<String>,
+        /// Anchor to the timeline clip under --at instead of a source time
+        #[arg(long, conflicts_with_all = ["asset", "group", "time"])]
+        timeline: bool,
+        /// Timeline position to pin (with --timeline)
+        #[arg(long, value_name = "TIME", conflicts_with_all = ["asset", "group", "time"])]
+        at: Option<String>,
+        /// Track for --timeline (1-based; default 1)
+        #[arg(long, value_name = "N", default_value_t = 1)]
+        track: usize,
     },
     /// List annotations (id, status, anchor, text)
     Ls {
@@ -1207,7 +1216,21 @@ mod tests {
                     text: "hi".into(),
                     asset: Some(1),
                     group: None,
-                    time: "0".into(),
+                    time: Some("0".into()),
+                    timeline: false,
+                    at: None,
+                    track: 1,
+                },
+            },
+            Cmd::Annotation {
+                action: AnnotationCmd::Add {
+                    text: "pin".into(),
+                    asset: None,
+                    group: None,
+                    time: None,
+                    timeline: true,
+                    at: Some("1".into()),
+                    track: 1,
                 },
             },
             Cmd::Annotation {
