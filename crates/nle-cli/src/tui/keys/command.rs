@@ -614,8 +614,14 @@ fn note_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
     let Some(index) = track.index_at(at) else {
         return Some("the timeline is empty — move onto a clip".to_string());
     };
-    let Segment::Clip(clip) = &track.segments[index] else {
-        return Some("the playhead is on a gap — move it onto a clip".to_string());
+    let clip = match &track.segments[index] {
+        Segment::Clip(clip) => clip,
+        Segment::Gap(_) => {
+            return Some("the playhead is on a gap — move it onto a clip".to_string());
+        }
+        Segment::Transition(_) => {
+            return Some("the playhead is on a blend — move it onto a clip".to_string());
+        }
     };
     let source = clip.source_at(at - track.start_of(index));
     let action = Action::AnnotationAdd {
@@ -635,16 +641,21 @@ fn note_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
 /// annotation in the log. Mutations are catalog actions (`:annotation add`,
 /// `rm`, `resolve`) parsed by `action::parse`.
 fn annotation_command(app: &mut App, f: &mut action::Flags) -> String {
-    match f.positional().as_deref() {
-        None | Some("ls") => {}
-        Some(other) => {
-            return format!("unknown annotation command {other:?} — use add, ls, rm or resolve");
-        }
-    }
-    if let Err(e) = f.finish(":annotation ls") {
+    // `action::parse` owns add/rm/resolve; only `ls` falls through here.
+    f.positional();
+    let sequence = match f.take("sequence") {
+        Some(value) => match value.parse::<u32>() {
+            Ok(id) => id,
+            Err(_) => return format!("--sequence expects a number, got {value:?}"),
+        },
+        None => app.project.active_id(),
+    };
+    if let Err(e) = f.finish(":annotation ls [--sequence N]") {
         return e.to_string();
     }
-    let sequence = app.project.active_id();
+    if app.project.sequence(sequence).is_none() {
+        return format!("sequence #{sequence} not found");
+    }
     let annotations: Vec<&nle_core::Annotation> = app
         .project
         .annotations

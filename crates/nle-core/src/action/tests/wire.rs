@@ -24,6 +24,32 @@ fn a_split_is_tagged_with_its_catalog_name() {
 }
 
 #[test]
+fn annotation_add_keeps_the_nested_kind_shape() {
+    let value = round_trip(Action::AnnotationAdd {
+        anchor: Anchor::Source {
+            source: crate::annotation::SourceRef::Asset { id: 1 },
+            time: Seconds::new(3, 2),
+        },
+        kind: AnnotationKind::Note {
+            text: "hello".into(),
+        },
+    });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "action": "annotation_add",
+            "anchor": {
+                "on": "source",
+                "source": {"of": "asset", "id": 1},
+                "time": "3/2"
+            },
+            "kind": {"kind": "note", "text": "hello"}
+        }),
+        "the action and the persisted annotation share one kind shape"
+    );
+}
+
+#[test]
 fn unit_actions_have_no_params() {
     assert_eq!(
         round_trip(Action::Undo),

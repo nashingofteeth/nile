@@ -602,3 +602,35 @@ fn note_anchors_the_clip_under_the_playhead() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
 }
+
+#[test]
+fn annotation_ls_reads_the_requested_sequence() {
+    let path = temp_project_path("annotation-ls-sequence");
+    let mut p = asset_project();
+    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    p.add_annotation(
+        second,
+        nle_core::AnnotationKind::Note {
+            text: "on the vertical".into(),
+        },
+        nle_core::Anchor::Source {
+            source: nle_core::SourceRef::Asset { id: 1 },
+            time: Seconds::from_integer(0),
+        },
+        nle_core::Provenance {
+            actor: nle_core::Actor::Human,
+            at: 0,
+        },
+    )
+    .unwrap();
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+
+    assert!(cmd(&mut app, "annotation ls").contains("no annotations"));
+    assert!(cmd(&mut app, "annotation ls --sequence 2").contains("1 annotation(s)"));
+    assert!(cmd(&mut app, "annotation ls --sequence 99").contains("not found"));
+    assert!(cmd(&mut app, "annotation ls --sequence nope").contains("expects a number"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
