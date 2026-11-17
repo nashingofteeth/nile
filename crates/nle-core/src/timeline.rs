@@ -1203,6 +1203,31 @@ mod tests {
         );
     }
 
+    // One definition of the timeline↔source boundary: a retimed clip's two
+    // conversions are inverses, and the free functions are what both a `Clip`
+    // and a recorded `FrameSource` call.
+    #[test]
+    fn the_source_boundary_round_trips_at_a_retime() {
+        let c = Clip {
+            id: 1,
+            asset: 1,
+            asset_in: Seconds::from_integer(3),
+            asset_out: Seconds::from_integer(5),
+            speed: Seconds::from_integer(2),
+            effects: Vec::new(),
+        };
+        let offset = Seconds::new(1, 2); // half a timeline second at 2×
+        let source = c.source_at(offset);
+        assert_eq!(source, Seconds::from_integer(4), "3 s + 0.5 s × 2");
+        assert_eq!(c.timeline_offset_of(source), offset, "the inverse");
+        assert_eq!(source_time(c.asset_in, c.speed, offset), source);
+        assert_eq!(
+            c.duration(),
+            Seconds::from_integer(1),
+            "2 s of source at 2×"
+        );
+    }
+
     #[test]
     fn a_lut_path_survives_the_option_and_graph_parsers() {
         let chain = |path: &str| Effect::chain(&[Effect::Lut { path: path.into() }], (0, 0));
