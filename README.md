@@ -376,7 +376,7 @@ back past time 0). `nile show` prints `[i]` segment indices and `#n` clip ids.
 ### Effects
 
 ```sh
-nile effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
+nile effect crop --clip 3 --x 10 --y 5 --w 80 --h 90
 nile effect scale --clip 3 --w 50 --h 50
 nile effect offset --clip 3 --x 10 --y -5
 nile effect eq --clip 3 --brightness -0.2  # contrast/saturation default to 1

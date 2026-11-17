@@ -51,6 +51,9 @@ just no longer drags the audio clock with it.
   `yuva420p`, so the export overlay (and the monitor's composite, gated by
   `Effect::masks`) reveals the track below; the single-track export drops to
   black. Opaque padding silently breaks "reveal below".
+- Crop is a window `{x, y, w, h}` in percentages of the current picture box
+  (`x`/`y` top-left, `w`/`h` size), not four independent insets; later
+  effects see the cropped box because the chain threads it forward.
 
 - Export retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained
   outside [0.5, 2]); the 1× graph stays byte-identical.
