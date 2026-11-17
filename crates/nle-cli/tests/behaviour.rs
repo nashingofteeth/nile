@@ -412,6 +412,47 @@ fn timeline_ranges_follow_ripples_and_drop_with_a_clip() {
 }
 
 #[test]
+fn a_range_end_on_a_cut_belongs_to_the_left_clip() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6
+    s.ok(&[
+        "annotation",
+        "add",
+        "cut",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--to",
+        "2",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let clips = project["sequences"][0]["timeline"]["tracks"][0]["segments"]
+        .as_array()
+        .unwrap();
+    let left = clips[0]["Clip"]["id"].as_u64().expect("left clip");
+    let right = clips[1]["Clip"]["id"].as_u64().expect("right clip");
+    let anchor = &project["annotations"][0]["anchor"];
+    assert_eq!(anchor["end"]["clip"], left, "the cut end binds left");
+    assert_eq!(anchor["end"]["source"], "2/1");
+
+    // Deleting the right clip leaves the left tail (and the note) intact.
+    s.ok(&["delete", "--clip", &right.to_string()]);
+    assert!(
+        s.ok(&["annotation", "ls"]).contains("timeline 0.5–2 s"),
+        "the note belongs to the surviving left clip"
+    );
+    s.ok(&["undo"]);
+
+    // Deleting the left clip drops it.
+    let dropped = s.ok(&["delete", "--clip", &left.to_string()]);
+    assert!(dropped.contains("dropped annotation"), "{dropped}");
+    assert!(s.ok(&["annotation", "ls"]).contains("no annotations"));
+    s.ok(&["undo"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("timeline 0.5–2 s"));
+}
+
+#[test]
 fn show_json_exposes_time_maps_and_groups() {
     let s = Sandbox::new();
     s.base();
