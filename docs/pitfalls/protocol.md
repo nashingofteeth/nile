@@ -8,7 +8,7 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
 `undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`, `media.list`,
-`media.add`, `playhead.set`. The internal `wire_catalog!` macro
+`media.add`, `playhead.set`, `annotation.list`. The internal `wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a method to the invocation, then
 a sample to `all_calls()`; the `METHODS.len()` assertion fails until the sample
@@ -45,7 +45,9 @@ diff = {
                segments_changed, kind_changed, muted_changed }]
   }],
   sequences_added: [id], sequences_removed: [id],
-  assets_added: [asset id], assets_removed: [asset id], assets_changed: [asset id]
+  assets_added: [asset id], assets_removed: [asset id], assets_changed: [asset id],
+  annotations_added: [annotation id], annotations_removed: [annotation id],
+  annotations_changed: [annotation id]
 }
 ```
 
@@ -104,6 +106,15 @@ the CLI/picker owns that.
 The `used_by` shape changed in protocol v3: it is a list of `{sequence,
 segment}` pairs, because clip ids repeat across sequences.
 
+## Annotations
+
+`annotation.list {sequence?}` returns `{sequence, annotations}` for that
+sequence (default: the active one); an unknown sequence is invalid params.
+Mutations are the catalog actions `annotation_add`, `annotation_remove` and
+`annotation_resolve`; each is one undo entry on the active sequence's stack.
+A source anchor is a media time (`asset` or group clock), so timeline edits do
+not move it. This method is additive, so `PROTOCOL_VERSION` stays at 5.
+
 ## Time
 
 `from`, `Outcome.playhead`, `SetSpeed.rate`, and event `at` are rational
@@ -119,6 +130,10 @@ The nested values reuse the model's serde forms, not a separate wire spelling:
 - `effect`: `{"Crop":…}`, `{"Scale":…}`, `{"Offset":…}`, `{"Eq":…}`,
   `{"Lut":…}`.
 - `segment`: `{"Clip":…}`, `{"Gap":…}`, `{"Transition":…}`.
+- `annotation_add`: `kind` is `{"kind":"note","text":…}` or
+  `{"kind":"marker"}`, and `anchor` is `{"on":"source",
+  "source":{"of":"asset","id":1},"time":"1/2"}` (or `"of":"group"`) — the
+  persisted `Annotation` forms, not a parallel spelling.
 - `target`: `{"at":…}`, `{"clip":…}`, `{"segment":…}`.
 - `edge`: `"in"` | `"out"`; `GapLen`/`TransitionLen`: `{"frames":…}`,
   `{"seconds":…}`, `{"percent":…}`.

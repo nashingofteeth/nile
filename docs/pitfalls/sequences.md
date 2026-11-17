@@ -14,11 +14,14 @@ files are rejected, never migrated.
 - `Document` owns `Histories` keyed by sequence id and routes every edit,
   asset change, undo and redo through `project.active_id()`. Switching
   sequences switches undo; never share one stack across timelines.
-- History sidecars are v19 (`stacks` keyed by id, plus grouped changes and
-  media groups).
+- History sidecars are v20 (`stacks` keyed by id, plus grouped changes,
+  media groups and annotations).
   Pool edits are recorded in the sequence active at the time; undoing one
   still validates against every sequence, so an asset used elsewhere refuses
   loudly.
+- Media-group changes are project-wide but recorded on the active sequence's
+  stack; changing a group from another sequence can strand older entries.
+  Annotations are sequence-scoped for this reason.
 - `Project::select_sequence` is model-only. Use `Document::select_sequence` in
   a front-end so the history switches too.
 - `active` is persisted session state, like the playhead: `Document::save`
