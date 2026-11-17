@@ -656,26 +656,26 @@ fn annotations_are_undoable() {
     h.redo(&mut p).unwrap();
     assert_eq!(p.annotations.len(), 1, "redo restores it");
 
-    let desc = h.remove_annotation(&mut p, id, 0).unwrap();
+    let desc = h.remove_annotation(&mut p, 1, id, 0).unwrap();
     assert!(desc.contains("remove annotation"), "{desc}");
     assert!(p.annotations.is_empty());
     h.undo(&mut p).unwrap();
     assert_eq!(p.annotations.len(), 1, "undo restores a removed annotation");
 
-    let (desc, changed) = h.resolve_annotation(&mut p, id, 0).unwrap();
+    let (desc, changed) = h.resolve_annotation(&mut p, 1, id, 0).unwrap();
     assert!(changed);
     assert!(desc.contains("resolve annotation"), "{desc}");
     assert_eq!(p.annotations[0].status, crate::AnnotationStatus::Resolved);
     h.undo(&mut p).unwrap();
     assert_eq!(p.annotations[0].status, crate::AnnotationStatus::Open);
 
-    let (_, changed) = h.resolve_annotation(&mut p, id, 0).unwrap();
+    let (_, changed) = h.resolve_annotation(&mut p, 1, id, 0).unwrap();
     assert!(changed);
     h.undo(&mut p).unwrap();
-    let (_, changed) = h.resolve_annotation(&mut p, id, 0).unwrap();
+    let (_, changed) = h.resolve_annotation(&mut p, 1, id, 0).unwrap();
     assert!(changed, "still open after the undo");
     let depth = h.depth();
-    let (_, changed) = h.resolve_annotation(&mut p, id, 0).unwrap();
+    let (_, changed) = h.resolve_annotation(&mut p, 1, id, 0).unwrap();
     assert!(!changed, "resolving twice is a no-op");
     assert_eq!(h.depth(), depth, "and records no dead history entry");
 }
@@ -703,4 +703,37 @@ fn annotation_history_refuses_when_the_list_changed_outside() {
 
     assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
     assert_eq!(p.annotations, live, "failed undo left the list untouched");
+}
+
+#[test]
+fn annotation_history_sidecar_round_trips() {
+    use crate::annotation::{Anchor, AnnotationKind, SourceRef};
+
+    let mut p = fixture();
+    let mut h = History::default();
+    h.add_annotation(
+        &mut p,
+        1,
+        AnnotationKind::Note {
+            text: "check the cut".into(),
+        },
+        Anchor::Source {
+            source: SourceRef::Asset { id: 1 },
+            time: Seconds::new(5, 2),
+        },
+        0,
+    )
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nle.history.json");
+    save(&h, &path);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"sequence\": 1"), "{text}");
+    assert!(text.contains("check the cut"), "{text}");
+
+    let mut loaded = load(&path);
+    let mut q = p.clone();
+    loaded.undo(&mut q).unwrap();
+    assert!(q.annotations.is_empty(), "the sidecar restores undo");
 }

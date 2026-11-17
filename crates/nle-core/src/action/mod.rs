@@ -702,7 +702,8 @@ pub fn run_action(
         }
         Action::AnnotationRemove { id } => {
             let playhead = frame_of(project.fps.as_ref(), from);
-            let desc = history.remove_annotation(project, *id, playhead)?;
+            let sequence = project.active_id();
+            let desc = history.remove_annotation(project, sequence, *id, playhead)?;
             Ok(Outcome {
                 desc,
                 changed: true,
@@ -711,7 +712,8 @@ pub fn run_action(
         }
         Action::AnnotationResolve { id } => {
             let playhead = frame_of(project.fps.as_ref(), from);
-            let (desc, changed) = history.resolve_annotation(project, *id, playhead)?;
+            let sequence = project.active_id();
+            let (desc, changed) = history.resolve_annotation(project, sequence, *id, playhead)?;
             Ok(Outcome {
                 desc,
                 changed,

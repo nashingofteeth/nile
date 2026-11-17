@@ -295,12 +295,13 @@ impl History {
         anchor: Anchor,
         playhead: i64,
     ) -> Result<u32, EditError> {
-        let before = project.annotations.clone();
+        let before = project.annotations_for(sequence).cloned().collect();
         let id = project.add_annotation(sequence, kind, anchor, self.provenance())?;
         let desc = format!("add annotation #{id}");
         self.push_change(Change::Annotations(AnnotationsChange {
+            sequence,
             before,
-            after: project.annotations.clone(),
+            after: project.annotations_for(sequence).cloned().collect(),
             desc,
             playhead,
             provenance: self.provenance(),
@@ -313,15 +314,18 @@ impl History {
     pub fn remove_annotation(
         &mut self,
         project: &mut Project,
+        sequence: u32,
         id: u32,
         playhead: i64,
     ) -> Result<String, EditError> {
-        let before = project.annotations.clone();
+        check_annotation_sequence(project, sequence, id)?;
+        let before = project.annotations_for(sequence).cloned().collect();
         let removed = project.remove_annotation(id)?;
         let desc = format!("remove annotation #{}", removed.id);
         self.push_change(Change::Annotations(AnnotationsChange {
+            sequence,
             before,
-            after: project.annotations.clone(),
+            after: project.annotations_for(sequence).cloned().collect(),
             desc: desc.clone(),
             playhead,
             provenance: self.provenance(),
@@ -335,17 +339,20 @@ impl History {
     pub fn resolve_annotation(
         &mut self,
         project: &mut Project,
+        sequence: u32,
         id: u32,
         playhead: i64,
     ) -> Result<(String, bool), EditError> {
-        let before = project.annotations.clone();
+        check_annotation_sequence(project, sequence, id)?;
+        let before: Vec<Annotation> = project.annotations_for(sequence).cloned().collect();
         if !project.resolve_annotation(id)? {
             return Ok((format!("annotation #{id} is already resolved"), false));
         }
         let desc = format!("resolve annotation #{id}");
         self.push_change(Change::Annotations(AnnotationsChange {
+            sequence,
             before,
-            after: project.annotations.clone(),
+            after: project.annotations_for(sequence).cloned().collect(),
             desc: desc.clone(),
             playhead,
             provenance: self.provenance(),
@@ -816,13 +823,26 @@ pub struct MediaGroupsChange {
 }
 
 /// An annotation-list edit: adding, removing or resolving an annotation.
+/// `before`/`after` hold only `sequence`'s annotations — history stacks are
+/// per sequence, so a project-wide snapshot would invalidate another stack.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnnotationsChange {
+    pub sequence: u32,
     pub before: Vec<Annotation>,
     pub after: Vec<Annotation>,
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
+}
+
+/// Refuse to record an annotation edit on a stack it does not belong to.
+fn check_annotation_sequence(project: &Project, sequence: u32, id: u32) -> Result<(), EditError> {
+    match project.annotation(id) {
+        Some(annotation) if annotation.sequence != sequence => {
+            Err(EditError::AnnotationSequence(id, annotation.sequence))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// What an undo/redo restored: the description and the playhead frame.
@@ -1015,10 +1035,8 @@ fn substitute_groups(
     Ok(())
 }
 
-/// Verify the live media pool matches one side of `change` (exact equality,
-/// including probes) and substitute the other.
-/// Verify the live annotation list matches one side of `change` (exact
-/// equality) and substitute the other.
+/// Verify the live annotations for `change.sequence` match one side of the
+/// change, then substitute only that sequence's list.
 fn substitute_annotations(
     project: &mut Project,
     change: &AnnotationsChange,
@@ -1029,15 +1047,18 @@ fn substitute_annotations(
     } else {
         (&change.after, &change.before)
     };
-    if project.annotations != *expected {
+    let live: Vec<Annotation> = project.annotations_for(change.sequence).cloned().collect();
+    if live != *expected {
         return Err(EditError::History(
             "annotations changed outside the undo stack".to_string(),
         ));
     }
-    project.annotations = write.clone();
+    project.replace_annotations(change.sequence, write.clone());
     Ok(())
 }
 
+/// Verify the live media pool matches one side of `change` (exact equality,
+/// including probes) and substitute the other.
 fn substitute_assets(
     project: &mut Project,
     change: &AssetChange,

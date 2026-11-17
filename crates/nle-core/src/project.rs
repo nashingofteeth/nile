@@ -734,6 +734,29 @@ impl Project {
         self.annotations.iter().find(|a| a.id == id)
     }
 
+    /// Annotations scoped to `sequence`, in project order.
+    pub fn annotations_for(&self, sequence: u32) -> impl Iterator<Item = &Annotation> + '_ {
+        self.annotations
+            .iter()
+            .filter(move |annotation| annotation.sequence == sequence)
+    }
+
+    /// Replace one sequence's annotations, leaving every other sequence (and
+    /// its relative order) in place. Undo snapshots are sequence-scoped, so a
+    /// write on one sequence can never invalidate another stack's entry.
+    pub(crate) fn replace_annotations(&mut self, sequence: u32, annotations: Vec<Annotation>) {
+        let first = self
+            .annotations
+            .iter()
+            .position(|annotation| annotation.sequence == sequence);
+        self.annotations
+            .retain(|annotation| annotation.sequence != sequence);
+        let at = first
+            .unwrap_or(self.annotations.len())
+            .min(self.annotations.len());
+        self.annotations.splice(at..at, annotations);
+    }
+
     /// Annotation ids that anchor directly to asset `id`.
     pub fn asset_annotation_usage(&self, id: u32) -> Vec<u32> {
         self.annotations

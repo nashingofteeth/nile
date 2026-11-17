@@ -396,7 +396,7 @@ impl Document {
         let active = self.project.active_id();
         self.histories
             .get_mut(active)
-            .remove_annotation(&mut self.project, id, playhead)
+            .remove_annotation(&mut self.project, active, id, playhead)
     }
 
     pub fn resolve_annotation(
@@ -407,7 +407,7 @@ impl Document {
         let active = self.project.active_id();
         self.histories
             .get_mut(active)
-            .resolve_annotation(&mut self.project, id, playhead)
+            .resolve_annotation(&mut self.project, active, id, playhead)
     }
 
     /// Add assets and a media group as one undo step. `files` is the full
@@ -561,6 +561,56 @@ mod tests {
             effects: Vec::new(),
         })];
         Document::new(p)
+    }
+
+    #[test]
+    fn annotation_undo_is_scoped_to_its_sequence() {
+        use crate::annotation::{Anchor, AnnotationKind, SourceRef};
+
+        let mut doc = document();
+        let first = doc.project.active_id();
+        let second = second_sequence(&mut doc);
+        let note = |text: &str| AnnotationKind::Note {
+            text: text.to_string(),
+        };
+        let anchor = || Anchor::Source {
+            source: SourceRef::Asset { id: 1 },
+            time: Seconds::from_integer(0),
+        };
+
+        doc.select_sequence(first).unwrap();
+        let one = doc.add_annotation(note("one"), anchor(), 0).unwrap();
+        doc.select_sequence(second).unwrap();
+        let two = doc.add_annotation(note("two"), anchor(), 0).unwrap();
+        assert_eq!(doc.project.annotations.len(), 2);
+
+        // Sequence 1's undo removes only its own note, even though sequence 2
+        // added one since.
+        doc.select_sequence(first).unwrap();
+        doc.undo().expect("sequence 1 still undoes");
+        assert_eq!(doc.project.annotations.len(), 1);
+        assert_eq!(doc.project.annotations[0].id, two);
+        assert!(matches!(
+            doc.remove_annotation(two, 0),
+            Err(EditError::AnnotationSequence(id, sequence))
+                if id == two && sequence == second
+        ));
+
+        // Sequence 2's stack is independent.
+        doc.select_sequence(second).unwrap();
+        doc.undo().expect("sequence 2 still undoes");
+        assert!(doc.project.annotations.is_empty());
+
+        doc.redo().unwrap();
+        doc.select_sequence(first).unwrap();
+        doc.redo().unwrap();
+        let mut ids: Vec<u32> = doc.project.annotations.iter().map(|a| a.id).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![one, two],
+            "both redo stacks restore their own note"
+        );
     }
 
     #[test]
