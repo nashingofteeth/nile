@@ -1117,10 +1117,11 @@ fn model_json(path: &std::path::Path) -> serde_json::Value {
         .remove("revision");
     if let Some(sequences) = value["sequences"].as_array_mut() {
         for sequence in sequences {
-            sequence
-                .as_object_mut()
-                .expect("sequence object")
-                .remove("manual_edits");
+            let sequence = sequence.as_object_mut().expect("sequence object");
+            sequence.remove("manual_edits");
+            // Undo/redo deliberately move the cursor to the position the edit
+            // was made from, so it is session state, not model state.
+            sequence.remove("playhead");
         }
     }
     value
@@ -2242,4 +2243,40 @@ fn a_missing_hardware_encoder_retries_on_cpu() {
     assert!(out.contains("CPU fallback"), "no fallback notice: {out}");
     s.assert_dur("fallback.mp4", 6.0, "the retry renders the same film");
     s.assert_px("fallback.mp4", 3.0, GREEN, "the retry's pixels");
+}
+
+// The stored playhead is what the next command and the TUI open on, so a
+// length-changing CLI edit must leave it inside the timeline — `run_cli_action`
+// used to persist no cursor at all, leaving it past the new end.
+#[test]
+fn a_cli_edit_keeps_the_stored_playhead_inside_the_timeline() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6
+    s.ok(&["seek", "5"]);
+    let out = s.ok(&["delete", "--at", "5", "--ripple"]);
+    assert!(!out.contains("playhead f"), "a delete has no frame: {out}");
+    let loaded = nle_core::Project::load(&s.file(P)).expect("the edit persisted");
+    assert!(
+        loaded.playhead <= loaded.last_frame(),
+        "stored {} but the last frame is {}",
+        nle_core::format_seconds(&loaded.playhead),
+        nle_core::format_seconds(&loaded.last_frame())
+    );
+
+    // An edit that does carry a frame announces the one it stored, not the
+    // frame it asked for (undo restores the position the delete was made from).
+    let out = s.ok(&["undo"]);
+    let loaded = nle_core::Project::load(&s.file(P)).expect("the undo persisted");
+    let announced = out
+        .rsplit("(playhead f")
+        .next()
+        .and_then(|tail| tail.split(')').next())
+        .and_then(|frame| frame.parse::<i64>().ok())
+        .unwrap_or_else(|| panic!("no playhead frame in: {out}"));
+    let announced_at = nle_core::frame_to_secs(loaded.fps.as_ref(), announced);
+    assert!(
+        (announced_at - nle_core::secs_f64(&loaded.playhead)).abs() < 1e-9,
+        "announced f{announced} ({announced_at} s) but stored {} s",
+        nle_core::secs_f64(&loaded.playhead)
+    );
 }

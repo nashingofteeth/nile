@@ -633,26 +633,32 @@ impl ServeHandler {
         // no one edge to follow, so it lands on its last explicit playhead or
         // clamps the cursor into the new length.
         let single = (actions.len() == 1).then(|| &actions[0]);
-        let mut landed = None;
-        if let Some(frame) = outcome.playhead {
-            let at = self.frame_seconds(frame);
-            self.session.set_playhead(secs_f64(&at));
-            landed = Some(self.session.project().playhead);
-        } else if outcome.changed && single.is_some_and(playhead::reanchors) {
-            let pos = playhead::reanchor(self.session.project(), current, track, anchor);
-            self.session.set_playhead(pos);
-            if self.session.project().playhead != before {
-                landed = Some(self.session.project().playhead);
-            }
+        // An explicit frame is always reported; a re-anchored or clamped
+        // cursor only when it actually moved (a split reports no playhead).
+        let explicit = outcome.playhead.is_some();
+        let target = if let Some(action) = single {
+            // One policy for every front-end: the TUI, this server and the CLI.
+            playhead::land(
+                self.session.project(),
+                current,
+                track,
+                anchor,
+                action,
+                &outcome,
+            )
+        } else if let Some(frame) = outcome.playhead {
+            // A batch has no one edge to follow: its last explicit playhead.
+            Some(secs_f64(&self.frame_seconds(frame)))
         } else if outcome.changed {
-            // Track/pool edits leave the active media alone; just clamp.
-            let clamped = current.clamp(0.0, secs_f64(&self.session.project().last_frame()));
-            if clamped != current {
-                self.session.set_playhead(clamped);
-                landed = Some(self.session.project().playhead);
-            }
-        }
-        let playhead = landed;
+            Some(current.clamp(0.0, secs_f64(&self.session.project().last_frame())))
+        } else {
+            None
+        };
+        let playhead = target.and_then(|at| {
+            self.session.set_playhead(at);
+            let now = self.session.project().playhead;
+            (explicit || now != before).then_some(now)
+        });
 
         self.save_or_poison(outcome.changed, playhead.is_some())?;
 

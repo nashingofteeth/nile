@@ -10,10 +10,10 @@ use nle_core::action::{EffectArgs, effect_from_args};
 use nle_core::timeline::TrackKind;
 use nle_core::{
     Action, Asset, DEFAULT_TRANSITION_FRAMES, Edge, GapLen, Target, TransitionKind, TransitionLen,
-    format_seconds, parse_signed_time,
+    format_seconds, frame_of, parse_signed_time, secs_f64,
 };
 
-use crate::session::Session;
+use crate::session::{Session, playhead};
 use crate::{
     AnnotationCmd, Cmd, MediaCmd, TrackCmd, TrackKindArg, edit_message, log, parse_speed_arg, say,
     say_err,
@@ -430,10 +430,22 @@ pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()>
     let outcome = session
         .apply_action(action, from)
         .map_err(|e| anyhow::Error::msg(edit_message(&e)))?;
+    // Store where the playhead landed, so the next command and the TUI open on
+    // it — a length-changing edit must not leave the cursor past the new end.
+    // A one-shot command has no active track, so there is no media anchor to
+    // re-find: the policy clamps instead (see `playhead::land`).
+    let current = secs_f64(&session.project().playhead);
+    if let Some(at) = playhead::land(session.project(), current, 0, None, action, &outcome) {
+        session.set_playhead(at);
+    }
     session.persist()?;
     log::line(&format!("action {}", outcome.desc));
+    let landed = frame_of(
+        session.project().fps.as_ref(),
+        secs_f64(&session.project().playhead),
+    );
     match outcome.playhead {
-        Some(f) => say!("✓ {} (playhead f{f})", outcome.desc),
+        Some(_) => say!("✓ {} (playhead f{landed})", outcome.desc),
         None => say!("✓ {}", outcome.desc),
     }
     Ok(())
