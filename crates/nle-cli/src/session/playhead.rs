@@ -7,7 +7,7 @@
 //! here so the TUI and the protocol server cannot drift.
 
 use nle_core::timeline::{Segment, Track};
-use nle_core::{Action, Project, Seconds, secs_f64};
+use nle_core::{Action, Outcome, Project, Seconds, frame_to_secs, secs_f64};
 
 /// The clip and source frame under the playhead — the media anchor an edit
 /// should preserve.
@@ -140,6 +140,37 @@ pub fn reanchor(project: &Project, playhead: f64, ti: usize, anchor: Option<Anch
         }
     };
     pos.clamp(0.0, secs_f64(&project.last_frame()))
+}
+
+/// Where the playhead lands after one action — the single policy the TUI,
+/// `nile serve` and the CLI all apply. `None` means "leave it alone": a no-op
+/// edit must not move it.
+///
+/// `current` and `anchor` describe the pre-edit state; `ti` is the track the
+/// edit ran on. The result is clamped into the post-edit timeline, so a caller
+/// may persist it directly.
+pub fn land(
+    project: &Project,
+    current: f64,
+    ti: usize,
+    anchor: Option<Anchor>,
+    action: &Action,
+    outcome: &Outcome,
+) -> Option<f64> {
+    if let Some(frame) = outcome.playhead {
+        let at = frame_to_secs(project.fps.as_ref(), frame);
+        return Some(at.clamp(0.0, secs_f64(&project.last_frame())));
+    }
+    if !outcome.changed {
+        return None;
+    }
+    // A track or pool change doesn't move the active track's media, so leave
+    // the playhead where it is (just clamped).
+    if reanchors(action) {
+        Some(reanchor(project, current, ti, anchor))
+    } else {
+        Some(current.clamp(0.0, secs_f64(&project.last_frame())))
+    }
 }
 
 /// Does this action move the active track's media? If not, the playhead stays
