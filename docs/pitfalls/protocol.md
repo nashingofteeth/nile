@@ -110,10 +110,12 @@ segment}` pairs, because clip ids repeat across sequences.
 
 `annotation.list {sequence?}` returns `{sequence, annotations}` for that
 sequence (default: the active one); an unknown sequence is invalid params.
-Mutations are the catalog actions `annotation_add`, `annotation_remove` and
-`annotation_resolve`; each is one undo entry on the active sequence's stack.
-A source anchor is a media time (`asset` or group clock), so timeline edits do
-not move it. This method is additive, so `PROTOCOL_VERSION` stays at 5.
+Mutations are the catalog actions `annotation_add`, `annotation_add_at`,
+`annotation_remove` and `annotation_resolve`; each is one undo entry on the
+active sequence's stack. A source anchor is a media time (`asset` or group
+clock), so timeline edits do not move it; a timeline anchor is
+`{clip, source}` and follows the clip. This method is additive, so
+`PROTOCOL_VERSION` stays at 5.
 
 ## Time
 
@@ -134,6 +136,9 @@ The nested values reuse the model's serde forms, not a separate wire spelling:
   `{"kind":"marker"}`, and `anchor` is `{"on":"source",
   "source":{"of":"asset","id":1},"time":"1/2"}` (or `"of":"group"`) — the
   persisted `Annotation` forms, not a parallel spelling.
+- `annotation_add_at`: `{track, at, kind}`; the core resolves the clip under
+  `at` to `{"on":"timeline","start":{"clip":1,"source":"1/2"},
+  "end":…}`, so a client needs no project access to build the anchor.
 - `target`: `{"at":…}`, `{"clip":…}`, `{"segment":…}`.
 - `edge`: `"in"` | `"out"`; `GapLen`/`TransitionLen`: `{"frames":…}`,
   `{"seconds":…}`, `{"percent":…}`.

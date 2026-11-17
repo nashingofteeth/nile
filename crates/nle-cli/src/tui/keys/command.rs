@@ -667,13 +667,14 @@ fn annotation_command(app: &mut App, f: &mut action::Flags) -> String {
     }
     for annotation in &annotations {
         crate::log::line(&format!(
-            "#{} [{}] {} {:?}",
+            "#{} [{}] {} {} {:?}",
             annotation.id,
             match annotation.status {
                 nle_core::AnnotationStatus::Open => "open",
                 nle_core::AnnotationStatus::Resolved => "resolved",
             },
             annotation.label(),
+            crate::cmd::project::annotation_anchor_label(&app.project, annotation),
             annotation.text().unwrap_or(""),
         ));
     }

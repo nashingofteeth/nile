@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::annotation::{Anchor, AnnotationKind};
+use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
 use crate::edit::{self, EditError, EditOp, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
@@ -139,6 +139,14 @@ pub enum Action {
         anchor: Anchor,
         kind: AnnotationKind,
     },
+    /// Add a note or marker at a timeline position (`:annotation add
+    /// --timeline`). The core resolves the clip under `at` to a clip-relative
+    /// anchor, so a front-end needs no project access to build it.
+    AnnotationAddAt {
+        track: usize,
+        at: f64,
+        kind: AnnotationKind,
+    },
     /// Remove an annotation by id.
     AnnotationRemove {
         id: u32,
@@ -250,6 +258,7 @@ impl Action {
             Action::YankRange { .. } => 21,
             Action::PasteRange { .. } => 22,
             Action::AnnotationAdd { .. } => 23,
+            Action::AnnotationAddAt { .. } => 26,
             Action::AnnotationRemove { .. } => 24,
             Action::AnnotationResolve { .. } => 25,
         }
@@ -258,7 +267,7 @@ impl Action {
 
 /// How many slots the catalog has — the coverage tests assert exactly
 /// this many are reachable from each spelling.
-pub const SLOTS: usize = 26;
+pub const SLOTS: usize = 27;
 
 /// One representative action per [`Action::slot`], in slot order. Shared by
 /// the core wire test and the protocol's wire walk, so a new variant cannot be
@@ -366,6 +375,11 @@ pub fn sample_actions() -> Vec<Action> {
         },
         Action::AnnotationRemove { id: 1 },
         Action::AnnotationResolve { id: 1 },
+        Action::AnnotationAddAt {
+            track: 0,
+            at: 1.0,
+            kind: AnnotationKind::Marker,
+        },
     ]
 }
 
@@ -692,6 +706,40 @@ pub fn run_action(
                 sequence,
                 kind.clone(),
                 anchor.clone(),
+                playhead,
+            )?;
+            Ok(Outcome {
+                desc: format!("added annotation #{id}"),
+                changed: true,
+                playhead: None,
+            })
+        }
+        Action::AnnotationAddAt { track, at, kind } => {
+            let playhead = frame_of(project.fps.as_ref(), from);
+            let sequence = project.active_id();
+            let at = grid_time(project.fps.as_ref(), *at);
+            let track_ref = project
+                .timeline
+                .track(*track)
+                .ok_or(EditError::TrackNotFound(*track))?;
+            let index = track_ref.index_at(at).ok_or(EditError::NoSegment)?;
+            let clip = match &track_ref.segments[index] {
+                crate::timeline::Segment::Clip(clip) => clip,
+                crate::timeline::Segment::Gap(_) => return Err(EditError::NoClip),
+                crate::timeline::Segment::Transition(_) => return Err(EditError::AnnotationBlend),
+            };
+            let point = ClipPoint {
+                clip: clip.id,
+                source: clip.source_at(at - track_ref.start_of(index)),
+            };
+            let id = history.add_annotation(
+                project,
+                sequence,
+                kind.clone(),
+                Anchor::Timeline {
+                    start: point,
+                    end: point,
+                },
                 playhead,
             )?;
             Ok(Outcome {

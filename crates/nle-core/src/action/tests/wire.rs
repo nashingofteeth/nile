@@ -50,6 +50,24 @@ fn annotation_add_keeps_the_nested_kind_shape() {
 }
 
 #[test]
+fn annotation_add_at_pins_the_timeline_position() {
+    let value = round_trip(Action::AnnotationAddAt {
+        track: 0,
+        at: 1.5,
+        kind: AnnotationKind::Marker,
+    });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "action": "annotation_add_at",
+            "track": 0,
+            "at": 1.5,
+            "kind": {"kind": "marker"}
+        })
+    );
+}
+
+#[test]
 fn unit_actions_have_no_params() {
     assert_eq!(
         round_trip(Action::Undo),

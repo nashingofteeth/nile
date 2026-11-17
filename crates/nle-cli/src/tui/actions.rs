@@ -184,6 +184,7 @@ pub(crate) fn reaction_for(
         | Action::YankRange { .. }
         | Action::TrackRm { .. }
         | Action::AnnotationAdd { .. }
+        | Action::AnnotationAddAt { .. }
         | Action::AnnotationRemove { .. }
         | Action::AnnotationResolve { .. } => None,
         Action::Undo | Action::Redo => unreachable!("handled above"),

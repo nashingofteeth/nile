@@ -620,11 +620,14 @@ impl ServeHandler {
         let track = self.active_track();
         let anchor = playhead::edit_anchor(self.session.project(), current, track);
 
-        let outcome = self
+        let batch = self
             .session
             .apply_actions(actions, self.anchor_seconds(from))
-            .map_err(edit_rpc)?
-            .outcome;
+            .map_err(edit_rpc)?;
+        let mut outcome = batch.outcome;
+        if !batch.warnings.is_empty() {
+            outcome.desc = format!("{} — {}", outcome.desc, batch.warnings.join("; "));
+        }
 
         // A single action keeps the media-frame reanchor policy. A batch has
         // no one edge to follow, so it lands on its last explicit playhead or
