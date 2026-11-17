@@ -114,12 +114,7 @@ pub(crate) fn reanchor_timeline(
             continue;
         };
         let point = start == end;
-        let start_new = if point {
-            resolve_point(start, before, after, false)
-                .or_else(|| resolve_point(start, before, after, true))
-        } else {
-            resolve_point(start, before, after, false)
-        };
+        let start_new = resolve_point(start, before, after, false);
         let Some(start_new) = start_new else {
             warnings.push(format!(
                 "dropped annotation #{}: its clip no longer has that source",
@@ -438,6 +433,16 @@ mod tests {
         ])];
         let (kept, warnings) = reanchor_timeline(&[note(1, (1, 5), (1, 5))], &before, &after);
         assert!(kept.is_empty(), "the note did not move to the later copy");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_point_on_the_tail_is_dropped_by_a_trim() {
+        let before = vec![track(vec![clip(1, 1, 0, 10)])];
+        // Trim the tail to source 8: source 9 is gone, so the point is too.
+        let after = vec![track(vec![clip(1, 1, 0, 8)])];
+        let (kept, warnings) = reanchor_timeline(&[note(1, (1, 9), (1, 9))], &before, &after);
+        assert!(kept.is_empty());
         assert_eq!(warnings.len(), 1);
     }
 

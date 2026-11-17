@@ -589,6 +589,10 @@ fn odd_media() {
                 &[&["annotation", "add", "pin", "--timeline", "--at", "3.5"]],
             ),
             (
+                "annotation add --to without --timeline",
+                &[&["annotation", "add", "x", "--to", "5"]],
+            ),
+            (
                 "annotation range ends before it starts",
                 &[&[
                     "annotation",
