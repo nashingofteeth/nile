@@ -207,15 +207,21 @@ impl Effect {
                 format!("eq=brightness={brightness}:contrast={contrast}:saturation={saturation}"),
                 content,
             ),
-            // The path is quoted: `:`/`,` in it would otherwise split the
-            // filtergraph, a literal `'` is escaped the ffmpeg way, and a
-            // literal `\` has to be doubled — the option parser treats it as
-            // an escape even inside the quotes, so a lone one eats whatever
-            // follows (a trailing `\` swallowed the closing quote and the
-            // rest of the graph with it).
+            // The path crosses two parsers, so it takes two escapes in this
+            // order: the option parser reads `\` as an escape (so `\`, `:` and
+            // `'` each need one), then the graph parser needs the whole value
+            // quoted, where a literal `'` is `'\''`. Escaping the graph level
+            // first would let it eat the option-level backslashes.
             Effect::Lut { path } => {
-                let escaped = path.replace('\\', r"\\").replace('\'', r"'\''");
-                (format!("lut3d=file='{escaped}'"), content)
+                let mut option = String::with_capacity(path.len() + 4);
+                for ch in path.chars() {
+                    if matches!(ch, '\\' | ':' | '\'') {
+                        option.push('\\');
+                    }
+                    option.push(ch);
+                }
+                let quoted = option.replace('\'', r"'\''");
+                (format!("lut3d=file='{quoted}'"), content)
             }
         }
     }
@@ -1184,48 +1190,33 @@ mod tests {
     }
 
     #[test]
-    fn a_lut_path_with_filter_metacharacters_is_quoted() {
+    fn a_lut_path_survives_the_option_and_graph_parsers() {
+        let chain = |path: &str| Effect::chain(&[Effect::Lut { path: path.into() }], (0, 0));
+        // `:` splits the option list, so the option parser needs a backslash
+        // even though the graph is quoted; `,` is graph-level only.
         assert_eq!(
-            Effect::chain(
-                &[Effect::Lut {
-                    path: "/luts/a,b:c.cube".into()
-                }],
-                (0, 0)
-            ),
-            "lut3d=file='/luts/a,b:c.cube'",
-            "a comma or colon must not split the graph"
+            chain("/luts/a,b:c.cube"),
+            "lut3d=file='/luts/a,b\\:c.cube'",
+            "a colon is escaped for the option parser, a comma by the quotes"
         );
+        // A quote needs both levels: `\'` for the option parser, then `'\''`
+        // for the graph.
         assert_eq!(
-            Effect::chain(
-                &[Effect::Lut {
-                    path: "/luts/it's.cube".into()
-                }],
-                (0, 0)
-            ),
-            r"lut3d=file='/luts/it'\''s.cube'",
-            "a quote is escaped the ffmpeg way"
+            chain("/luts/it's.cube"),
+            r"lut3d=file='/luts/it\'\''s.cube'",
+            "a quote is escaped at both levels"
         );
         // The option parser reads `\` as an escape even inside the quotes:
-        // one literal backslash must reach it as two, and a trailing one
-        // must not eat the closing quote.
+        // one literal backslash reaches it as two, and a trailing one must
+        // not eat the closing quote.
         assert_eq!(
-            Effect::chain(
-                &[Effect::Lut {
-                    path: r"C:\luts\film.cube".into()
-                }],
-                (0, 0)
-            ),
-            r"lut3d=file='C:\\luts\\film.cube'",
-            "a backslash is doubled"
+            chain(r"C:\luts\film.cube"),
+            r"lut3d=file='C\:\\luts\\film.cube'",
+            "a backslash is doubled and the drive colon escaped"
         );
         assert_eq!(
-            Effect::chain(
-                &[Effect::Lut {
-                    path: r"C:\luts\".into()
-                }],
-                (0, 0)
-            ),
-            r"lut3d=file='C:\\luts\\'",
+            chain(r"C:\luts\"),
+            r"lut3d=file='C\:\\luts\\'",
             "a trailing backslash cannot escape the quote"
         );
     }
