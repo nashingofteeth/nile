@@ -625,6 +625,26 @@ pub(crate) fn annotation_anchor_label(
     }
 }
 
+/// `nile report FILE [--json]` — the sidecar written beside an export.
+pub(crate) fn cmd_report(file: &Path, json: bool) -> Result<()> {
+    let sidecar = if file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".report.json"))
+    {
+        file.to_path_buf()
+    } else {
+        nle_core::RenderReport::sidecar_path(file)
+    };
+    let report = nle_core::RenderReport::load(&sidecar)?;
+    if json {
+        say!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        say!("{}", report.summary(&sidecar));
+    }
+    Ok(())
+}
+
 /// `nile annotation ls [--sequence ID]` — notes and markers, newest id last.
 pub(crate) fn cmd_annotation_ls(project_path: &Path, sequence: Option<u32>) -> Result<()> {
     let project = Project::load(project_path)?;

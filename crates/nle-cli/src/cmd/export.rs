@@ -187,15 +187,15 @@ pub(crate) fn run_export(
             nle_ffmpeg::export(&project, spec)
         }
     };
-    let (plan, fallback) = match run(&spec) {
-        Ok(plan) => (plan, false),
+    let (plan, fallback, encoder) = match run(&spec) {
+        Ok(plan) => (plan, false, spec.encoder),
         Err(e) if spec.encoder.is_hardware() => {
             log::line(&format!(
                 "{} export failed ({e}); retrying on CPU",
                 spec.encoder.label()
             ));
             let cpu = options.cpu_fallback(&spec);
-            (run(&cpu)?, true)
+            (run(&cpu)?, true, cpu.encoder)
         }
         Err(e) => return Err(e.into()),
     };
@@ -213,14 +213,42 @@ pub(crate) fn run_export(
     let skipped = skipped
         .map(|why| format!(" · single ({why})"))
         .unwrap_or_default();
+    let report_note = write_report(&project, output, frames, encoder, None);
     Ok(format!(
-        "✓ {}  ({} s · {} frames @ {}/{}) · {tier}{fallback}{skipped}",
+        "✓ {}  ({} s · {} frames @ {}/{}) · {tier}{fallback}{skipped}{report_note}",
         output.display(),
         shown,
         frames,
         plan.fps.numer(),
         plan.fps.denom()
     ))
+}
+
+/// Write the sidecar beside `output`; a failed write is a logged warning, not
+/// a lost export. `windows` lets the chunk scheduler describe its ranges.
+pub(crate) fn write_report(
+    project: &Project,
+    output: &Path,
+    frames: i64,
+    encoder: Encoder,
+    windows: Option<Vec<nle_core::RenderWindow>>,
+) -> String {
+    let mut report =
+        nle_core::RenderReport::build(project, output, frames, Some(encoder.label().to_string()));
+    if let Some(windows) = windows {
+        report.windows = windows;
+    }
+    let report_path = nle_core::RenderReport::sidecar_path(output);
+    match report.save(&report_path) {
+        Ok(()) => format!(" · report {}", report_path.display()),
+        Err(e) => {
+            log::line(&format!(
+                "report {} not written: {e}",
+                report_path.display()
+            ));
+            " · report failed".to_string()
+        }
+    }
 }
 
 /// `nile bench [--runs N] [--preset TIER]`: render to a temp file and report
