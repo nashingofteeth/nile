@@ -655,6 +655,9 @@ enum AnnotationCmd {
         /// Timeline position to pin (with --timeline)
         #[arg(long, value_name = "TIME", conflicts_with_all = ["asset", "group", "time"])]
         at: Option<String>,
+        /// End of a timeline range (with --timeline; default: a point at --at)
+        #[arg(long, value_name = "TIME", conflicts_with_all = ["asset", "group", "time"])]
+        to: Option<String>,
         /// Track for --timeline (1-based; default 1)
         #[arg(long, value_name = "N", default_value_t = 1)]
         track: usize,
@@ -1219,6 +1222,7 @@ mod tests {
                     time: Some("0".into()),
                     timeline: false,
                     at: None,
+                    to: None,
                     track: 1,
                 },
             },
@@ -1230,6 +1234,7 @@ mod tests {
                     time: None,
                     timeline: true,
                     at: Some("1".into()),
+                    to: None,
                     track: 1,
                 },
             },

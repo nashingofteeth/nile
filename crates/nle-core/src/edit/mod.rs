@@ -103,6 +103,8 @@ pub enum EditError {
     NoClip,
     #[error("a note can't anchor to a blend — move the playhead onto a clip")]
     AnnotationBlend,
+    #[error("an annotation range must end after it starts")]
+    AnnotationRange,
     #[error("no segment at that position — the timeline is empty or the position is outside it")]
     NoSegment,
     #[error("nothing to trim at {0} — the playhead is on a segment edge")]

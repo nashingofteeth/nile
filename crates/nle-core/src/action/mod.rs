@@ -145,6 +145,10 @@ pub enum Action {
     AnnotationAddAt {
         track: usize,
         at: f64,
+        /// End of a range; absent (or equal to `at`) is a point. Serialized
+        /// only when present so existing point payloads stay unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<f64>,
         kind: AnnotationKind,
     },
     /// Remove an annotation by id.
@@ -378,9 +382,48 @@ pub fn sample_actions() -> Vec<Action> {
         Action::AnnotationAddAt {
             track: 0,
             at: 1.0,
+            to: None,
             kind: AnnotationKind::Marker,
         },
     ]
+}
+
+/// The clip point at `at` on `track`. `end` prefers the clip whose tail
+/// sits exactly on `at` (a cut belongs to the left clip); otherwise the
+/// segment under `at` must be a clip.
+fn annotation_point_at(
+    project: &Project,
+    track: usize,
+    at: Seconds,
+    end: bool,
+) -> Result<ClipPoint, EditError> {
+    let track_ref = project
+        .timeline
+        .track(track)
+        .ok_or(EditError::TrackNotFound(track))?;
+    if end {
+        let mut cursor = Seconds::from_integer(0);
+        for segment in &track_ref.segments {
+            cursor += segment.duration();
+            if cursor == at
+                && let crate::timeline::Segment::Clip(clip) = segment
+            {
+                return Ok(ClipPoint {
+                    clip: clip.id,
+                    source: clip.asset_out,
+                });
+            }
+        }
+    }
+    let index = track_ref.index_at(at).ok_or(EditError::NoSegment)?;
+    match &track_ref.segments[index] {
+        crate::timeline::Segment::Clip(clip) => Ok(ClipPoint {
+            clip: clip.id,
+            source: clip.source_at(at - track_ref.start_of(index)),
+        }),
+        crate::timeline::Segment::Gap(_) => Err(EditError::NoClip),
+        crate::timeline::Segment::Transition(_) => Err(EditError::AnnotationBlend),
+    }
 }
 
 /// What running an action produced. `changed` tells the caller whether
@@ -714,32 +757,41 @@ pub fn run_action(
                 playhead: None,
             })
         }
-        Action::AnnotationAddAt { track, at, kind } => {
+        Action::AnnotationAddAt {
+            track,
+            at,
+            to,
+            kind,
+        } => {
             let playhead = frame_of(project.fps.as_ref(), from);
             let sequence = project.active_id();
             let at = grid_time(project.fps.as_ref(), *at);
-            let track_ref = project
-                .timeline
-                .track(*track)
-                .ok_or(EditError::TrackNotFound(*track))?;
-            let index = track_ref.index_at(at).ok_or(EditError::NoSegment)?;
-            let clip = match &track_ref.segments[index] {
-                crate::timeline::Segment::Clip(clip) => clip,
-                crate::timeline::Segment::Gap(_) => return Err(EditError::NoClip),
-                crate::timeline::Segment::Transition(_) => return Err(EditError::AnnotationBlend),
-            };
-            let point = ClipPoint {
-                clip: clip.id,
-                source: clip.source_at(at - track_ref.start_of(index)),
+            let (start, end) = match to {
+                None => {
+                    let point = annotation_point_at(project, *track, at, false)?;
+                    (point, point)
+                }
+                Some(to) => {
+                    let to = grid_time(project.fps.as_ref(), *to);
+                    if to < at {
+                        return Err(EditError::AnnotationRange);
+                    }
+                    if to == at {
+                        let point = annotation_point_at(project, *track, at, false)?;
+                        (point, point)
+                    } else {
+                        (
+                            annotation_point_at(project, *track, at, false)?,
+                            annotation_point_at(project, *track, to, true)?,
+                        )
+                    }
+                }
             };
             let id = history.add_annotation(
                 project,
                 sequence,
                 kind.clone(),
-                Anchor::Timeline {
-                    start: point,
-                    end: point,
-                },
+                Anchor::Timeline { start, end },
                 playhead,
             )?;
             Ok(Outcome {

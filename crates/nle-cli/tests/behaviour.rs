@@ -374,6 +374,44 @@ fn timeline_annotations_follow_their_clip_across_edits() {
 }
 
 #[test]
+fn timeline_ranges_follow_ripples_and_drop_with_a_clip() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&[
+        "annotation",
+        "add",
+        "span",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--to",
+        "3.5",
+    ]);
+    let listing = s.ok(&["annotation", "ls"]);
+    assert!(listing.contains("timeline 0.5–3.5 s"), "{listing}");
+
+    s.ok(&["gap", "--at", "0", "--frames", "30"]);
+    assert!(
+        s.ok(&["annotation", "ls"]).contains("timeline 1.5–4.5 s"),
+        "both endpoints follow the ripple"
+    );
+    s.ok(&["undo"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("timeline 0.5–3.5 s"));
+
+    // The range ends in the green clip; deleting it drops the whole note.
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let end_clip = project["annotations"][0]["anchor"]["end"]["clip"]
+        .as_u64()
+        .expect("end clip");
+    let dropped = s.ok(&["delete", "--clip", &end_clip.to_string()]);
+    assert!(dropped.contains("dropped annotation"), "{dropped}");
+    assert!(s.ok(&["annotation", "ls"]).contains("no annotations"));
+    s.ok(&["undo"]);
+    assert!(s.ok(&["annotation", "ls"]).contains("timeline 0.5–3.5 s"));
+}
+
+#[test]
 fn show_json_exposes_time_maps_and_groups() {
     let s = Sandbox::new();
     s.base();
