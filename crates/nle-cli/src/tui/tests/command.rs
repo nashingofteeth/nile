@@ -634,3 +634,54 @@ fn annotation_ls_reads_the_requested_sequence() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
 }
+
+#[test]
+fn annotation_add_timeline_pins_the_clip_under_the_position() {
+    let path = temp_project_path("annotation-timeline");
+    asset_project().save(&path).unwrap();
+    let mut app = App::new(asset_project(), path.clone());
+
+    let notice = cmd(&mut app, "annotation add pinned --timeline --at 2.5");
+    assert!(notice.contains("added annotation #1"), "{notice}");
+    let annotation = &app.project.annotations[0];
+    let nle_core::Anchor::Timeline { start, end } = &annotation.anchor else {
+        panic!("expected a timeline anchor");
+    };
+    assert_eq!(start.clip, 1);
+    assert_eq!(
+        start.source,
+        Seconds::from_integer(7) / Seconds::from_integer(2)
+    );
+    assert_eq!(start, end, "a note is a point");
+    assert_eq!(
+        app.project.annotation_span(annotation),
+        Some((
+            Seconds::from_integer(5) / Seconds::from_integer(2),
+            Seconds::from_integer(5) / Seconds::from_integer(2)
+        ))
+    );
+
+    // Split at 2 s: the note moves to the split-off piece, same material.
+    cmd(&mut app, "split --at 2");
+    let annotation = &app.project.annotations[0];
+    let nle_core::Anchor::Timeline { start, .. } = &annotation.anchor else {
+        panic!("still a timeline anchor");
+    };
+    assert_ne!(start.clip, 1);
+    let piece = start.clip;
+    assert_eq!(
+        app.project.annotation_span(annotation),
+        Some((
+            Seconds::from_integer(5) / Seconds::from_integer(2),
+            Seconds::from_integer(5) / Seconds::from_integer(2)
+        ))
+    );
+
+    // Deleting the clip drops the note and says so in the message line.
+    let dropped = cmd(&mut app, &format!("delete --clip {piece}"));
+    assert!(dropped.contains("dropped annotation"), "{dropped}");
+    assert!(app.project.annotations.is_empty());
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}

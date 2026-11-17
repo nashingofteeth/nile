@@ -27,7 +27,7 @@ pub use action::{
     RegisterEntry, Target, TransitionLen, load_register, load_register_without_migration,
     register_path, run_action, save_register, track_label,
 };
-pub use annotation::{Anchor, Annotation, AnnotationKind, AnnotationStatus, SourceRef};
+pub use annotation::{Anchor, Annotation, AnnotationKind, AnnotationStatus, ClipPoint, SourceRef};
 pub use detect::{Span, reconstruct};
 pub use document::{BatchOutcome, Document, PreviewOutcome};
 pub use edit::{

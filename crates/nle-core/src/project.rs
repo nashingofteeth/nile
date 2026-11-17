@@ -30,8 +30,9 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// v9 stores each transition side's effects (they render the neighbour);
 /// v10 stores the monotonic model `revision`;
 /// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
-/// v12 adds logical media groups; v13 adds annotations.
-pub const PROJECT_VERSION: u32 = 13;
+/// v12 adds logical media groups; v13 adds annotations; v14 adds
+/// clip-relative timeline anchors.
+pub const PROJECT_VERSION: u32 = 14;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -734,6 +735,32 @@ impl Project {
         self.annotations.iter().find(|a| a.id == id)
     }
 
+    /// The clip with `id` in `sequence`, across every track.
+    fn sequence_clip(&self, sequence: u32, id: u32) -> Option<&crate::timeline::Clip> {
+        self.sequence(sequence)?
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find_map(|segment| match segment {
+                crate::timeline::Segment::Clip(clip) if clip.id == id => Some(clip),
+                _ => None,
+            })
+    }
+
+    /// A timeline anchor's absolute span in `sequence`, or `None` for a
+    /// source anchor or a range whose endpoints no longer resolve.
+    pub fn annotation_span(&self, annotation: &Annotation) -> Option<(Seconds, Seconds)> {
+        let Anchor::Timeline { start, end } = &annotation.anchor else {
+            return None;
+        };
+        let sequence = self.sequence(annotation.sequence)?;
+        let start =
+            crate::timeline::clip_position(&sequence.timeline.tracks, start.clip, start.source)?;
+        let end = crate::timeline::clip_position(&sequence.timeline.tracks, end.clip, end.source)?;
+        (start <= end).then_some((start, end))
+    }
+
     /// Annotations scoped to `sequence`, in project order.
     pub fn annotations_for(&self, sequence: u32) -> impl Iterator<Item = &Annotation> + '_ {
         self.annotations
@@ -857,6 +884,37 @@ impl Project {
             ));
         }
         match &annotation.anchor {
+            Anchor::Timeline { start, end } => {
+                for point in [start, end] {
+                    let clip = self
+                        .sequence_clip(annotation.sequence, point.clip)
+                        .ok_or_else(|| {
+                            ProjectError::Annotation(
+                                annotation.id,
+                                format!(
+                                    "clip #{} not found in sequence #{}",
+                                    point.clip, annotation.sequence
+                                ),
+                            )
+                        })?;
+                    if point.source < clip.asset_in || point.source >= clip.asset_out {
+                        return Err(ProjectError::Annotation(
+                            annotation.id,
+                            format!(
+                                "clip #{} has no media at {}",
+                                point.clip,
+                                format_seconds(&point.source)
+                            ),
+                        ));
+                    }
+                }
+                if self.annotation_span(annotation).is_none() {
+                    return Err(ProjectError::Annotation(
+                        annotation.id,
+                        "timeline range ends before it starts".to_string(),
+                    ));
+                }
+            }
             Anchor::Source { source, time } => {
                 if *time < Seconds::from_integer(0) {
                     return Err(ProjectError::Annotation(
@@ -1058,6 +1116,7 @@ impl Project {
 mod tests {
     use super::*;
     use crate::Clip;
+    use crate::annotation::ClipPoint;
     use crate::edit::{self, History};
     use crate::media::{RawFormat, RawStream};
     use crate::time::Seconds;
@@ -1339,7 +1398,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 13);
+        assert_eq!(PROJECT_VERSION, 14);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);
@@ -1695,6 +1754,110 @@ mod tests {
                 provenance(),
             ),
             Err(ProjectError::Annotation(_, ref e)) if e.contains("sequence #99")
+        ));
+    }
+
+    #[test]
+    fn timeline_anchors_validate_the_clip_and_source() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            asset,
+            Seconds::from_integer(0),
+            Seconds::from_integer(2),
+        ))];
+        let note = || AnnotationKind::Note {
+            text: "on the timeline".into(),
+        };
+        let point = |source: Seconds| ClipPoint { clip: 1, source };
+
+        let id = p
+            .add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::new(3, 2)),
+                    end: point(Seconds::new(3, 2)),
+                },
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(
+            p.annotation_span(p.annotation(id).unwrap()),
+            Some((Seconds::new(3, 2), Seconds::new(3, 2)))
+        );
+
+        let range = p
+            .add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::from_integer(0)),
+                    end: point(Seconds::from_integer(1)),
+                },
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(
+            p.annotation_span(p.annotation(range).unwrap()),
+            Some((Seconds::from_integer(0), Seconds::from_integer(1)))
+        );
+
+        assert!(
+            p.add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::from_integer(0)),
+                    end: point(Seconds::from_integer(0)),
+                },
+                provenance(),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::from_integer(0)),
+                    end: point(Seconds::from_integer(2)),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("no media")
+        ));
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: point(Seconds::from_integer(1)),
+                    end: point(Seconds::from_integer(0)),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("before it starts")
+        ));
+        assert!(matches!(
+            p.add_annotation(
+                1,
+                note(),
+                Anchor::Timeline {
+                    start: ClipPoint {
+                        clip: 99,
+                        source: Seconds::from_integer(0),
+                    },
+                    end: point(Seconds::from_integer(0)),
+                },
+                provenance(),
+            ),
+            Err(ProjectError::Annotation(_, ref e)) if e.contains("clip #99")
         ));
     }
 

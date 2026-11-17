@@ -580,6 +580,34 @@ fn odd_media() {
                 "annotation add empty text",
                 &[&["annotation", "add", "   ", "--asset", "1", "--time", "0"]],
             ),
+            (
+                "annotation add timeline without a position",
+                &[&["annotation", "add", "pin", "--timeline"]],
+            ),
+            (
+                "annotation add timeline on a gap",
+                &[&["annotation", "add", "pin", "--timeline", "--at", "3.5"]],
+            ),
+            (
+                "annotation add timeline on a blend",
+                &[
+                    &["transition", "--at", "2"],
+                    &["annotation", "add", "pin", "--timeline", "--at", "2"],
+                ],
+            ),
+            (
+                "annotation add timeline track 99",
+                &[&[
+                    "annotation",
+                    "add",
+                    "pin",
+                    "--timeline",
+                    "--at",
+                    "1",
+                    "--track",
+                    "99",
+                ]],
+            ),
             ("annotation rm 99", &[&["annotation", "rm", "99"]]),
             ("annotation resolve 99", &[&["annotation", "resolve", "99"]]),
             (

@@ -153,6 +153,7 @@ pub fn reanchors(action: &Action) -> bool {
             | Action::TrackRm { .. }
             | Action::AssetRm { .. }
             | Action::AnnotationAdd { .. }
+            | Action::AnnotationAddAt { .. }
             | Action::AnnotationRemove { .. }
             | Action::AnnotationResolve { .. }
     )
