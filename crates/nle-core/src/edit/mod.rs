@@ -65,8 +65,9 @@ pub const MAX_HISTORY: usize = 100;
 /// v15 follows the effects carried on a transition side; v16 carries each
 /// change's `{ actor, at }` provenance; v17 keys the stacks by sequence;
 /// v18 adds grouped changes (one undo step for a batch of actions);
-/// v19 adds media-group creation/removal; v20 adds annotations.
-pub const HISTORY_VERSION: u32 = 20;
+/// v19 adds media-group creation/removal; v20 adds annotations; v21 scopes
+/// timeline annotations into track changes.
+pub const HISTORY_VERSION: u32 = 21;
 
 #[derive(Debug, Error)]
 pub enum EditError {
