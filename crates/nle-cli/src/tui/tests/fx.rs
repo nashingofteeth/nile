@@ -128,7 +128,7 @@ fn effects_panel_form_takes_values_and_exits() {
         app.mode
     );
 
-    // An inset over 100 is refused at apply time and keeps the form open.
+    // An x over 100 is refused at apply time and keeps the form open.
     handle_key(
         &mut app,
         &fake,
@@ -145,7 +145,7 @@ fn effects_panel_form_takes_values_and_exits() {
     );
     assert!(fx_state(&app).unwrap().form.is_some(), "still editing");
 
-    // Cancel, reopen, and inset 10% from the left and right. Only tab
+    // Cancel, reopen, and set x/y to 10%. Only tab
     // moves between fields; enter always commits.
     handle_key(&mut app, &fake, esc);
     handle_key(&mut app, &fake, key('c'));
@@ -733,4 +733,46 @@ fn effect_forms_hint_their_expected_input() {
             );
         }
     }
+}
+
+#[test]
+fn moving_a_full_width_crop_shrinks_it_to_the_edge() {
+    let fake = FakeMpv::new();
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let mut app = App::new(asset_project(), temp_project_path("fx-crop-x"));
+    app.loaded = true;
+    app.playhead = 1.0;
+    set_effects(
+        &mut app,
+        1,
+        vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        }],
+    );
+
+    handle_key(&mut app, &fake, key('x'));
+    handle_key(&mut app, &fake, enter); // open the applied crop for editing
+    handle_key(
+        &mut app,
+        &fake,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+    );
+    for c in "10".chars() {
+        handle_key(&mut app, &fake, key(c));
+    }
+    handle_key(&mut app, &fake, enter);
+
+    assert_eq!(
+        clip_of(&app.project, 1).effects,
+        vec![Effect::Crop {
+            x: 10.0,
+            y: 0.0,
+            w: 90.0,
+            h: 100.0
+        }],
+        "a blank width shrinks to the edge"
+    );
 }

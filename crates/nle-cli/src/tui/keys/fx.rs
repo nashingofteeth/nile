@@ -431,13 +431,39 @@ pub(crate) fn form_effect(form: &FxForm) -> Result<Effect, String> {
             .map_err(|_| format!("{name} must be a number"))
     };
     let args = match form.kind {
-        "crop" => EffectArgs {
-            x: opt_float(0, "x")?,
-            y: opt_float(1, "y")?,
-            w: opt_float(2, "width")?,
-            h: opt_float(3, "height")?,
-            ..Default::default()
-        },
+        "crop" => {
+            let blank = |i: usize| {
+                form.fields
+                    .get(i)
+                    .is_some_and(|field| field.value.trim().is_empty())
+            };
+            let x = opt_float(0, "x")?;
+            let y = opt_float(1, "y")?;
+            let mut w = opt_float(2, "width")?;
+            let mut h = opt_float(3, "height")?;
+            // A blank field keeps its applied size, but moving x/y past the
+            // old edge shrinks the window to the remaining room instead of
+            // refusing the most common one-field edit.
+            if blank(2)
+                && let (Some(x), Some(size)) = (x, w)
+                && x + size > 100.0
+            {
+                w = Some(100.0 - x);
+            }
+            if blank(3)
+                && let (Some(y), Some(size)) = (y, h)
+                && y + size > 100.0
+            {
+                h = Some(100.0 - y);
+            }
+            EffectArgs {
+                x,
+                y,
+                w,
+                h,
+                ..Default::default()
+            }
+        }
         "scale" => EffectArgs {
             w: opt_float(0, "width")?,
             h: opt_float(1, "height")?,

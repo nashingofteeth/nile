@@ -170,7 +170,7 @@ fn effect_index_replaces_a_row() {
 // edge, 100 = the other edge. 25 off each side of 1920×1080 masks the
 // outer quarter but keeps the middle half in place.
 #[test]
-fn crop_is_percentage_insets() {
+fn crop_is_a_percentage_window() {
     let Action::AddEffect { effect, .. } = parse(
         "effect crop --clip 1 --x 25 --y 25 --w 50 --h 50",
         &defaults(),
@@ -194,15 +194,15 @@ fn crop_is_percentage_insets() {
     );
     assert_eq!(effect.details(), "50×50 @ 25,25");
 
-    // Omitting all four leaves the frame unchanged (defaults 0) — and
-    // unlike the old zoom crop, it renders no filter at all.
+    // Omitting the window leaves the frame unchanged (full size) and
+    // renders no filter at all.
     let Action::AddEffect { effect, .. } = parse("effect crop --clip 1", &defaults()).unwrap()
     else {
         panic!("expected an effect")
     };
     assert_eq!(Effect::chain(&[effect], (1920, 1080)), "");
 
-    // Asymmetric insets: 10% of 1920 = 192; 25% of 1080 = 270.
+    // An asymmetric window: x 10% of 1920 = 192; y 25% of 1080 = 270.
     let Action::AddEffect { effect, .. } = parse(
         "effect crop --clip 1 --x 10 --y 25 --w 90 --h 75",
         &defaults(),
@@ -257,7 +257,7 @@ fn scale_is_percentages_with_a_100_default() {
     );
 }
 
-// Crop after scale insets the *scaled picture*, not the full canvas:
+// Crop after scale resolves against the *scaled picture*, not the canvas:
 // "scale 50, crop x 30%" removes the left 30% of the small picture.
 #[test]
 fn crop_after_scale_resolves_against_the_scaled_picture() {
@@ -377,6 +377,9 @@ fn bad_effect_percentages_are_refused() {
     let d = ParseDefaults::default();
     for spec in [
         "effect crop --clip 1 --x 101",
+        "effect crop --clip 1 --x 100",
+        "effect crop --clip 1 --x 99.5",
+        "effect crop --clip 1 --y 100",
         "effect crop --clip 1 --x 60 --w 50",
         "effect crop --clip 1 --y 60 --h 50",
         "effect scale --clip 1 --w 0",
@@ -388,6 +391,14 @@ fn bad_effect_percentages_are_refused() {
             matches!(parse(spec, &d), Err(ParseError::Invalid(_))),
             "{spec:?} was accepted"
         );
+    }
+    for (spec, word) in [
+        ("effect crop --clip 1 --x 100", "crop x leaves"),
+        ("effect crop --clip 1 --x 99.5", "crop x leaves"),
+        ("effect crop --clip 1 --y 100", "crop y leaves"),
+    ] {
+        let err = parse(spec, &d).unwrap_err().to_string();
+        assert!(err.contains(word), "{spec:?}: {err}");
     }
 }
 
