@@ -507,6 +507,32 @@ fn show_json_exposes_time_maps_and_groups() {
 }
 
 #[test]
+fn a_chunked_export_writes_a_report_too() {
+    let s = Sandbox::new();
+    s.ok(&["init"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["add", "green.mp4", "--at", "2", "--in", "0", "--out", "2"]);
+    s.ok(&["add", "red.mp4", "--at", "4", "--in", "2", "--out", "4"]);
+    let out = s.run(&["export", "-o", "chunked.mp4", "--parallel", "2"]);
+    let text = merged(&out);
+    assert!(out.status.success(), "chunked export failed:\n{text}");
+    let sidecar = nle_core::RenderReport::sidecar_path(&s.file("chunked.mp4"));
+    let report = nle_core::RenderReport::load(&sidecar)
+        .unwrap_or_else(|e| panic!("report missing after chunked export: {e}\n{text}"));
+    assert_eq!(report.frame_count, s.frame_count("chunked.mp4"));
+    assert!(!report.windows.is_empty(), "{text}");
+    assert!(
+        text.contains("2-way"),
+        "the scheduler split the export: {text}"
+    );
+    assert!(
+        report.windows.len() >= 2,
+        "chunked export records its windows: {text}"
+    );
+}
+
+#[test]
 fn export_writes_a_frame_map_beside_the_output() {
     let s = Sandbox::new();
     s.base();
@@ -539,10 +565,20 @@ fn export_writes_a_frame_map_beside_the_output() {
         "{frame:?}"
     );
 
-    let listing = s.ok(&["report", "mapped.mp4"]);
+    let run_report = |args: &[&str]| -> String {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_nile"))
+            .current_dir(s.path())
+            .arg("report")
+            .args(args)
+            .output()
+            .expect("run nile report");
+        assert!(out.status.success(), "{}", merged(&out));
+        merged(&out)
+    };
+    let listing = run_report(&["mapped.mp4"]);
     assert!(listing.contains("180 frames @ 30/1"), "{listing}");
     assert!(listing.contains("6 s"), "{listing}");
-    let json = s.ok(&["report", "mapped.mp4", "--json"]);
+    let json = run_report(&["mapped.mp4", "--json"]);
     let value: serde_json::Value = serde_json::from_str(&json).expect("report JSON");
     assert_eq!(value["frame_count"], report.frame_count);
     assert!(
@@ -554,7 +590,21 @@ fn export_writes_a_frame_map_beside_the_output() {
     // The report belongs to the output, not the project: remove the project
     // and it still reads.
     std::fs::remove_file(s.file(P)).unwrap();
-    assert!(s.ok(&["report", "mapped.mp4"]).contains("180 frames"));
+    assert!(run_report(&["mapped.mp4"]).contains("180 frames"));
+
+    // The report is output-relative: a stray --project is refused, like
+    // `nile default`.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(s.path())
+        .args(["--project", "typo.json", "report", "mapped.mp4"])
+        .output()
+        .expect("run nile report");
+    assert!(!out.status.success());
+    assert!(
+        merged(&out).contains("--project is not used"),
+        "{}",
+        merged(&out)
+    );
 }
 
 #[test]

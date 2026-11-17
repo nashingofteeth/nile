@@ -404,7 +404,7 @@ enum Cmd {
         #[command(subcommand)]
         action: AnnotationCmd,
     },
-    /// Print the report written beside an exported file
+    /// Print the report written beside an exported file (output-relative)
     Report {
         /// The exported video (or its .report.json)
         file: PathBuf,
@@ -841,6 +841,9 @@ fn main() -> Result<()> {
     // A report belongs to the output file, not the project: read it without
     // requiring a project in the current directory.
     if let Cmd::Report { file, json } = &cli.command {
+        if cli.project.is_some() {
+            anyhow::bail!("`nile report` reads the sidecar beside FILE; --project is not used");
+        }
         return cmd_report(file, *json);
     }
     let project = match cli.project.clone() {
@@ -895,7 +898,7 @@ fn main() -> Result<()> {
         Cmd::Annotation {
             action: AnnotationCmd::Ls { sequence },
         } => return cmd_annotation_ls(&project, *sequence),
-        Cmd::Report { file, json } => return cmd_report(file, *json),
+        Cmd::Report { .. } => unreachable!("handled before project resolution"),
         Cmd::ImportEdl {
             file,
             media,

@@ -29,6 +29,8 @@ pub enum ReportError {
     Json(#[from] serde_json::Error),
     #[error("report version {0} is not supported (this build reads v{expected})", expected = REPORT_VERSION)]
     Version(u32),
+    #[error("invalid report: {0}")]
+    Invalid(String),
 }
 
 /// One exported render.
@@ -112,7 +114,41 @@ impl RenderReport {
         if report.version != REPORT_VERSION {
             return Err(ReportError::Version(report.version));
         }
+        report.validate()?;
         Ok(report)
+    }
+
+    fn validate(&self) -> Result<(), ReportError> {
+        if self.fps <= Seconds::from_integer(0) {
+            return Err(ReportError::Invalid("fps must be positive".into()));
+        }
+        if self.frame_count < 0 {
+            return Err(ReportError::Invalid("negative frame count".into()));
+        }
+        let mut cursor = 0;
+        for span in &self.frame_map {
+            if span.frames <= 0 || span.start_frame < cursor {
+                return Err(ReportError::Invalid(
+                    "frame spans must be positive and ordered".into(),
+                ));
+            }
+            if span.timeline_end < span.timeline_start {
+                return Err(ReportError::Invalid(
+                    "a timeline span ends before it starts".into(),
+                ));
+            }
+            cursor = span.start_frame + span.frames;
+        }
+        let mut cursor = 0;
+        for window in &self.windows {
+            if window.frames <= 0 || window.start_frame < cursor {
+                return Err(ReportError::Invalid(
+                    "render windows must be positive and ordered".into(),
+                ));
+            }
+            cursor = window.start_frame + window.frames;
+        }
+        Ok(())
     }
 
     /// The span covering output frame `frame`.
@@ -124,6 +160,9 @@ impl RenderReport {
 
     /// Output frame → timeline time + the material visible there.
     pub fn locate(&self, frame: i64) -> Option<FrameLocation> {
+        if self.fps <= Seconds::from_integer(0) {
+            return None;
+        }
         let span = self.span_at(frame)?;
         let offset = Seconds::from_integer(frame - span.start_frame) / self.fps;
         let timeline = span.timeline_start + offset;
@@ -233,7 +272,10 @@ pub enum FrameLocation {
 }
 
 fn build_frame_map(project: &Project, fps: Seconds) -> Vec<FrameSpan> {
-    let mut cuts = vec![Seconds::from_integer(0)];
+    // Every layer is padded to the timeline length, so the export can outlast
+    // the last picture cut (a trailing audio bed, a longer muted track). Seed
+    // the end too, or the map stops early and those frames resolve to `None`.
+    let mut cuts = vec![Seconds::from_integer(0), project.timeline.end()];
     for track in project.timeline.video_tracks().filter(|track| !track.muted) {
         let mut at = Seconds::from_integer(0);
         for segment in &track.segments {
@@ -427,6 +469,26 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_audio_bed_extends_the_black_tail() {
+        let mut audio = track(vec![clip(2, 2, 0, 5)]);
+        audio.kind = TrackKind::Audio;
+        let project = project(vec![track(vec![clip(1, 1, 0, 2)]), audio]);
+        let report = RenderReport::build(&project, Path::new("out.mp4"), 150, None);
+        assert_eq!(report.duration, Seconds::from_integer(5));
+        assert_eq!(report.frame_count, 150);
+        let last = report.frame_map.last().expect("tail span");
+        assert_eq!(last.start_frame, 60, "black starts where picture ends");
+        assert_eq!(last.start_frame + last.frames, 150);
+        assert_eq!(last.source, FrameSource::Black);
+        assert_eq!(
+            report.locate(90),
+            Some(FrameLocation::Black {
+                timeline: Seconds::from_integer(3)
+            })
+        );
+    }
+
+    #[test]
     fn source_time_scales_with_speed() {
         let mut c = clip(1, 1, 0, 4);
         if let Segment::Clip(clip) = &mut c {
@@ -494,12 +556,20 @@ mod tests {
             PathBuf::from("out.mp4.report.json")
         );
 
-        let mut old = report;
+        let mut old = report.clone();
         old.version = 0;
         old.save(&path).unwrap();
         assert!(matches!(
             RenderReport::load(&path),
             Err(ReportError::Version(0))
+        ));
+
+        let mut bad_fps = report;
+        bad_fps.fps = Seconds::from_integer(0);
+        bad_fps.save(&path).unwrap();
+        assert!(matches!(
+            RenderReport::load(&path),
+            Err(ReportError::Invalid(_))
         ));
     }
 }
