@@ -573,6 +573,9 @@ shared by the TUI and agents — with no clipgen code present.
   sequence/source — the basis for notes on a delivered file.
 - Jobs are persistent, observable and cancellable, with progress events and
   retained reports; the TUI job list becomes the real queue.
+- Landed so far: `RenderReport` v1 beside each export (piecewise frame map,
+  topmost video, blends both sides, chunk windows) and `nile report FILE
+  [--json]`; remaining: keyframed crop, audio post, jobs.
 - **Gate:** a keyframed crop export is frame-exact and its report maps a
   moved note to the right frame; a cancelled job leaves no half-written
   deliverable.
