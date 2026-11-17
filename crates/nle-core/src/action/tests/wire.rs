@@ -184,14 +184,14 @@ fn effects_round_trip_through_the_catalog() {
         track: 0,
         clip: 1,
         effect: Effect::Crop {
-            left: 10.0,
-            right: 5.0,
-            top: 0.0,
-            bottom: 0.0,
+            x: 10.0,
+            y: 0.0,
+            w: 100.0 - 10.0 - 5.0,
+            h: 100.0 - 0.0 - 0.0,
         },
         index: None,
     });
-    assert_eq!(value["effect"]["Crop"]["left"], 10.0);
+    assert_eq!(value["effect"]["Crop"]["x"], 10.0);
 
     round_trip(Action::RemoveEffect {
         track: 0,

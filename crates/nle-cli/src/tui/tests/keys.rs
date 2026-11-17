@@ -60,10 +60,10 @@ fn ctrl_c_quits_from_every_panel() {
         ("fx form", {
             let mut a = App::new(asset_project(), temp_project_path("t"));
             let effect = Effect::Crop {
-                left: 0.0,
-                right: 0.0,
-                top: 0.0,
-                bottom: 0.0,
+                x: 0.0,
+                y: 0.0,
+                w: 100.0 - 0.0 - 0.0,
+                h: 100.0 - 0.0 - 0.0,
             };
             a.mode = Mode::Fx(FxState {
                 clip: 1,

@@ -14,10 +14,10 @@ fn a_transition_side_follows_its_neighbours_effects() {
         saturation: 1.0,
     };
     let crop = Effect::Crop {
-        left: 10.0,
-        right: 10.0,
-        top: 0.0,
-        bottom: 0.0,
+        x: 10.0,
+        y: 0.0,
+        w: 100.0 - 10.0 - 10.0,
+        h: 100.0 - 0.0 - 0.0,
     };
     let mut p = clip_pair(); // C1 0..3, C2 3..6
     for seg in &mut p.timeline.video_track_mut().unwrap().segments {
@@ -226,16 +226,16 @@ fn adding_the_same_kind_replaces_the_previous_one() {
         saturation: 1.0,
     };
     let first = Effect::Crop {
-        left: 10.0,
-        right: 0.0,
-        top: 0.0,
-        bottom: 0.0,
+        x: 10.0,
+        y: 0.0,
+        w: 100.0 - 10.0 - 0.0,
+        h: 100.0 - 0.0 - 0.0,
     };
     let second = Effect::Crop {
-        left: 30.0,
-        right: 0.0,
-        top: 0.0,
-        bottom: 0.0,
+        x: 30.0,
+        y: 0.0,
+        w: 100.0 - 30.0 - 0.0,
+        h: 100.0 - 0.0 - 0.0,
     };
     for effect in [eq.clone(), first.clone()] {
         let batch = add_effect(&p, 1, effect).unwrap();
@@ -266,10 +266,10 @@ fn effects_can_be_removed_and_cleared() {
     };
     let scale = Effect::Scale { w: 2.0, h: 2.0 };
     let crop = Effect::Crop {
-        left: 10.0,
-        right: 10.0,
-        top: 0.0,
-        bottom: 0.0,
+        x: 10.0,
+        y: 0.0,
+        w: 100.0 - 10.0 - 10.0,
+        h: 100.0 - 0.0 - 0.0,
     };
 
     let mut p = fixture();

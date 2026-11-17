@@ -1274,10 +1274,10 @@ mod tests {
             c.effects = vec![
                 // 25% off each edge of 1920×1080: mask, not zoom.
                 Effect::Crop {
-                    left: 25.0,
-                    right: 25.0,
-                    top: 25.0,
-                    bottom: 25.0,
+                    x: 25.0,
+                    y: 25.0,
+                    w: 100.0 - 25.0 - 25.0,
+                    h: 100.0 - 25.0 - 25.0,
                 },
                 // Half width, full height.
                 Effect::Scale { w: 50.0, h: 100.0 },

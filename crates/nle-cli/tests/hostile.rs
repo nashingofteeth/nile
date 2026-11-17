@@ -246,14 +246,12 @@ fn effects() {
         &s,
         &[
             (
-                "effect crop left 101",
-                &[&["effect", "crop", "--clip", "1", "--left", "101"]],
+                "effect crop x 101",
+                &[&["effect", "crop", "--clip", "1", "--x", "101"]],
             ),
             (
                 "effect crop past the opposite edge",
-                &[&[
-                    "effect", "crop", "--clip", "1", "--left", "60", "--right", "60",
-                ]],
+                &[&["effect", "crop", "--clip", "1", "--x", "60", "--w", "60"]],
             ),
             (
                 "effect scale w -1",
