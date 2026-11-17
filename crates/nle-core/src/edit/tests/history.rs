@@ -737,3 +737,173 @@ fn annotation_history_sidecar_round_trips() {
     loaded.undo(&mut q).unwrap();
     assert!(q.annotations.is_empty(), "the sidecar restores undo");
 }
+
+#[test]
+fn a_timeline_annotation_follows_a_ripple_and_undo() {
+    use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
+    use crate::edit::insert_gap_on;
+
+    let mut p = fixture();
+    let mut h = History::default();
+    let point = |source: Seconds| ClipPoint { clip: 1, source };
+    let id = h
+        .add_annotation(
+            &mut p,
+            1,
+            AnnotationKind::Marker,
+            Anchor::Timeline {
+                start: point(Seconds::new(3, 2)),
+                end: point(Seconds::new(3, 2)),
+            },
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        p.annotation_span(p.annotation(id).unwrap()),
+        Some((Seconds::new(1, 2), Seconds::new(1, 2)))
+    );
+
+    // A ripple gap at 0 moves the clip to 1..3; the media anchor follows.
+    let batch = insert_gap_on(&p, 0, 0.0, 30).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    assert_eq!(
+        p.annotation_span(p.annotation(id).unwrap()),
+        Some((Seconds::new(3, 2), Seconds::new(3, 2)))
+    );
+
+    h.undo(&mut p).unwrap();
+    assert_eq!(
+        p.annotation_span(p.annotation(id).unwrap()),
+        Some((Seconds::new(1, 2), Seconds::new(1, 2)))
+    );
+}
+
+#[test]
+fn a_split_reanchors_and_a_delete_drops_the_annotation_undoably() {
+    use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
+    use crate::edit::{delete_clip_by_id, split_on};
+
+    let mut p = fixture();
+    let mut h = History::default();
+    let point = |source: Seconds| ClipPoint { clip: 1, source };
+    let id = h
+        .add_annotation(
+            &mut p,
+            1,
+            AnnotationKind::Marker,
+            Anchor::Timeline {
+                start: point(Seconds::new(5, 2)),
+                end: point(Seconds::new(5, 2)),
+            },
+            0,
+        )
+        .unwrap();
+
+    // Clip #1 is timeline 0..2, source 1..3; splitting at 1 s leaves the
+    // right piece (new id) holding source 2.5.
+    let batch = split_on(&p, 0, 1.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let annotation = p.annotation(id).unwrap();
+    let Anchor::Timeline { start, .. } = &annotation.anchor else {
+        panic!("still a timeline anchor");
+    };
+    assert_ne!(start.clip, 1, "the note moved to the split-off piece");
+    assert_eq!(start.source, Seconds::new(5, 2));
+    assert_eq!(
+        p.annotation_span(annotation),
+        Some((Seconds::new(3, 2), Seconds::new(3, 2)))
+    );
+    let piece = start.clip;
+
+    let batch = delete_clip_by_id(&p, piece).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    assert!(p.annotation(id).is_none(), "the note went with its clip");
+    assert!(
+        h.drain_warnings()
+            .iter()
+            .any(|w| w.contains("dropped annotation")),
+        "the drop is reported"
+    );
+
+    h.undo(&mut p).unwrap();
+    assert_eq!(
+        p.annotation_span(p.annotation(id).unwrap()),
+        Some((Seconds::new(3, 2), Seconds::new(3, 2))),
+        "undo restores the note with its clip"
+    );
+}
+
+#[test]
+fn a_timeline_annotation_track_change_round_trips_through_the_sidecar() {
+    use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
+
+    let mut p = fixture();
+    let mut h = History::default();
+    let point = |source: Seconds| ClipPoint { clip: 1, source };
+    let id = h
+        .add_annotation(
+            &mut p,
+            1,
+            AnnotationKind::Marker,
+            Anchor::Timeline {
+                start: point(Seconds::new(5, 2)),
+                end: point(Seconds::new(5, 2)),
+            },
+            0,
+        )
+        .unwrap();
+    let batch = split_on(&p, 0, 1.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let split_piece = match &p.annotation(id).unwrap().anchor {
+        Anchor::Timeline { start, .. } => start.clip,
+        other => panic!("unexpected anchor {other:?}"),
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nle.history.json");
+    save(&h, &path);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"annotations_after\""), "{text}");
+    assert!(text.contains("\"sequence\": 1"), "{text}");
+
+    let mut loaded = load(&path);
+    let mut q = p.clone();
+    loaded.undo(&mut q).unwrap();
+    assert_eq!(
+        q.annotation_span(q.annotation(id).unwrap()),
+        Some((Seconds::new(3, 2), Seconds::new(3, 2))),
+        "undo restores the pre-split anchor"
+    );
+    assert_ne!(split_piece, 1, "the split had re-anchored it");
+}
+
+#[test]
+fn a_track_change_refuses_when_annotations_changed_outside() {
+    use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
+
+    let mut p = fixture();
+    let mut h = History::default();
+    h.add_annotation(
+        &mut p,
+        1,
+        AnnotationKind::Marker,
+        Anchor::Timeline {
+            start: ClipPoint {
+                clip: 1,
+                source: Seconds::new(3, 2),
+            },
+            end: ClipPoint {
+                clip: 1,
+                source: Seconds::new(3, 2),
+            },
+        },
+        0,
+    )
+    .unwrap();
+    let batch = split_on(&p, 0, 1.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    p.annotations.clear();
+    assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
+    assert!(p.annotations.is_empty(), "failed undo left the list alone");
+}

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use crate::annotation::{Anchor, Annotation, AnnotationKind};
+use crate::annotation::{Anchor, Annotation, AnnotationKind, reanchor_timeline};
 use crate::group::MediaGroup;
 use crate::media::RawProbe;
 use crate::project::{Asset, Project};
@@ -64,6 +64,8 @@ impl History {
         // A sync ripple edits several tracks at once. Snapshot the whole track
         // list (the same shape as track add/mute/rm), so one undo restores
         // every shifted track together.
+        let sequence = project.active_id();
+        let before_annotations = scoped_annotations(project, sequence);
         let touched = batch_tracks(&batch);
         if touched.len() > 1 {
             let before = project.timeline.tracks.clone();
@@ -72,14 +74,22 @@ impl History {
                 return Err(e);
             }
             let notes = clamp_project(project);
+            let (annotations_after, dropped) =
+                reanchor_timeline(&before_annotations, &before, &project.timeline.tracks);
+            project.replace_annotations(sequence, annotations_after.clone());
             if let Err(e) = project.validate() {
                 project.timeline.tracks = before;
+                project.replace_annotations(sequence, before_annotations);
                 return Err(e.into());
             }
             self.warnings.extend(notes);
+            self.warnings.extend(dropped);
             self.push_change(Change::Tracks(TracksChange {
+                sequence,
                 before,
                 after: project.timeline.tracks.clone(),
+                annotations_before: before_annotations,
+                annotations_after,
                 desc: batch.desc,
                 playhead,
                 provenance: self.provenance(),
@@ -89,6 +99,8 @@ impl History {
             return Ok(());
         }
         let track = batch_track(&batch, project)?;
+        let before_tracks =
+            has_timeline_anchors(&before_annotations).then(|| project.timeline.tracks.clone());
         let before = snapshot_track(&project.timeline.tracks[track]);
         let saved = project.timeline.tracks[track].segments.clone();
         // Clamp before snapshotting: the recorded `after` must be the state
@@ -99,17 +111,29 @@ impl History {
             return Err(e);
         }
         let notes = clamp_project(project);
+        let (annotations_after, dropped) = match &before_tracks {
+            Some(tracks) => {
+                reanchor_timeline(&before_annotations, tracks, &project.timeline.tracks)
+            }
+            None => (before_annotations.clone(), Vec::new()),
+        };
+        project.replace_annotations(sequence, annotations_after.clone());
         if let Err(e) = project.validate() {
             project.timeline.tracks[track].segments = saved;
+            project.replace_annotations(sequence, before_annotations);
             return Err(e.into());
         }
         self.warnings.extend(notes);
+        self.warnings.extend(dropped);
         let after = snapshot_track(&project.timeline.tracks[track]);
         self.push_change(Change::Track(TrackChange {
+            sequence,
             track,
             start_frame: 0,
             before,
             after,
+            annotations_before: before_annotations,
+            annotations_after,
             desc: batch.desc,
             playhead,
             provenance: self.provenance(),
@@ -157,20 +181,31 @@ impl History {
     where
         F: FnOnce(&mut Project) -> Result<String, EditError>,
     {
+        let sequence = project.active_id();
         let before = project.timeline.tracks.clone();
-        let desc = match edit(project).and_then(|desc| {
-            project.validate().map_err(EditError::from)?;
-            Ok(desc)
-        }) {
+        let before_annotations = scoped_annotations(project, sequence);
+        let desc = match edit(project) {
             Ok(desc) => desc,
             Err(e) => {
                 project.timeline.tracks = before;
                 return Err(e);
             }
         };
+        let (annotations_after, dropped) =
+            reanchor_timeline(&before_annotations, &before, &project.timeline.tracks);
+        project.replace_annotations(sequence, annotations_after.clone());
+        if let Err(e) = project.validate() {
+            project.timeline.tracks = before;
+            project.replace_annotations(sequence, before_annotations);
+            return Err(e.into());
+        }
+        self.warnings.extend(dropped);
         self.push_change(Change::Tracks(TracksChange {
+            sequence,
             before,
             after: project.timeline.tracks.clone(),
+            annotations_before: before_annotations,
+            annotations_after,
             desc: desc.clone(),
             playhead,
             provenance: self.provenance(),
@@ -767,10 +802,14 @@ impl Change {
 /// from, restored on undo/redo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackChange {
+    pub sequence: u32,
     pub track: usize,
     pub start_frame: i64,
     pub before: Vec<Atom>,
     pub after: Vec<Atom>,
+    /// Timeline annotations before/after the edit, scoped to `sequence`.
+    pub annotations_before: Vec<Annotation>,
+    pub annotations_after: Vec<Annotation>,
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
@@ -782,8 +821,12 @@ pub struct TrackChange {
 /// express.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TracksChange {
+    pub sequence: u32,
     pub before: Vec<Track>,
     pub after: Vec<Track>,
+    /// Timeline annotations before/after the edit, scoped to `sequence`.
+    pub annotations_before: Vec<Annotation>,
+    pub annotations_after: Vec<Annotation>,
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
@@ -833,6 +876,16 @@ pub struct AnnotationsChange {
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
+}
+
+fn scoped_annotations(project: &Project, sequence: u32) -> Vec<Annotation> {
+    project.annotations_for(sequence).cloned().collect()
+}
+
+fn has_timeline_anchors(annotations: &[Annotation]) -> bool {
+    annotations
+        .iter()
+        .any(|annotation| matches!(annotation.anchor, Anchor::Timeline { .. }))
 }
 
 /// Refuse to record an annotation edit on a stack it does not belong to.
@@ -978,12 +1031,20 @@ fn substitute_tracks(
     } else {
         (&change.after, &change.before)
     };
-    if project.timeline.tracks != *expected {
+    let (expected_annotations, write_annotations) = if forward {
+        (&change.annotations_before, &change.annotations_after)
+    } else {
+        (&change.annotations_after, &change.annotations_before)
+    };
+    let live_annotations: Vec<Annotation> =
+        project.annotations_for(change.sequence).cloned().collect();
+    if project.timeline.tracks != *expected || live_annotations != *expected_annotations {
         return Err(EditError::History(
             "track list changed outside the undo stack".to_string(),
         ));
     }
     project.timeline.tracks = write.clone();
+    project.replace_annotations(change.sequence, write_annotations.clone());
     Ok(())
 }
 
@@ -994,23 +1055,31 @@ fn substitute_topology(
     change: &TrackChange,
     forward: bool,
 ) -> Result<(), EditError> {
-    let track = project
-        .timeline
-        .tracks
-        .get_mut(change.track)
-        .ok_or(EditError::TrackNotFound(change.track))?;
     let (expected, write) = if forward {
         (&change.before, &change.after)
     } else {
         (&change.after, &change.before)
     };
+    let (expected_annotations, write_annotations) = if forward {
+        (&change.annotations_before, &change.annotations_after)
+    } else {
+        (&change.annotations_after, &change.annotations_before)
+    };
+    let live_annotations: Vec<Annotation> =
+        project.annotations_for(change.sequence).cloned().collect();
+    let track = project
+        .timeline
+        .tracks
+        .get_mut(change.track)
+        .ok_or(EditError::TrackNotFound(change.track))?;
     let live = snapshot_track(track);
-    if live != *expected {
+    if live != *expected || live_annotations != *expected_annotations {
         return Err(EditError::History(
             "timeline changed outside the undo stack".to_string(),
         ));
     }
     track.segments = write.iter().map(segment_from_atom).collect();
+    project.replace_annotations(change.sequence, write_annotations.clone());
     Ok(())
 }
 
