@@ -10,7 +10,10 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   speed changes, ripples and paste keep the same footage; a split re-anchors
   to the piece that owns the source; a deleted endpoint drops the annotation
   with a warning. The drop is recorded in the track change, so undo restores
-  it. Ranges are start/end points; creation makes a point.
+  it. Adding or growing a blend also consumes the source from its neighbour,
+  and a blend side has no anchor identity, so a note held in those frames
+  drops with the same warning. Ranges are start/end points; creation makes a
+  point.
 - **Ids are project-wide, the list is scoped by `sequence`.** `nile
   annotation ls` defaults to the active sequence; `--sequence N` reads
   another. Adding always writes to the active sequence's history, and
