@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-N="$PWD/target/release/nile"
+N="${CARGO_TARGET_DIR:-$PWD/target}/release/nile"
 DIR=demo-sandbox
 mkdir -p "$DIR"
 cd "$DIR"
