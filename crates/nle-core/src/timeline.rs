@@ -462,14 +462,26 @@ impl Clip {
     /// source). Edits move in timeline time but `asset_in/out` live in
     /// source time, so crossing that boundary scales by `speed`.
     pub fn source_at(&self, timeline_offset: Seconds) -> Seconds {
-        self.asset_in + timeline_offset * self.speed
+        source_time(self.asset_in, self.speed, timeline_offset)
     }
 
     /// Timeline offset of a source time inside the clip (source →
     /// timeline) — the inverse of [`Clip::source_at`].
     pub fn timeline_offset_of(&self, source: Seconds) -> Seconds {
-        (source - self.asset_in) / self.speed
+        offset_of_source(self.asset_in, self.speed, source)
     }
+}
+
+/// Source time at a timeline offset, given a span's `asset_in` and `speed` —
+/// the one definition of the timeline↔source boundary. A `Clip` calls this;
+/// so does a recorded `FrameSource`, which has no `Clip` to ask.
+pub fn source_time(asset_in: Seconds, speed: Seconds, timeline_offset: Seconds) -> Seconds {
+    asset_in + timeline_offset * speed
+}
+
+/// The inverse of [`source_time`]: a source time's offset from the span start.
+pub fn offset_of_source(asset_in: Seconds, speed: Seconds, source: Seconds) -> Seconds {
+    (source - asset_in) / speed
 }
 
 /// Absolute timeline position of `clip`'s `source` time, across tracks.
@@ -687,8 +699,10 @@ impl Timeline {
                         })),
                         Segment::Clip(c) => {
                             let mut c = c.clone();
-                            c.asset_in += (take_start - acc) * c.speed;
-                            c.asset_out -= (seg_end - take_end) * c.speed;
+                            // Both ends are measured from the original start.
+                            let in0 = c.asset_in;
+                            c.asset_in = source_time(in0, c.speed, take_start - acc);
+                            c.asset_out = source_time(in0, c.speed, take_end - acc);
                             if c.asset_out > c.asset_in {
                                 segments.push(Segment::Clip(c));
                             }
