@@ -778,7 +778,10 @@ impl App {
             return;
         };
         let f = secs(fps);
-        let last = ((self.total() * f).ceil() as i64 - 1).max(0);
+        // One quantizer: the last frame is `dur - 1/fps`, not
+        // `ceil(dur * fps) - 1` — an off-grid end (an unsnapped import) would
+        // otherwise let `f`/`F` step past `last_frame`.
+        let last = frame_of(Some(fps), self.last_frame());
         let idx = ((self.playhead * f).round() as i64)
             .saturating_add(dir.saturating_mul(n as i64))
             .clamp(0, last);

@@ -309,6 +309,40 @@ fn frame_steps_move_one_frame_and_clamp() {
     assert_eq!(app.playhead, 209.0 / 30.0, "clamped at the last frame");
 }
 
+// An unsnapped end (an imported OTIO gap need not land on the grid) still
+// ends at `dur - 1/fps`: a frame step must stop on that last frame, not on
+// `ceil(dur * fps) - 1`, which is a frame past it.
+#[test]
+fn an_off_grid_end_stops_at_the_last_frame() {
+    let mut p = project();
+    p.fps = Some(Seconds::new(30, 1));
+    p.timeline
+        .video_track_mut()
+        .unwrap()
+        .segments
+        .push(TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::new(1, 100),
+        }));
+    let mut app = App::new(p, temp_project_path("offgrid"));
+    for _ in 0..1000 {
+        app.step_playhead_by(1, 1);
+    }
+    // `dur - 1/fps` is not on the grid here, so the last reachable frame is
+    // the greatest one at or below it (209 of 6.9767 s at 30 fps).
+    assert!(
+        app.playhead <= app.last_frame() + 1e-9,
+        "stepped to {} past the last frame {}",
+        app.playhead,
+        app.last_frame()
+    );
+    let want = (app.last_frame() * 30.0).floor() / 30.0;
+    assert!(
+        (app.playhead - want).abs() < 1e-9,
+        "stopped at {} but the last grid frame is {want}",
+        app.playhead
+    );
+}
+
 #[test]
 fn switching_track_keeps_the_composite_monitor() {
     let mut p = asset_project();
