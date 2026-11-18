@@ -2,9 +2,9 @@
 
 `Project { media, sequences, active }` holds one or more editable timelines.
 The media pool is shared; `fps`, `video`, `timeline` and `playhead` belong to a
-`Sequence`. Project files are v15 (v11 added sequences, v12 media groups,
-v13 annotations, v14 clip-relative timeline anchors, v15 crop windows);
-older files are rejected, never migrated.
+`Sequence`. Project files are v16 (v11 added sequences, v12 media groups,
+v13 annotations, v14 clip-relative timeline anchors, v15 crop windows,
+v16 crop keyframes); older files are rejected, never migrated.
 
 ## One active sequence, one undo stack
 
@@ -15,8 +15,8 @@ older files are rejected, never migrated.
 - `Document` owns `Histories` keyed by sequence id and routes every edit,
   asset change, undo and redo through `project.active_id()`. Switching
   sequences switches undo; never share one stack across timelines.
-- History sidecars are v22 (`stacks` keyed by id, plus grouped changes,
-  media groups, annotations and timeline anchors).
+- History sidecars are v23 (`stacks` keyed by id, plus grouped changes,
+  media groups, annotations, timeline anchors and crop keyframes).
   Pool edits are recorded in the sequence active at the time; undoing one
   still validates against every sequence, so an asset used elsewhere refuses
   loudly.

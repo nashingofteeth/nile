@@ -57,22 +57,26 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
     at_least_a_frame(project, &left_len)?;
     at_least_a_frame(project, &(c.duration() - left_len))?;
 
-    let left = Segment::Clip(Clip {
+    let mut left = Clip {
         id: c.id,
         asset: c.asset,
         asset_in: c.asset_in,
         asset_out: c.asset_in + source_span(&c, left_len),
         speed: c.speed,
         effects: c.effects.clone(),
-    });
-    let right = Segment::Clip(Clip {
+    };
+    left.truncate_crop_keys(left_len);
+    let mut right = Clip {
         id: project.next_clip_id(),
         asset: c.asset,
         asset_in: c.asset_in + source_span(&c, t - seg_start),
         asset_out: c.asset_out,
         speed: c.speed,
         effects: c.effects.clone(),
-    });
+    };
+    right.rebase_crop_keys(left_len);
+    let left = Segment::Clip(left);
+    let right = Segment::Clip(right);
     Ok(Batch {
         ops: replace_with_many(ti, si, &Segment::Clip(c.clone()), vec![left, right]),
         desc: format!("split clip #{} at {}", c.id, stamp(project, &t)),
@@ -275,14 +279,16 @@ pub fn paste_on(
                         if off > Seconds::from_integer(0) {
                             notes.push(format!("trimmed clip #{}", c.id));
                         }
-                        Some(Segment::Clip(Clip {
+                        let mut tail = Clip {
                             id,
                             asset: c.asset,
                             asset_in: c.asset_in + source_span(c, off),
                             asset_out: c.asset_out,
                             speed: c.speed,
                             effects: c.effects.clone(),
-                        }))
+                        };
+                        tail.rebase_crop_keys(off);
+                        Some(Segment::Clip(tail))
                     }
                 }
             } else {
@@ -436,14 +442,16 @@ pub fn insert_gap_on(
             if tail_ok {
                 // The tail keeps the id when the head is absent (insert-before),
                 // else gets a fresh one (a split).
-                pieces.push(Segment::Clip(Clip {
+                let mut tail = Clip {
                     id: if head_ok { pid } else { c.id },
                     asset: c.asset,
                     asset_in: c.asset_in + source_span(c, off),
                     asset_out: c.asset_out,
                     speed: c.speed,
                     effects: c.effects.clone(),
-                }));
+                };
+                tail.rebase_crop_keys(off);
+                pieces.push(Segment::Clip(tail));
             }
             Ok(Batch {
                 ops: replace_with_many(ti, si, &seg, pieces),
@@ -540,14 +548,16 @@ pub fn paste_ripple_on(
                 // The right half is a new clip on a split, or keeps the
                 // original's identity on an insert-before.
                 let id = if head_ok { pid + 1 } else { c.id };
-                pieces.push(Segment::Clip(Clip {
+                let mut tail = Clip {
                     id,
                     asset: c.asset,
                     asset_in: c.asset_in + source_span(c, head_len),
                     asset_out: c.asset_out,
                     speed: c.speed,
                     effects: c.effects.clone(),
-                }));
+                };
+                tail.rebase_crop_keys(head_len);
+                pieces.push(Segment::Clip(tail));
             }
             pieces
         }
@@ -898,24 +908,24 @@ fn split_segment_at(
             at_least_a_frame(project, &offset)?;
             at_least_a_frame(project, &(c.duration() - offset))?;
             let split = c.asset_in + source_span(c, offset);
-            let (left, right) = (
-                Clip {
-                    id: c.id,
-                    asset: c.asset,
-                    asset_in: c.asset_in,
-                    asset_out: split,
-                    speed: c.speed,
-                    effects: c.effects.clone(),
-                },
-                Clip {
-                    id: *next_id,
-                    asset: c.asset,
-                    asset_in: split,
-                    asset_out: c.asset_out,
-                    speed: c.speed,
-                    effects: c.effects.clone(),
-                },
-            );
+            let mut left = Clip {
+                id: c.id,
+                asset: c.asset,
+                asset_in: c.asset_in,
+                asset_out: split,
+                speed: c.speed,
+                effects: c.effects.clone(),
+            };
+            left.truncate_crop_keys(offset);
+            let mut right = Clip {
+                id: *next_id,
+                asset: c.asset,
+                asset_in: split,
+                asset_out: c.asset_out,
+                speed: c.speed,
+                effects: c.effects.clone(),
+            };
+            right.rebase_crop_keys(offset);
             *next_id = next_id.saturating_add(1);
             Ok((Segment::Clip(left), Segment::Clip(right)))
         }

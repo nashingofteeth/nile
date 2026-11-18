@@ -577,6 +577,140 @@ mod tests {
     }
 
     #[test]
+    fn crop_keys_snap_height_and_stay_inside_the_clip() {
+        use crate::timeline::{CropKey, Effect};
+
+        let mut doc = document();
+        let mut register = None;
+        doc.edit(
+            &crate::Action::AddEffect {
+                track: 0,
+                clip: 1,
+                effect: Effect::Crop {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                    keys: Vec::new(),
+                },
+                index: None,
+            },
+            0.0,
+            &mut register,
+        )
+        .unwrap();
+        doc.edit(
+            &crate::Action::CropKey {
+                track: 0,
+                clip: 1,
+                at: 1.0,
+                x: 10.0,
+                y: 0.0,
+                w: 90.0,
+                h: 37.0,
+            },
+            0.0,
+            &mut register,
+        )
+        .unwrap();
+        let keys = |doc: &Document| -> Vec<CropKey> {
+            let Segment::Clip(clip) = &doc.project.timeline.video_track().unwrap().segments[0]
+            else {
+                panic!("clip");
+            };
+            let Effect::Crop { keys, .. } = clip
+                .effects
+                .iter()
+                .find(|effect| matches!(effect, Effect::Crop { .. }))
+                .expect("crop")
+            else {
+                panic!("crop");
+            };
+            keys.clone()
+        };
+        let first = keys(&doc);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].h, 40.0, "37 snaps to the 40% rung");
+        assert_eq!(first[0].at, Seconds::from_integer(1));
+
+        // A key at the same timeline frame replaces the old one.
+        doc.edit(
+            &crate::Action::CropKey {
+                track: 0,
+                clip: 1,
+                at: 1.0,
+                x: 20.0,
+                y: 0.0,
+                w: 70.0,
+                h: 50.0,
+            },
+            0.0,
+            &mut register,
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&doc),
+            vec![CropKey {
+                at: Seconds::from_integer(1),
+                x: 20.0,
+                y: 0.0,
+                w: 70.0,
+                h: 50.0
+            }]
+        );
+
+        // Snapping must fit below y, not push the window past the frame.
+        doc.edit(
+            &crate::Action::CropKey {
+                track: 0,
+                clip: 1,
+                at: 1.0,
+                x: 0.0,
+                y: 62.0,
+                w: 50.0,
+                h: 38.0,
+            },
+            0.0,
+            &mut register,
+        )
+        .unwrap();
+        assert_eq!(keys(&doc)[0].h, 33.0, "38 snaps down to fit below y=62");
+        assert!(matches!(
+            doc.edit(
+                &crate::Action::CropKey {
+                    track: 0,
+                    clip: 1,
+                    at: 1.0,
+                    x: 0.0,
+                    y: 95.0,
+                    w: 5.0,
+                    h: 5.0,
+                },
+                0.0,
+                &mut register,
+            ),
+            Err(EditError::CropKeyHeight)
+        ));
+
+        assert!(matches!(
+            doc.edit(
+                &crate::Action::CropKey {
+                    track: 0,
+                    clip: 1,
+                    at: 2.0,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                0.0,
+                &mut register,
+            ),
+            Err(EditError::CropKeyOutside)
+        ));
+    }
+
+    #[test]
     fn timeline_ranges_resolve_both_ends_and_refuse_a_reverse() {
         use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
 

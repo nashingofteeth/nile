@@ -187,5 +187,6 @@ pub fn reanchors(action: &Action) -> bool {
             | Action::AnnotationAddAt { .. }
             | Action::AnnotationRemove { .. }
             | Action::AnnotationResolve { .. }
+            | Action::CropKey { .. }
     )
 }

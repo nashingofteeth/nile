@@ -274,7 +274,7 @@ pub(super) fn trim_beside_blend_on(
     if delta <= Seconds::from_integer(0) {
         return Ok(None);
     }
-    let after = if out {
+    let mut after = if out {
         Clip {
             asset_out: c.asset_in + source_span(c, t - seg_start),
             ..c.clone()
@@ -285,6 +285,9 @@ pub(super) fn trim_beside_blend_on(
             ..c.clone()
         }
     };
+    if !out {
+        after.rebase_crop_keys(delta);
+    }
     at_least_a_frame(project, &after.duration())?;
 
     let bstart = tr.start_of(bi);
@@ -383,7 +386,7 @@ pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batc
         if let Some(batch) = trim_beside_blend_on(project, ti, si, t, false, false)? {
             return Ok(batch);
         }
-        let after = Clip {
+        let mut after = Clip {
             id: c.id,
             asset: c.asset,
             asset_in: c.asset_in + source_span(c, delta),
@@ -391,6 +394,7 @@ pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batc
             speed: c.speed,
             effects: c.effects.clone(),
         };
+        after.rebase_crop_keys(delta);
         at_least_a_frame(project, &after.duration())?;
         let mut ops = vec![EditOp::Replace {
             track: ti,
@@ -569,6 +573,7 @@ pub fn trim_out_on(project: &Project, track: usize, playhead: f64) -> Result<Bat
         let next = next.clone();
         let mut after = next.clone();
         after.asset_in = next.asset_in - source_span(&next, delta);
+        after.rebase_crop_keys(-delta);
         if after.asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: next.id,

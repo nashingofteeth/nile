@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use nle_core::project::Asset;
-use nle_core::timeline::{Clip, Effect, Segment, TrackKind, TransitionKind, TransitionSource};
+use nle_core::timeline::{
+    Clip, CropKey, Effect, Segment, TrackKind, TransitionKind, TransitionSource,
+};
 use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -49,6 +51,10 @@ pub enum CompileError {
     TransitionOnAudioTrack,
     #[error("asset #{0} has no picture size — cannot resolve a percentage crop")]
     MissingGeometry(u32),
+    #[error("a keyframed crop must be the only effect on its clip")]
+    KeyedCropEffects,
+    #[error("a keyframed crop can't render inside a transition")]
+    KeyedCropTransition,
 }
 
 #[derive(Debug, Error)]
@@ -71,10 +77,15 @@ enum Piece {
         src_dur: String,
         /// Timeline span the clip occupies (source / speed).
         out_dur: String,
+        /// Exact clip duration.
+        duration: Seconds,
         /// Playback rate; `1` is a no-op retime.
         speed: Seconds,
         /// Pre-rendered per-clip effect filters (empty when none).
         effects: String,
+        /// A keyed crop renders as its own pass graph.
+        keyed: Option<Effect>,
+        canvas: Option<(u32, u32)>,
         has_audio: bool,
     },
     Gap {
@@ -88,6 +99,9 @@ enum Piece {
 /// any effect that measures the frame — crop, scale, and the distance an
 /// offset moves — resolves against the asset's own frame, not the output.
 fn clip_effects(c: &Clip, asset: &Asset, fallback: (u32, u32)) -> Result<String, CompileError> {
+    if keyed_crop(c).is_some() {
+        return Err(CompileError::KeyedCropEffects);
+    }
     effect_chain(&c.effects, asset, fallback)
 }
 
@@ -99,6 +113,14 @@ fn effect_chain(
     asset: &Asset,
     fallback: (u32, u32),
 ) -> Result<String, CompileError> {
+    if effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Crop { keys, .. } if !keys.is_empty()
+        )
+    }) {
+        return Err(CompileError::KeyedCropTransition);
+    }
     if effects.is_empty() {
         return Ok(String::new());
     }
@@ -165,6 +187,186 @@ fn trim_f64(v: f64) -> String {
     } else {
         s.to_string()
     }
+}
+
+fn keyed_crop(clip: &Clip) -> Option<&Effect> {
+    clip.effects.iter().find(|effect| {
+        matches!(
+            effect,
+            Effect::Crop { keys, .. } if !keys.is_empty()
+        )
+    })
+}
+
+struct CropPass {
+    start: Seconds,
+    end: Seconds,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    w: f64,
+    h: f64,
+}
+
+fn crop_passes(effect: &Effect, duration: Seconds) -> Vec<CropPass> {
+    let Effect::Crop { x, y, w, h, keys } = effect else {
+        return Vec::new();
+    };
+    let mut keys: Vec<CropKey> = keys.clone();
+    keys.sort_by_key(|key| key.at);
+    let mut passes = Vec::new();
+    if keys.is_empty() {
+        return passes;
+    }
+    let first = keys[0].at;
+    if first > Seconds::from_integer(0) {
+        let end = first.min(duration);
+        if end > Seconds::from_integer(0) {
+            let (x1, y1) = if first <= duration {
+                (keys[0].x, keys[0].y)
+            } else {
+                (*x, *y)
+            };
+            passes.push(CropPass {
+                start: Seconds::from_integer(0),
+                end,
+                x0: *x,
+                y0: *y,
+                x1,
+                y1,
+                w: *w,
+                h: *h,
+            });
+        }
+    }
+    for (i, key) in keys.iter().enumerate() {
+        let start = key.at;
+        if start < Seconds::from_integer(0) || start >= duration {
+            continue;
+        }
+        let end = keys
+            .get(i + 1)
+            .map(|next| next.at.min(duration))
+            .unwrap_or(duration);
+        if end <= start {
+            continue;
+        }
+        let (x1, y1) = keys
+            .get(i + 1)
+            .map(|next| (next.x, next.y))
+            .unwrap_or((key.x, key.y));
+        passes.push(CropPass {
+            start,
+            end,
+            x0: key.x,
+            y0: key.y,
+            x1,
+            y1,
+            w: key.w,
+            h: key.h,
+        });
+    }
+    passes
+}
+
+fn even(value: i64, max: i64) -> i64 {
+    let value = value.clamp(2, max.max(2));
+    let even = value & !1;
+    even.max(2).min(max & !1).max(2)
+}
+
+fn window_pixels(canvas: (u32, u32), x: f64, y: f64, w: f64, h: f64) -> (i64, i64, i64, i64) {
+    let (cw, ch) = (canvas.0 as i64, canvas.1 as i64);
+    let px = ((cw as f64 * x / 100.0).round() as i64).clamp(0, cw - 2) & !1;
+    let py = ((ch as f64 * y / 100.0).round() as i64).clamp(0, ch - 2) & !1;
+    let pw = even((cw as f64 * w / 100.0).round() as i64, cw - px);
+    let ph = even((ch as f64 * h / 100.0).round() as i64, ch - py);
+    (pw, ph, px, py)
+}
+
+fn move_expr(a: i64, b: i64, dur: Seconds) -> String {
+    if a == b {
+        a.to_string()
+    } else {
+        format!("{a}+({b}-{a})*t/{}", format_seconds(&dur))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn keyed_crop_video(
+    input: usize,
+    src_start: &str,
+    src_dur: &str,
+    duration: Seconds,
+    speed: &Seconds,
+    effect: &Effect,
+    canvas: (u32, u32),
+    out: (u32, u32),
+    alpha: bool,
+    fps: &str,
+    label: &str,
+) -> Result<String, CompileError> {
+    let passes = crop_passes(effect, duration);
+    if passes.is_empty() {
+        return Err(CompileError::KeyedCropEffects);
+    }
+    let base = format!("{label}_b");
+    let mut graph = format!(
+        "[{input}:v]trim=start={src_start}:duration={src_dur},{},format=yuva420p[{base}];\n",
+        video_setpts(speed)
+    );
+    let n = passes.len();
+    if n > 1 {
+        let outputs: String = (0..n).map(|i| format!("[{label}_p{i}]")).collect();
+        graph.push_str(&format!("[{base}]split={n}{outputs};\n"));
+    }
+    let mut q_labels = Vec::with_capacity(n);
+    for (i, pass) in passes.iter().enumerate() {
+        let source = if n > 1 {
+            format!("[{label}_p{i}]")
+        } else {
+            format!("[{base}]")
+        };
+        let dur = pass.end - pass.start;
+        let dur_s = format_seconds(&dur);
+        let (pw, ph, px0, py0) = window_pixels(canvas, pass.x0, pass.y0, pass.w, pass.h);
+        let (_, _, px1, py1) = window_pixels(canvas, pass.x1, pass.y1, pass.w, pass.h);
+        let xexpr = move_expr(px0, px1, dur);
+        let yexpr = move_expr(py0, py1, dur);
+        let c = format!("{label}_c{i}");
+        let bg = format!("{label}_g{i}");
+        let q = if n == 1 {
+            label.to_string()
+        } else {
+            format!("{label}_q{i}")
+        };
+        graph.push_str(&format!(
+            "{source}trim=start={}:end={},setpts=PTS-STARTPTS,\
+             format=yuva420p,crop={pw}:{ph}:{xexpr}:{yexpr},fps={fps}[{c}];\n",
+            format_seconds(&pass.start),
+            format_seconds(&pass.end)
+        ));
+        graph.push_str(&format!(
+            "color=c=black:s={}x{}:r={fps}:d={dur_s},format=yuva420p,\
+             colorchannelmixer=rr=0:gg=0:bb=0:aa=0[{bg}];\n",
+            canvas.0, canvas.1
+        ));
+        let fmt = if alpha { "yuva420p" } else { "yuv420p" };
+        graph.push_str(&format!(
+            "[{bg}][{c}]overlay=x='{xexpr}':y='{yexpr}':format=auto,\
+             scale={}:{},setsar=1,format={fmt}[{q}];\n",
+            out.0, out.1
+        ));
+        q_labels.push(format!("[{q}]"));
+    }
+    if n > 1 {
+        graph.push_str(&format!(
+            "{}concat=n={n}:v=1:a=0[{label}];\n",
+            q_labels.concat()
+        ));
+    }
+    Ok(graph)
 }
 
 /// A compiled, ready-to-run export.
@@ -239,13 +441,24 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
                     inputs.push(asset.path.clone());
                     inputs.len() - 1
                 });
+                let keyed = keyed_crop(c).cloned();
+                if keyed.is_some() && c.effects.len() > 1 {
+                    return Err(CompileError::KeyedCropEffects);
+                }
                 pieces.push(Piece::Clip {
                     input,
                     src_start: format_seconds(&c.asset_in),
                     src_dur: format_seconds(&c.source_duration()),
                     out_dur: format_seconds(&c.duration()),
+                    duration: c.duration(),
                     speed: c.speed,
-                    effects: clip_effects(c, asset, (w, h))?,
+                    effects: if keyed.is_some() {
+                        String::new()
+                    } else {
+                        clip_effects(c, asset, (w, h))?
+                    },
+                    keyed,
+                    canvas: asset.video_size(),
                     has_audio: asset.probe.has_audio(),
                 });
             }
@@ -264,15 +477,34 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
                 src_start,
                 src_dur,
                 out_dur,
+                duration,
                 speed,
                 effects,
+                keyed,
+                canvas,
                 has_audio,
             } => {
-                graph.push_str(&format!(
-                    "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},{effects}\
-                     scale={w}:{h},setsar=1,fps={fps_s},format=yuv420p[v{i}];\n",
-                    setpts = video_setpts(speed),
-                ));
+                if let Some(effect) = keyed {
+                    graph.push_str(&keyed_crop_video(
+                        *input,
+                        src_start,
+                        src_dur,
+                        *duration,
+                        speed,
+                        effect,
+                        canvas.unwrap_or((w, h)),
+                        (w, h),
+                        false,
+                        &fps_s,
+                        &format!("v{i}"),
+                    )?);
+                } else {
+                    graph.push_str(&format!(
+                        "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},{effects}\
+                         scale={w}:{h},setsar=1,fps={fps_s},format=yuv420p[v{i}];\n",
+                        setpts = video_setpts(speed),
+                    ));
+                }
                 if *has_audio {
                     graph.push_str(&format!(
                         "[{input}:a]atrim=start={src_start}:duration={src_dur},asetpts=PTS-STARTPTS{atempo},\
@@ -487,12 +719,33 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
                     let src_dur = format_seconds(&c.source_duration());
                     let out_dur = format_seconds(&c.duration());
                     if is_video {
-                        graph.push_str(&format!(
-                            "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},{effects}\
-                             scale={w}:{h},setsar=1,fps={fps_s},format=yuva420p[v{ti}_{idx}];\n",
-                            setpts = video_setpts(&c.speed),
-                            effects = clip_effects(c, asset, (w, h))?,
-                        ));
+                        if keyed_crop(c).is_some() && c.effects.len() > 1 {
+                            return Err(CompileError::KeyedCropEffects);
+                        }
+                        if let Some(effect) = keyed_crop(c) {
+                            graph.push_str(&keyed_crop_video(
+                                input,
+                                &src_start,
+                                &src_dur,
+                                c.duration(),
+                                &c.speed,
+                                effect,
+                                asset
+                                    .video_size()
+                                    .ok_or(CompileError::MissingGeometry(c.asset))?,
+                                (w, h),
+                                true,
+                                &fps_s,
+                                &format!("v{ti}_{idx}"),
+                            )?);
+                        } else {
+                            graph.push_str(&format!(
+                                "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},{effects}\
+                                 scale={w}:{h},setsar=1,fps={fps_s},format=yuva420p[v{ti}_{idx}];\n",
+                                setpts = video_setpts(&c.speed),
+                                effects = clip_effects(c, asset, (w, h))?,
+                            ));
+                        }
                         v_labels.push(format!("[v{ti}_{idx}]"));
                     }
                     if asset.probe.has_audio() {
@@ -869,7 +1122,98 @@ mod tests {
     }
     use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
-    use nle_core::timeline::{Clip, Effect, Gap, Transition, TransitionKind, TransitionSource};
+    use nle_core::timeline::{
+        Clip, CropKey, Effect, Gap, Transition, TransitionKind, TransitionSource,
+    };
+
+    #[test]
+    fn a_keyed_crop_refuses_other_effects() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        p.video = Some(VideoSettings {
+            width: 320,
+            height: 180,
+        });
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("4", 320, 180, "30/1", false),
+        );
+        let mut clip = Clip::new(1, asset, Seconds::from_integer(0), Seconds::from_integer(2));
+        clip.effects = vec![
+            Effect::Crop {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+                keys: vec![CropKey {
+                    at: Seconds::from_integer(1),
+                    x: 10.0,
+                    y: 0.0,
+                    w: 90.0,
+                    h: 100.0,
+                }],
+            },
+            Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            },
+        ];
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(clip)];
+        assert!(matches!(
+            compile_export(&p),
+            Err(CompileError::KeyedCropEffects)
+        ));
+    }
+
+    #[test]
+    fn a_keyed_crop_compiles_to_size_passes_with_position_expressions() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        p.video = Some(VideoSettings {
+            width: 320,
+            height: 180,
+        });
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("4", 320, 180, "30/1", false),
+        );
+        let keys = vec![
+            CropKey {
+                at: Seconds::from_integer(0),
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            CropKey {
+                at: Seconds::from_integer(1),
+                x: 20.0,
+                y: 0.0,
+                w: 70.0,
+                h: 50.0,
+            },
+        ];
+        let mut clip = Clip::new(1, asset, Seconds::from_integer(0), Seconds::from_integer(2));
+        clip.effects = vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys,
+        }];
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(clip)];
+
+        let graph = compile_export(&p).unwrap().graph;
+        assert!(graph.contains("split=2"), "{graph}");
+        assert!(graph.contains("crop="), "{graph}");
+        assert!(graph.contains("overlay="), "{graph}");
+        assert!(graph.contains("concat=n=2:v=1:a=0[v0]"), "{graph}");
+        assert!(
+            graph.contains("*t/1") || graph.contains("*t/1.0"),
+            "the x/y expression moves between keys:\n{graph}"
+        );
+    }
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -1278,6 +1622,7 @@ mod tests {
                     y: 25.0,
                     w: 100.0 - 25.0 - 25.0,
                     h: 100.0 - 25.0 - 25.0,
+                    keys: Vec::new(),
                 },
                 // Half width, full height.
                 Effect::Scale { w: 50.0, h: 100.0 },
