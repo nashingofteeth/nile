@@ -28,6 +28,7 @@ build — see "Learning Rust along the way".
 | render reports, `nile report`, export | `docs/pitfalls/render-report.md` |
 | crop keyframes, keyed crop | `docs/pitfalls/crop-keyframes.md` |
 | the borrow checker or clippy | `docs/rust-notes.md` |
+| long audits, `/audit` | `docs/review-loop.md` |
 
 Low-dependency stance: **the runtime set is frozen.** No new runtime
 dependencies without explicit justification (a hand-rolled ~50 lines beats a
