@@ -29,22 +29,13 @@ build — see "Learning Rust along the way".
 | crop keyframes, keyed crop | `docs/pitfalls/crop-keyframes.md` |
 | the borrow checker or clippy | `docs/rust-notes.md` |
 
-Low-dependency stance: **the current set is frozen.** No new runtime
+Low-dependency stance: **the runtime set is frozen.** No new runtime
 dependencies without explicit justification (a hand-rolled ~50 lines beats a
-transitive tree for most needs).
-
-- Direct deps: clap, anyhow, thiserror, serde, serde_json, num-rational,
-  tempfile, ratatui, crossterm (+ the internal workspace crates). Zero network code.
-- **`tui` is a default Cargo feature.** `cargo build/test
-  --no-default-features` is the headless variant — keep it compiling (gate
-  `mod`s, commands, and TUI-only helpers).
-- `Cargo.lock` is committed. After a dependency change run `cargo update`
-  deliberately, then `cargo audit` (RustSec) before committing.
-- Release profile is deliberately light (`lto = false`, `codegen-units = 16`);
-  the hot work is in ffmpeg/mpv subprocesses. `release-lto` is opt-in. Builds
-  require `clang`; Linux links through `lld` (see `.cargo/config.toml`).
-- ffmpeg/ffprobe/mpv are the real attack surface: no shell, `--` before
-  positional paths, isolated mpv config and IPC socket.
+transitive tree); zero network code. **`tui` is a default Cargo feature** —
+keep `cargo build/test --no-default-features` green. ffmpeg/ffprobe/mpv are
+the attack surface: no shell, `--` before positional paths, isolated mpv
+config and IPC socket. `Cargo.toml`, `Cargo.lock` and `.cargo/config.toml`
+own the dependency list, release profile and lld flags.
 
 ## Keeping the docs current
 
@@ -58,18 +49,11 @@ approval.** `README.md` and `docs/` may move with the code.
 default action and is not obvious from the code, a test, `README.md`, or a
 commit body. Otherwise it stays a commit message.
 
-1. **Scope.** Always-relevant → `AGENTS.md`; one subsystem →
-   `docs/pitfalls/<area>.md` plus an index line; a war story or measurement →
-   the commit body (keep only the clause that prevents a wrong fix).
-2. **Shape.** Imperative rule + the failure it prevents, ≤3 lines, naming a
-   file/symbol/test/command. No dates, version numbers, or "this session".
-3. **Dedupe.** Fold a new finding into the existing rule — one entry per class
-   of failure — and point at the test that guards it.
-4. **Evidence.** Add only if it bit us twice, caused data loss/corruption, or
-   is a deliberate user preference.
-5. **Prune at every milestone.** Delete what the code now enforces; when
-   `AGENTS.md` passes ~250 lines, move detail into `docs/` rather than
-   squeezing wording.
+Keep AGENTS rules ≤3 lines, imperative, with a file/symbol/test guard; fold
+new findings into the existing rule and move subsystem detail to
+`docs/pitfalls/<area>.md` (plus an index line), war stories to the commit
+body. Prune at every milestone: delete what the code enforces and move detail
+out before squeezing wording.
 
 A milestone landing also means a `PLAN.md` pass: move its row and status
 detail forward, note deferrals, keep the "next" pointer accurate — but don't
@@ -108,10 +92,13 @@ to say so.
    logical change per commit (`feat:`/`fix:`/`refactor:`/`docs:`), subject then
    a short why; name the Rust concept the change teaches and the test that
    guards it.
-4. **Verify before the final commit.** Focused tests while iterating;
-   `scripts/check.sh` (fmt, shellcheck, clippy, docs, tests, release build,
-   install, demo) before pushing. Keep `--no-default-features` green. Push the
-   branch with a clean tree when it is reviewable.
+4. **Verify before the final commit.** Code changes: focused tests while
+   iterating; `scripts/check.sh` (fmt, shellcheck, clippy, docs, tests,
+   release build, install, demo) before pushing. Markdown-only changes
+   (`README.md`, `PLAN.md`, `AGENTS.md`, `docs/**`) skip that gate: run
+   `git diff --check`, check touched paths/links, and smoke-run any command
+   example you changed. Doc comments are code and still need
+   `cargo doc -D warnings`. Push with a clean tree.
 5. **Review fixes stay here.** A review is not merge permission. Commit fixes
    onto the feature branch and push; do not open a separate
    `fix/...-review` branch. The branch reviewed is the branch that merges.
@@ -171,16 +158,10 @@ plainly; never claim a pass you did not observe.
   gap; a retime scales each side's span, not its rate. A blend is opaque,
   video-only and keeps its sides contiguous at the neighbour's rate. Full
   model and every edge case: `docs/pitfalls/transitions.md`.
-- **A trim at an edge deletes the segment that edge would consume**
-  (`trim_consume_target_on`): `i`/`I` the one **ending** at the playhead,
-  `o`/`O` the one **starting** there — at a shared cut those are the two
-  different neighbours. Deliberate and unit-tested.
-- **`trim_in_on`/`trim_out_on` have a second job.** For a gap they *extend the
-  neighbour into it* (extend mode's non-ripple grow); the trim keys and CLI
-  ripple gaps first, via `trim_at_on`'s own gap check. Don't "simplify" that
-  branch away — `extend_moves_an_edge_under_the_same_rules_as_the_tui` guards
-  it. An opposite-end extend commit is a delete, by id for a clip and by index
-  for a gap.
+- **An edge trim consumes the segment on its side.** `i`/`I` the one ending
+  at the playhead, `o`/`O` the one starting there; a gap is extended into,
+  not trimmed. Details and the guarded branch:
+  `docs/pitfalls/playhead.md`.
 - **Undo/history.** Writes through `History` (edits, `add_asset` /
   `add_assets` / `remove_asset`, `edit_tracks`) record; only whole-project
   rebuilds (`init`, `import-*`, `detect-edits`) re-baseline it via
@@ -195,9 +176,8 @@ plainly; never claim a pass you did not observe.
   refuses to clobber (`persist_playhead` → `Ok(false)`).
 - **Gaps and the pool.** `Mode::Pool(PoolState)` keeps "pool open" and its
   selection together; tracks are 1-based (0 refused); a shorter track pads
-  with a trailing gap in the row and the preview. The pool remembers the
-  selected asset, preview clock and timeline resume (`remember_pool`). Source
-  in/out marks are keyed by asset id in the session state (`view.json`).
+  with a trailing gap. Source marks are keyed by asset id (`view.json`);
+  `remember_pool` restores the selected asset, preview clock and timeline.
 - **One quantizer per axis.** Draw from the same function the playhead/cut
   indicator uses (`marker_col`), or drawn edges drift from real cuts.
 
@@ -212,11 +192,9 @@ plainly; never claim a pass you did not observe.
 - **The active track drives navigation and edits, not the monitor.** Digits
   are vim counts, so track selection is `t`/`T`/`<N>t` — bare `1..9` would
   break `3l`.
-- **The monitor proxies whatever `edl://` can't express** — effects, non-1×
-  retimes, transitions, foreign picture sizes, audible-mix spans — using the
-  *export* graph (no second filter chain to drift), cached under
-  `.nile/<stem>/cache/proxy`; a gap/proxy EDL also gets a continuous audio
-  master (`cache/audio`). See `docs/pitfalls/mpv-ffmpeg.md`.
+- **The monitor proxies whatever `edl://` can't express** (effects, non-1×,
+  transitions, foreign sizes, audible mixes) through the export graph, cached
+  under `.nile/<stem>/cache/proxy`; see `docs/pitfalls/mpv-ffmpeg.md`.
 - **Export presets and the chunk scheduler are local design choices.** Auto
   stays single-worker; details and benchmarks: `PLAN.md` (M6).
 - **Export stays byte-identical for the simple case:** one video track + no
@@ -306,9 +284,3 @@ plainly; never claim a pass you did not observe.
   two assets so index 1 ≠ id 2).
 - **The monitor is behind the `Mpv` trait**; TUI routing is tested with
   `FakeMpv` (add a `Call` variant, assert on it).
-
-### TUI diagnostics
-
-`nile edit --dump` renders once (no mpv), feeds `--dump-keys`, and prints the
-model state + grid; it is read-only (a scratch copy) and backs the render
-tests. Usage: README.
