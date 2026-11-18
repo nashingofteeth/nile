@@ -1,6 +1,7 @@
 /target/
 /demo-sandbox/
 /.nile/
+/.review/
 
 # Local secrets / credentials. Keep these out even though none are tracked.
 .env
