@@ -843,7 +843,24 @@ fn apply_session_state(app: &mut App, state: view_state::SessionState) {
 /// sidecar, and the register — so the dump runs on a temp **copy** of all
 /// three: a diagnostic must never touch what it is diagnosing (a dump with an
 /// editing key used to rewrite the project you were looking at).
-pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> String {
+pub fn dump(
+    project: Project,
+    path: PathBuf,
+    size: (u16, u16),
+    keys: &str,
+) -> anyhow::Result<String> {
+    dump_with_dir(project, path, size, keys, std::env::temp_dir())
+}
+
+/// `dump` with the scratch root injected, so an unwritable environment can be
+/// tested without mutating process-global `TMPDIR`.
+fn dump_with_dir(
+    project: Project,
+    path: PathBuf,
+    size: (u16, u16),
+    keys: &str,
+    scratch_root: PathBuf,
+) -> anyhow::Result<String> {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -853,13 +870,13 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("nle-dump-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    let dir = scratch_root.join(format!("nle-dump-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
     let copy = dir.join(
         path.file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("dump.json")),
     );
-    project.save(&copy).expect("save the dump copy");
+    project.save(&copy)?;
     let mut app = App::new(project, copy);
     // Bring the session state along (undo depth, the register) so the dump
     // shows the same thing. Read the source sidecars directly — not
@@ -884,8 +901,8 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
         handle_key(&mut app, &player, KeyEvent::new(code, KeyModifiers::NONE));
     }
     let (w, h) = size;
-    let mut term = Terminal::new(TestBackend::new(w, h)).expect("a test terminal");
-    term.draw(|f| render(f, &app)).expect("a draw");
+    let mut term = Terminal::new(TestBackend::new(w, h))?;
+    term.draw(|f| render(f, &app))?;
     let buf = term.backend().buffer();
 
     let mut out = format!("project: {}\n", path.display());
@@ -929,7 +946,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
         out.push_str(&format!("{y:>3} {row}\n"));
     }
     let _ = std::fs::remove_dir_all(&dir);
-    out
+    Ok(out)
 }
 
 pub fn run<P: Mpv>(session: Session, player: P) -> anyhow::Result<()> {

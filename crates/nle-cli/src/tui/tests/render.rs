@@ -68,12 +68,12 @@ fn a_blend_boundary_has_no_bar() {
 // The dump prints the model state and the grid — the diagnostic path.
 #[test]
 fn the_dump_prints_state_and_grid() {
-    let out = dump(asset_project(), temp_project_path("t"), (40, 8), "");
+    let out = dump(asset_project(), temp_project_path("t"), (40, 8), "").unwrap();
     assert!(out.contains("mode: Normal"), "{out}");
     assert!(out.contains("=== grid 40x8 ==="), "{out}");
     assert!(out.contains("clip #1"), "the model summary:\n{out}");
     // Keys reach a state first.
-    let out = dump(asset_project(), temp_project_path("t"), (40, 8), "ll");
+    let out = dump(asset_project(), temp_project_path("t"), (40, 8), "ll").unwrap();
     assert!(out.contains("playhead: 2 s"), "{out}");
 }
 
@@ -85,13 +85,13 @@ fn the_dump_does_not_touch_the_project() {
     asset_project().save(&path).unwrap();
     let before = std::fs::read(&path).unwrap();
     // `lllx` creates a blend at the 3 s cut — an edit that saves.
-    let first = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "lllx");
+    let first = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "lllx").unwrap();
     assert_eq!(
         std::fs::read(&path).unwrap(),
         before,
         "the source project is untouched"
     );
-    let second = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "lllx");
+    let second = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "lllx").unwrap();
     let model = |s: &str| s.lines().nth(1).unwrap_or_default().to_string();
     assert_eq!(
         model(&first),
@@ -122,7 +122,7 @@ fn the_dump_does_not_migrate_a_legacy_register() {
     std::fs::copy(&new, &legacy).unwrap();
     std::fs::remove_file(&new).unwrap();
 
-    let _ = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "");
+    let _ = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "").unwrap();
     assert!(
         !new.exists(),
         "the dump must not copy a legacy register into the source state dir"
@@ -147,7 +147,7 @@ fn the_dump_restores_the_active_track() {
     )
     .unwrap();
 
-    let out = dump(Project::load(&path).unwrap(), path, (40, 8), "");
+    let out = dump(Project::load(&path).unwrap(), path, (40, 8), "").unwrap();
     assert!(
         out.contains("active: a1"),
         "the saved track is active:\n{out}"
@@ -168,7 +168,7 @@ fn the_dump_carries_the_saved_undo_history() {
 
     // `u` only works if the dump loaded the sidecar: `App::new` starts with
     // an empty stack, so this is the distinguishing case.
-    let out = dump(Project::load(&path).unwrap(), path, (40, 8), "u");
+    let out = dump(Project::load(&path).unwrap(), path, (40, 8), "u").unwrap();
     assert!(out.contains("message: \"undo: added track a1\""), "{out}");
     assert!(!out.contains("  a1"), "the added track is undone:\n{out}");
 }
@@ -1117,4 +1117,21 @@ fn the_transition_form_renders_current_frames() {
     assert!(text.contains("transition #4"), "{text}");
     assert!(text.contains("frames"), "{text}");
     assert!(text.contains("was 30"), "{text}");
+}
+
+// A hostile scratch root (a path under a regular file) used to panic in
+// `edit --dump` with exit 101, breaking the CLI's 0/1/2-only contract.
+#[test]
+fn dump_reports_a_scratch_dir_it_cannot_create() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+    let err = dump_with_dir(
+        asset_project(),
+        temp_project_path("dump-scratch"),
+        (40, 8),
+        "",
+        blocker.join("child"),
+    );
+    assert!(err.is_err(), "an unwritable scratch root must be an error");
 }
