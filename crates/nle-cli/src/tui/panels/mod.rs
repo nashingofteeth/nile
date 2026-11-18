@@ -156,15 +156,17 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
     if matches!(app.mode, Mode::Visual(_)) {
         return vec![
             "visual — whole segments; motions extend the selection",
-            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G ends",
+            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0/$ ends",
             "d delete · y yank · p paste at the playhead · V one segment · v/esc cancel",
+            "+=/- zoom · z min/max · Ctrl-b/f pan",
         ];
     }
     if matches!(app.mode, Mode::Extend(_)) {
         return vec![
             "extend mode — move the armed edge, then commit",
-            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · n/N gaps · gg/G/0",
+            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · n/N gaps · gg/G/0/$",
             "e commit · E ripple on/off · [ ] side · < > (, .) end · Esc cancel",
+            "space play · +=/- zoom · z min/max · Ctrl-b/f pan",
         ];
     }
     if is_pool(app) {
@@ -200,8 +202,8 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
         "transport  space · h/l ±1s · H/L ±5s · f/F frame · +=/- zoom · z min/max",
         "motion     j/k cuts · w/b clips · n/N gaps · gg/G/0/$ ends · Ctrl-b/f pan",
         "edit       i/o trim · I/O ripple · s/S split · _ gap · dd/D del · yy/p/P",
-        "           r speed · X transition · e/E extend · [ ] side · m pool",
+        "           r speed · X transition · e/E extend · [] side · m pool · v visual",
         "effects    x panel · c/s/e/o add/edit · d/D drop · u undo · Ctrl-r redo",
-        "tracks     t/T cycle · <N>t jump · Ctrl-t strips · : cmd · q quit",
+        "tracks     t/T cycle · <N>t jump · Ctrl-t strips · R reload · : cmd · q quit",
     ]
 }
