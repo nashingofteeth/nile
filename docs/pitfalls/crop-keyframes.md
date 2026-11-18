@@ -12,11 +12,19 @@ Read before touching `CropKey`, the keyframe action, or the keyed-crop graph.
 - **`w/h` step, `x/y` animate.** A pass has constant pixel geometry; a key
   whose size differs from the previous one starts a new pass. Between keys
   x/y interpolate with a filter expression. Before the first key the static
-  window is the geometry, interpolating toward the first key; after the last
-  key it holds.
-- **A keyed crop is alone.** The renderer refuses another effect on the clip
-  (`KeyedCropEffects`) and refuses a transition side
-  (`KeyedCropTransition`): the pass graph has no place for a shared chain.
+  size is held and x/y move toward the first key, clamped to the available
+  travel (the window never pre-shrinks); after the last key it holds.
+- **The head is the origin.** Split/trim-in/head-extend re-base keys onto the
+  new head (the cut value becomes the key at 0); retime scales key offsets so
+  the same source frame keeps its key. Tail trims leave keys after the new
+  end inert.
+- **A keyed crop is alone.** Adding another effect to the clip is refused
+  (`KeyedCropExclusive`), and so is a transition beside it
+  (`KeyedCropTransition`); the renderer repeats the refusal as a backstop.
+  A static `effect crop` edit over keys is refused
+  (`CropKeysWouldBeLost`) — add a key, or clear the effect first.
+- **Height snapping respects `y`.** A key chooses the nearest rung that fits
+  below `y`; no fitting rung is `CropKeyHeight`, not a corrupt timeline.
 - **Passes are frame-aligned and concatenated**, cropped/padded back to the
   canvas with `overlay`, then normalized to the output size. Proxy hashes
   serialize the clip, so the key list is part of the cache key.
