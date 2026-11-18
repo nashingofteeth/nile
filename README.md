@@ -104,8 +104,9 @@ its socket and sends edits through the protocol; without a server it opens the
 file directly. Attached mode keeps the server as the single writer: agent
 edits arrive on the next poll, `:import` uses `media.add`, and
 `:add`/`:detect`/`:edl-import`/`:otio-import` are refused until the server is
-stopped. The timeline panel shows one row per track; navigation, edits, and
-the monitor follow the **active track**. The keymap is vim-flavored rather
+stopped. The timeline panel shows one row per track; navigation and edits
+follow the **active track**, while the monitor plays the composite of every
+unmuted track. The keymap is vim-flavored rather
 than a vim clone: motions and pending operators use vim vocabulary, while
 edits keep NLE mnemonics (`i`/`o` are trim in/out; `s`/`S` split).
 
