@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
+use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
@@ -837,6 +838,29 @@ fn apply_session_state(app: &mut App, state: view_state::SessionState) {
 
 /// Render the TUI once at `size` and return a text dump: the project path and
 /// model state (as `nile show` prints it), then the grid with a column ruler.
+/// A scratch directory that removes itself on every exit path, including
+/// the error paths of the dump.
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn create(root: &std::path::Path, nanos: u128) -> anyhow::Result<Self> {
+        let dir = root.join(format!("nle-dump-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating the dump scratch dir at {}", dir.display()))?;
+        Ok(Self(dir))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Feed `keys` first (`\n` = Enter, `\e` = Esc) to reach a state.
 ///
 /// The keys run through the real handlers, which save the project, the undo
@@ -870,13 +894,14 @@ fn dump_with_dir(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = scratch_root.join(format!("nle-dump-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    let copy = dir.join(
+    let dir = ScratchDir::create(&scratch_root, nanos)?;
+    let copy = dir.path().join(
         path.file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("dump.json")),
     );
-    project.save(&copy)?;
+    project
+        .save(&copy)
+        .with_context(|| format!("saving the dump copy at {}", copy.display()))?;
     let mut app = App::new(project, copy);
     // Bring the session state along (undo depth, the register) so the dump
     // shows the same thing. Read the source sidecars directly — not
@@ -901,8 +926,9 @@ fn dump_with_dir(
         handle_key(&mut app, &player, KeyEvent::new(code, KeyModifiers::NONE));
     }
     let (w, h) = size;
-    let mut term = Terminal::new(TestBackend::new(w, h))?;
-    term.draw(|f| render(f, &app))?;
+    let mut term = Terminal::new(TestBackend::new(w, h)).context("creating the dump terminal")?;
+    term.draw(|f| render(f, &app))
+        .context("rendering the dump")?;
     let buf = term.backend().buffer();
 
     let mut out = format!("project: {}\n", path.display());
@@ -945,7 +971,6 @@ fn dump_with_dir(
             .collect();
         out.push_str(&format!("{y:>3} {row}\n"));
     }
-    let _ = std::fs::remove_dir_all(&dir);
     Ok(out)
 }
 
