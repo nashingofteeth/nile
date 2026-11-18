@@ -64,6 +64,7 @@ fn ctrl_c_quits_from_every_panel() {
                 y: 0.0,
                 w: 100.0 - 0.0 - 0.0,
                 h: 100.0 - 0.0 - 0.0,
+                keys: Vec::new(),
             };
             a.mode = Mode::Fx(FxState {
                 clip: 1,

@@ -1,7 +1,7 @@
 use super::super::*;
 use super::*;
 use crate::time::Seconds;
-use crate::timeline::{Effect, Track};
+use crate::timeline::{CropKey, Effect, Track};
 
 // A transition renders its neighbours' material, so each side carries a
 // copy of that neighbour's effects; effect edits keep the copies in sync,
@@ -18,6 +18,7 @@ fn a_transition_side_follows_its_neighbours_effects() {
         y: 0.0,
         w: 100.0 - 10.0 - 10.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     let mut p = clip_pair(); // C1 0..3, C2 3..6
     for seg in &mut p.timeline.video_track_mut().unwrap().segments {
@@ -84,6 +85,166 @@ fn a_transition_side_follows_its_neighbours_effects() {
 /// Every edit that rebuilds a clip carries its effect list over —
 /// trimming, splitting, gap-inserting and the paste sweep used to reset
 /// it, so a `:effect` on a clip vanished on the next edit.
+#[test]
+fn splitting_a_keyed_clip_rebases_the_right_half() {
+    let mut p = clip_pair();
+    if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+        c.effects = vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![
+                CropKey {
+                    at: Seconds::new(1, 2),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                CropKey {
+                    at: Seconds::new(3, 2),
+                    x: 50.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+            ],
+        }];
+    }
+    let mut h = History::default();
+    let batch = split_on(&p, 0, 1.5).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let Segment::Clip(right) = &p.timeline.video_track().unwrap().segments[1] else {
+        panic!("right clip");
+    };
+    let Effect::Crop { keys, .. } = &right.effects[0] else {
+        panic!("crop");
+    };
+    assert_eq!(keys.len(), 1, "the left key does not survive the split");
+    assert_eq!(keys[0].at, Seconds::from_integer(0));
+    assert_eq!(keys[0].x, 50.0, "the right half starts at the cut value");
+    assert_eq!(keys[0].w, 50.0);
+}
+
+#[test]
+fn trimming_the_head_rebases_crop_keys() {
+    let mut p = clip_pair();
+    if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+        c.effects = vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![
+                CropKey {
+                    at: Seconds::from_integer(1),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                CropKey {
+                    at: Seconds::from_integer(2),
+                    x: 50.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+            ],
+        }];
+    }
+    let mut h = History::default();
+    let batch = trim_in_on(&p, 0, 0.5).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    let clip = p
+        .timeline
+        .video_track()
+        .unwrap()
+        .segments
+        .iter()
+        .find_map(|seg| match seg {
+            Segment::Clip(c) if c.id == 1 => Some(c),
+            _ => None,
+        })
+        .expect("trimmed clip");
+    let Effect::Crop { keys, .. } = &clip.effects[0] else {
+        panic!("crop");
+    };
+    assert_eq!(keys[0].at, Seconds::from_integer(0));
+    assert_eq!(keys[1].at, Seconds::new(1, 2));
+    assert_eq!(keys[2].at, Seconds::new(3, 2));
+    assert_eq!(keys[2].x, 50.0);
+}
+
+#[test]
+fn a_keyed_crop_is_exclusive_and_survives_static_edits() {
+    let mut p = clip_pair();
+    let keyed = Effect::Crop {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 100.0,
+        keys: vec![CropKey {
+            at: Seconds::from_integer(1),
+            x: 10.0,
+            y: 0.0,
+            w: 90.0,
+            h: 100.0,
+        }],
+    };
+    if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+        c.effects = vec![keyed.clone()];
+    }
+
+    assert!(matches!(
+        add_effect_on(
+            &p,
+            0,
+            1,
+            Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }
+        ),
+        Err(EditError::KeyedCropExclusive(1))
+    ));
+    assert!(matches!(
+        add_effect_on(
+            &p,
+            0,
+            1,
+            Effect::Crop {
+                x: 10.0,
+                y: 0.0,
+                w: 80.0,
+                h: 100.0,
+                keys: Vec::new(),
+            }
+        ),
+        Err(EditError::CropKeysWouldBeLost)
+    ));
+    assert!(matches!(
+        add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1)
+        ),
+        Err(EditError::KeyedCropTransition(1))
+    ));
+
+    // Replacing the keyed crop with another keyed crop is allowed.
+    let mut next = keyed;
+    if let Effect::Crop { keys, .. } = &mut next {
+        keys[0].x = 20.0;
+    }
+    assert!(add_effect_on(&p, 0, 1, next).is_ok());
+}
+
 #[test]
 fn edits_preserve_per_clip_effects() {
     let eff = Effect::Scale { w: 10.0, h: 10.0 };
@@ -230,12 +391,14 @@ fn adding_the_same_kind_replaces_the_previous_one() {
         y: 0.0,
         w: 100.0 - 10.0 - 0.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     let second = Effect::Crop {
         x: 30.0,
         y: 0.0,
         w: 100.0 - 30.0 - 0.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     for effect in [eq.clone(), first.clone()] {
         let batch = add_effect(&p, 1, effect).unwrap();
@@ -270,6 +433,7 @@ fn effects_can_be_removed_and_cleared() {
         y: 0.0,
         w: 100.0 - 10.0 - 10.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
 
     let mut p = fixture();

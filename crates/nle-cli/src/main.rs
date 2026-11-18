@@ -324,6 +324,9 @@ enum Cmd {
         /// default: rm's last row, add appends)
         #[arg(long, value_name = "N")]
         index: Option<usize>,
+        /// crop: add/replace a keyframe at this timeline position
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        at: Option<String>,
         /// crop/scale: width as a percentage (crop window; scale 100 = unchanged)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         w: Option<f64>,
@@ -1187,6 +1190,22 @@ mod tests {
                 brightness: None,
                 contrast: None,
                 saturation: None,
+                at: None,
+                path: None,
+            },
+            Cmd::Effect {
+                kind: "crop".into(),
+                clip: 1,
+                track: 1,
+                index: None,
+                w: Some(90.0),
+                h: None,
+                x: Some(10.0),
+                y: None,
+                brightness: None,
+                contrast: None,
+                saturation: None,
+                at: Some("1".into()),
                 path: None,
             },
             Cmd::Effect {
@@ -1201,6 +1220,7 @@ mod tests {
                 brightness: None,
                 contrast: None,
                 saturation: None,
+                at: None,
                 path: None,
             },
             Cmd::Effect {
@@ -1215,6 +1235,7 @@ mod tests {
                 brightness: None,
                 contrast: None,
                 saturation: None,
+                at: None,
                 path: None,
             },
             Cmd::Annotation {
