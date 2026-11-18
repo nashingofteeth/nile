@@ -15,12 +15,14 @@
 
 use std::io;
 #[cfg(unix)]
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -150,6 +152,103 @@ fn acquire_lock(project_path: &Path, socket: &Path, lock: &Path) -> Result<LockG
     )
 }
 
+/// Default grace period between the first byte of a frame and its newline.
+#[cfg(unix)]
+const PARTIAL_FRAME_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Socket read timeout. The adapter wakes this often to poll for the partial
+/// deadline; it is not an idle timeout.
+#[cfg(unix)]
+const FRAME_POLL: Duration = Duration::from_millis(100);
+
+/// A `Read` adapter that leaves idle connections alone but gives up on a
+/// half-received frame.
+///
+/// A blocking `UnixStream` read with no timeout wedges its connection thread
+/// forever when a peer sends `{"id":1` and then stops. A coarse read timeout
+/// is wrong: it would also disconnect an idle TUI or agent. So the socket
+/// gets a short `set_read_timeout` (the poll), and this adapter swallows
+/// `WouldBlock`/`TimedOut` while no frame bytes are pending. Once bytes since
+/// the last newline have arrived, their `deadline` starts ticking; on
+/// expiry it returns `TimedOut`, which ends only this connection's serve loop.
+///
+/// The inner reader is a type parameter so tests can script reads instead of
+/// waiting on a real peer. `new` takes both durations so tests use tens of
+/// milliseconds.
+#[cfg(unix)]
+struct FrameDeadline<S> {
+    inner: S,
+    deadline: Duration,
+    poll: Duration,
+    /// Start of the current unterminated frame, or `None` between frames.
+    partial_since: Option<Instant>,
+}
+
+#[cfg(unix)]
+impl<S> FrameDeadline<S> {
+    fn new(inner: S, deadline: Duration, poll: Duration) -> Self {
+        Self {
+            inner,
+            deadline,
+            poll,
+            partial_since: None,
+        }
+    }
+
+    /// Track frame state from the bytes just read. A chunk ending in a newline
+    /// starts a fresh (empty) frame; one with a newline in the middle starts
+    /// the trailing frame now; a chunk with no newline keeps the original
+    /// start, so a trickle cannot postpone the deadline.
+    fn observe(&mut self, bytes: &[u8], now: Instant) {
+        let Some(&last) = bytes.last() else { return };
+        if last == b'\n' {
+            self.partial_since = None;
+        } else if bytes.contains(&b'\n') || self.partial_since.is_none() {
+            self.partial_since = Some(now);
+        }
+    }
+
+    fn deadline_error(&self) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "partial frame: no newline within {:?} (closing this connection)",
+                self.deadline
+            ),
+        )
+    }
+}
+
+#[cfg(unix)]
+impl<S: Read> Read for FrameDeadline<S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.inner.read(buf) {
+                Ok(read) => {
+                    self.observe(&buf[..read], Instant::now());
+                    return Ok(read);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if self
+                        .partial_since
+                        .is_some_and(|start| start.elapsed() >= self.deadline)
+                    {
+                        return Err(self.deadline_error());
+                    }
+                    thread::sleep(self.poll);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
     use std::fs;
@@ -212,14 +311,28 @@ fn spawn_connection(shared: Arc<Mutex<ServeHandler>>, stream: std::os::unix::net
             return;
         }
     };
+    // The poll interval is the socket read timeout; the adapter retries while
+    // the connection is idle and enforces the partial-frame deadline itself.
+    if let Err(e) = reader.set_read_timeout(Some(FRAME_POLL)) {
+        log::line(&format!("project socket timeout setup failed: {e}"));
+        return;
+    }
     thread::spawn(move || {
         let handler = ConnectionHandler {
             shared,
             events: Vec::new(),
         };
+        let reader = FrameDeadline::new(reader, PARTIAL_FRAME_DEADLINE, FRAME_POLL);
         let mut server = Server::new(BufReader::new(reader), stream, handler);
-        if let Err(e) = server.serve() {
-            log::line(&format!("project socket connection ended: {e}"));
+        match server.serve() {
+            Ok(()) => {}
+            Err(nle_protocol::ServerError::Io(e)) if e.kind() == io::ErrorKind::TimedOut => {
+                log::line(&format!(
+                    "project socket connection closed: partial frame exceeded \
+                     {PARTIAL_FRAME_DEADLINE:?} without a newline"
+                ));
+            }
+            Err(e) => log::line(&format!("project socket connection ended: {e}")),
         }
     });
 }
@@ -792,5 +905,100 @@ mod tests {
             edit_rpc(EditError::NoClip).code,
             nle_protocol::INVALID_PARAMS
         );
+    }
+
+    /// `FrameDeadline` over a scripted peer: `Block` is a socket read timing
+    /// out, `Bytes` a short read. Exhausting the script keeps blocking, which
+    /// is what an idle peer looks like.
+    #[cfg(unix)]
+    struct Scripted {
+        steps: std::collections::VecDeque<Step>,
+    }
+
+    #[cfg(unix)]
+    enum Step {
+        Block,
+        Bytes(&'static [u8]),
+    }
+
+    #[cfg(unix)]
+    impl Scripted {
+        fn new(steps: impl IntoIterator<Item = Step>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.steps.pop_front() {
+                Some(Step::Bytes(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                Some(Step::Block) | None => Err(io::ErrorKind::WouldBlock.into()),
+            }
+        }
+    }
+
+    /// Twenty polls at 2 ms outlive a 10 ms deadline, yet an idle connection
+    /// (no frame byte) must never be dropped.
+    #[cfg(unix)]
+    #[test]
+    fn an_idle_connection_never_hits_the_deadline() {
+        let mut reader = FrameDeadline::new(
+            Scripted::new(
+                (0..20)
+                    .map(|_| Step::Block)
+                    .chain([Step::Bytes(b"hello\n")]),
+            ),
+            Duration::from_millis(10),
+            Duration::from_millis(2),
+        );
+        let mut buf = [0u8; 64];
+        let read = reader.read(&mut buf).expect("idle is allowed");
+        assert_eq!(&buf[..read], b"hello\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_bytes_without_a_newline_time_out() {
+        let mut reader = FrameDeadline::new(
+            Scripted::new([Step::Bytes(b"{\"id\":1")]),
+            Duration::from_millis(20),
+            Duration::from_millis(2),
+        );
+        let mut buf = [0u8; 64];
+        let read = reader.read(&mut buf).expect("first chunk");
+        assert_eq!(read, 7);
+        let error = reader.read(&mut buf).expect_err("half a frame must expire");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("partial frame"), "{error}");
+    }
+
+    /// The newline clears the partial state, so the idle stretch after it is
+    /// unlimited: a deadline that never reset would fire here.
+    #[cfg(unix)]
+    #[test]
+    fn a_newline_resets_the_partial_deadline() {
+        let mut reader = FrameDeadline::new(
+            Scripted::new(
+                [Step::Bytes(b"{}"), Step::Bytes(b"\n")]
+                    .into_iter()
+                    .chain((0..20).map(|_| Step::Block))
+                    .chain([Step::Bytes(b"next\n")]),
+            ),
+            Duration::from_millis(10),
+            Duration::from_millis(2),
+        );
+        let mut buf = [0u8; 64];
+        assert_eq!(reader.read(&mut buf).expect("first chunk"), 2);
+        assert_eq!(reader.read(&mut buf).expect("newline"), 1);
+        let read = reader
+            .read(&mut buf)
+            .expect("idle after a complete line is allowed");
+        assert_eq!(&buf[..read], b"next\n");
     }
 }

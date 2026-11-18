@@ -170,6 +170,9 @@ handler queued.
 - `MAX_LINE` is 64 MiB of payload (excluding the newline); an over-cap line
   ends the connection with `LineTooLong`.
 - Timeouts belong to the socket owner (`set_read_timeout`), not this crate.
+  `nile serve` keeps an idle connection open indefinitely, but once a frame
+  has bytes and no newline it closes only that connection after 5 s
+  (`FrameDeadline` in `crates/nle-cli/src/serve.rs`).
 - `deny_unknown_fields` covers call params and nested action fields; a typo is
   invalid-params, not a silent default.
 - A null-id error is surfaced as `ClientError::Server`, preserving its code.
