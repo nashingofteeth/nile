@@ -15,5 +15,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps  # broken doc links fail
 cargo test --locked                          # unit + behaviour + hostile batteries
 cargo test --locked -p nile --no-default-features  # headless variant
 cargo build --locked --release
-./scripts/install.sh
+if [ "${CHECK_SKIP_INSTALL:-0}" = "1" ]; then
+  echo "skipping install (CHECK_SKIP_INSTALL=1)"
+else
+  ./scripts/install.sh
+fi
 ./demo.sh                                    # end-to-end pixel checks (release binary)
