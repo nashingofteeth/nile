@@ -40,12 +40,13 @@ pub(crate) fn enter_visual(app: &mut App) {
         app.set_message("move the playhead onto a segment");
         return;
     };
+    // No notice here: `hints_for` owns the mode hints, so entering a mode
+    // must not overwrite the last real message with a key cheat-sheet.
     app.mode = Mode::Visual(VisualState {
         track: ti,
         anchor: idx,
         cursor: idx,
     });
-    app.set_message("visual — d delete · y yank · p paste at the playhead · v/esc cancel");
 }
 
 pub(crate) fn visual_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
