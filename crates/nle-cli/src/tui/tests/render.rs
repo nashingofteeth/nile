@@ -698,6 +698,15 @@ fn pool_list_scrolls_to_keep_the_selection_visible() {
 fn every_mode_hints_fit_the_keys_panel() {
     let cases: Vec<(&str, App)> = vec![
         ("normal", App::new(asset_project(), temp_project_path("t"))),
+        ("visual", {
+            let mut a = App::new(asset_project(), temp_project_path("t"));
+            a.mode = Mode::Visual(VisualState {
+                track: 0,
+                anchor: 0,
+                cursor: 0,
+            });
+            a
+        }),
         ("command", {
             let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Command("x".into());
