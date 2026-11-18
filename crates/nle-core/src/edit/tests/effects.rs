@@ -18,6 +18,7 @@ fn a_transition_side_follows_its_neighbours_effects() {
         y: 0.0,
         w: 100.0 - 10.0 - 10.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     let mut p = clip_pair(); // C1 0..3, C2 3..6
     for seg in &mut p.timeline.video_track_mut().unwrap().segments {
@@ -230,12 +231,14 @@ fn adding_the_same_kind_replaces_the_previous_one() {
         y: 0.0,
         w: 100.0 - 10.0 - 0.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     let second = Effect::Crop {
         x: 30.0,
         y: 0.0,
         w: 100.0 - 30.0 - 0.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     for effect in [eq.clone(), first.clone()] {
         let batch = add_effect(&p, 1, effect).unwrap();
@@ -270,6 +273,7 @@ fn effects_can_be_removed_and_cleared() {
         y: 0.0,
         w: 100.0 - 10.0 - 10.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
 
     let mut p = fixture();

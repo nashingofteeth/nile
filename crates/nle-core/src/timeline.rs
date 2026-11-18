@@ -37,6 +37,34 @@ pub enum TrackKind {
     Audio,
 }
 
+/// One crop-window keyframe. `at` is clip-relative timeline seconds (after
+/// speed); x/y/w/h use the same percentages as the static window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CropKey {
+    #[serde(with = "rational_ser")]
+    pub at: Seconds,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// Closed height rungs for authoring keyframes. This is deliberately only a
+/// front-end restriction: removing the list later accepts any valid height
+/// without a schema change.
+pub const CROP_RUNGS: &[f64] = &[20.0, 25.0, 33.0, 40.0, 50.0, 60.0, 66.0, 75.0, 80.0, 100.0];
+
+impl CropKey {
+    /// The nearest allowed height for an authoring path.
+    pub fn snapped_h(&self) -> f64 {
+        CROP_RUNGS
+            .iter()
+            .copied()
+            .min_by(|a, b| (a - self.h).abs().total_cmp(&(b - self.h).abs()))
+            .unwrap_or(self.h)
+    }
+}
+
 /// A per-clip video effect, applied in export after the retime and before
 /// the geometry normalize. Typed (not raw ffmpeg fragments) so it stays
 /// serializable and safe to hand to the graph.
@@ -46,7 +74,16 @@ pub enum Effect {
     /// chain: `x`/`y` are the top-left corner, `w`/`h` the window size. The kept picture stays where
     /// it is; the surrounding strips become transparent, so an upper track
     /// shows through them (black when nothing is below).
-    Crop { x: f64, y: f64, w: f64, h: f64 },
+    Crop {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        /// Keyframes at clip-relative timeline seconds. Empty means a static
+        /// window using the fields above.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keys: Vec<CropKey>,
+    },
     /// `scale`, as percentages of the picture at this point in the chain
     /// (100 = unchanged). Below 100% it shrinks about its centre and pads
     /// transparently, so a lower track shows through; above 100% is a zoom.
@@ -84,15 +121,19 @@ impl Effect {
             return Some("effect parameter is non-finite");
         }
         match self {
-            Effect::Crop { x, y, w, h }
-                if *x < 0.0
-                    || *y < 0.0
-                    || *w <= 0.0
-                    || *h <= 0.0
-                    || x + w > 100.0
-                    || y + h > 100.0 =>
-            {
-                Some("effect parameter is out of range")
+            Effect::Crop { x, y, w, h, keys } => {
+                let bad = |x: f64, y: f64, w: f64, h: f64| {
+                    x < 0.0 || y < 0.0 || w <= 0.0 || h <= 0.0 || x + w > 100.0 || y + h > 100.0
+                };
+                if bad(*x, *y, *w, *h)
+                    || keys.iter().any(|key| bad(key.x, key.y, key.w, key.h))
+                    || keys.iter().any(|key| key.at < Seconds::from_integer(0))
+                    || keys.windows(2).any(|pair| pair[0].at >= pair[1].at)
+                {
+                    Some("effect parameter is out of range")
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -106,7 +147,12 @@ impl Effect {
     /// Every numeric parameter is finite.
     pub fn is_finite(&self) -> bool {
         match self {
-            Effect::Crop { x, y, w, h } => [x, y, w, h].iter().all(|v| v.is_finite()),
+            Effect::Crop { x, y, w, h, keys } => {
+                [x, y, w, h].iter().all(|v| v.is_finite())
+                    && keys
+                        .iter()
+                        .all(|key| [key.x, key.y, key.w, key.h].iter().all(|v| v.is_finite()))
+            }
             Effect::Scale { w, h } => w.is_finite() && h.is_finite(),
             Effect::Offset { x, y } => x.is_finite() && y.is_finite(),
             Effect::Eq {
@@ -121,7 +167,10 @@ impl Effect {
     /// The parameters as one line — the panel's detail column.
     pub fn details(&self) -> String {
         match self {
-            Effect::Crop { x, y, w, h } => format!("{w}×{h} @ {x},{y}"),
+            Effect::Crop { x, y, w, h, keys } if !keys.is_empty() => {
+                format!("{w}×{h} @ {x},{y} · {} key(s)", keys.len())
+            }
+            Effect::Crop { x, y, w, h, .. } => format!("{w}×{h} @ {x},{y}"),
             Effect::Scale { w, h } => format!("{w}% × {h}%"),
             Effect::Offset { x, y } => format!("x {x}% · y {y}%"),
             Effect::Eq {
@@ -160,6 +209,14 @@ impl Effect {
     /// Does the chain leave any transparent canvas? The monitor composites the
     /// layer below when it does; the export's overlay handles it directly.
     pub fn masks(effects: &[Effect], canvas: (u32, u32)) -> bool {
+        if effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Crop { keys, .. } if !keys.is_empty()
+            )
+        }) {
+            return true;
+        }
         let mut content = Content::full(canvas);
         for effect in effects {
             content = effect.apply(canvas, content).1;
@@ -172,7 +229,7 @@ impl Effect {
     /// drifting apart.
     fn apply(&self, canvas: (u32, u32), content: Content) -> (String, Content) {
         match self {
-            Effect::Crop { x, y, w, h } => {
+            Effect::Crop { x, y, w, h, .. } => {
                 if content.is_empty() {
                     return (String::new(), content); // already invisible
                 }
@@ -921,6 +978,7 @@ mod tests {
             y: 0.0,
             w: f64::NAN,
             h: 100.0,
+            keys: Vec::new(),
         });
         t.tracks[0].segments.push(Segment::Clip(c));
         assert!(matches!(t.validate(), Err(TimelineError::Corrupt(_))));
@@ -939,6 +997,7 @@ mod tests {
             y: 0.0,
             w: 50.0,
             h: 100.0,
+            keys: Vec::new(),
         });
         t.tracks[0].segments.push(Segment::Clip(c));
         match t.validate() {
@@ -958,6 +1017,7 @@ mod tests {
             y: 0.0,
             w: f64::NAN,
             h: 100.0,
+            keys: Vec::new(),
         });
         t.tracks[0].segments.push(Segment::Clip(c));
         match t.validate() {

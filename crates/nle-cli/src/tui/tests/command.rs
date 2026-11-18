@@ -536,7 +536,8 @@ fn effect_command_adds_an_effect() {
             x: 10.0,
             y: 0.0,
             w: 100.0 - 10.0 - 0.0,
-            h: 100.0 - 0.0 - 0.0
+            h: 100.0 - 0.0 - 0.0,
+            keys: Vec::new(),
         }]
     );
 }
