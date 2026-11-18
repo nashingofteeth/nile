@@ -188,6 +188,7 @@ fn effects_round_trip_through_the_catalog() {
             y: 0.0,
             w: 100.0 - 10.0 - 5.0,
             h: 100.0 - 0.0 - 0.0,
+            keys: Vec::new(),
         },
         index: None,
     });

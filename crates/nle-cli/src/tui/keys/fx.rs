@@ -204,7 +204,9 @@ pub(crate) fn form_for_effect(effect: &Effect, index: usize) -> FxForm {
         form.aspect = *w / *h;
     }
     let values: Vec<String> = match effect {
-        Effect::Crop { x, y, w, h } => [x, y, w, h].into_iter().map(|v| v.to_string()).collect(),
+        Effect::Crop { x, y, w, h, .. } => {
+            [x, y, w, h].into_iter().map(|v| v.to_string()).collect()
+        }
         Effect::Scale { w, h } => vec![w.to_string(), h.to_string()],
         Effect::Offset { x, y } => vec![x.to_string(), y.to_string()],
         Effect::Eq {
@@ -272,6 +274,12 @@ pub(crate) fn edit_effect_at(app: &mut App, clip: u32, index: usize) {
     };
     if matches!(effect, Effect::Lut { .. }) {
         app.set_message("LUT effects are CLI-only for now — use :effect lut");
+        return;
+    }
+    if let Effect::Crop { keys, .. } = &effect
+        && !keys.is_empty()
+    {
+        app.set_message("keyed crop — add keys with :effect crop --at T");
         return;
     }
     let kind = effect.kind();

@@ -1276,6 +1276,7 @@ mod tests {
                 y: 0.0,
                 w: 100.0 - 10.0 - 0.0,
                 h: 100.0 - 0.0 - 0.0,
+                keys: Vec::new(),
             },
             Effect::Scale { w: 50.0, h: 50.0 },
             Effect::Offset { x: 10.0, y: 0.0 },
@@ -1317,6 +1318,7 @@ mod tests {
                 y: 0.0,
                 w: 100.0 - 10.0 - 0.0,
                 h: 100.0 - 0.0 - 0.0,
+                keys: Vec::new(),
             }];
         }
         p.timeline.tracks[0].segments = vec![TimelineSegment::Gap(TimelineGap {

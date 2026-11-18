@@ -84,10 +84,24 @@ pub(super) fn adjacent_transitions(
 /// renders its neighbours' material, effects included, and owns the copy like
 /// it owns the trimmed span. Only a side that still lines up with the clip is
 /// touched.
-fn sync_effect_sides(project: &Project, track: usize, si: usize, c: &Clip, ops: &mut Vec<EditOp>) {
+fn sync_effect_sides(
+    project: &Project,
+    track: usize,
+    si: usize,
+    c: &Clip,
+    ops: &mut Vec<EditOp>,
+) -> Result<(), EditError> {
     let Some(tr) = project.timeline.track(track) else {
-        return;
+        return Ok(());
     };
+    if c.effects.iter().any(Effect::is_keyed_crop) {
+        let keyed = c.effects.iter().any(Effect::is_keyed_crop);
+        let next = matches!(tr.segments.get(si + 1), Some(Segment::Transition(_)));
+        let prev = si > 0 && matches!(tr.segments.get(si - 1), Some(Segment::Transition(_)));
+        if keyed && (next || prev) {
+            return Err(EditError::KeyedCropTransition(c.id));
+        }
+    }
     // The transition after this clip uses its tail as `a`.
     if let Some(Segment::Transition(t)) = tr.segments.get(si + 1)
         && let TransitionSource::Clip {
@@ -135,6 +149,7 @@ fn sync_effect_sides(project: &Project, track: usize, si: usize, c: &Clip, ops: 
             after: Segment::Transition(after),
         });
     }
+    Ok(())
 }
 
 /// Add `effect` to clip `clip_id` on the first video track.
@@ -166,6 +181,17 @@ pub fn add_effect_on(
     };
     let kind = effect.kind();
     let mut c = c.clone();
+    let existing_keyed = c.effects.iter().any(Effect::is_keyed_crop);
+    let incoming_keyed = effect.is_keyed_crop();
+    if existing_keyed && kind != "crop" {
+        return Err(EditError::KeyedCropExclusive(clip_id));
+    }
+    if existing_keyed && !incoming_keyed {
+        return Err(EditError::CropKeysWouldBeLost);
+    }
+    if incoming_keyed && c.effects.iter().any(|e| e.kind() != "crop") {
+        return Err(EditError::KeyedCropExclusive(clip_id));
+    }
     let desc = match c.effects.iter().position(|e| e.kind() == kind) {
         Some(i) => {
             c.effects[i] = effect;
@@ -182,7 +208,7 @@ pub fn add_effect_on(
         before,
         after: Segment::Clip(c.clone()),
     }];
-    sync_effect_sides(project, track, si, &c, &mut ops);
+    sync_effect_sides(project, track, si, &c, &mut ops)?;
     Ok(Batch { ops, desc })
 }
 
@@ -228,7 +254,7 @@ pub fn replace_effect_on(
         before,
         after: Segment::Clip(after.clone()),
     }];
-    sync_effect_sides(project, track, si, &after, &mut ops);
+    sync_effect_sides(project, track, si, &after, &mut ops)?;
     Ok(Batch {
         ops,
         desc: format!("edit {kind} on clip #{clip_id}"),
@@ -271,7 +297,7 @@ pub fn remove_effect_on(
         before,
         after: Segment::Clip(after.clone()),
     }];
-    sync_effect_sides(project, track, si, &after, &mut ops);
+    sync_effect_sides(project, track, si, &after, &mut ops)?;
     Ok(Batch {
         ops,
         desc: format!("drop {} from clip #{clip_id}", removed.kind()),
@@ -303,7 +329,7 @@ pub fn clear_effects_on(project: &Project, track: usize, clip_id: u32) -> Result
         before,
         after: Segment::Clip(after.clone()),
     }];
-    sync_effect_sides(project, track, si, &after, &mut ops);
+    sync_effect_sides(project, track, si, &after, &mut ops)?;
     Ok(Batch {
         ops,
         desc: format!("clear {n} effect(s) from clip #{clip_id}"),

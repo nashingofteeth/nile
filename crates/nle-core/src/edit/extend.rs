@@ -144,9 +144,13 @@ pub fn extend_edge_on(
                 ain: stamp(project, &c.asset_in),
             });
         }
-        Clip {
-            asset_in,
-            ..c.clone()
+        {
+            let mut after = Clip {
+                asset_in,
+                ..c.clone()
+            };
+            after.rebase_crop_keys(-delta);
+            after
         }
     } else {
         if t <= edge {
@@ -499,9 +503,13 @@ pub fn absorb_outward_on(
                 ain: stamp(project, &c.asset_in),
             });
         }
-        Clip {
-            asset_in,
-            ..c.clone()
+        {
+            let mut after = Clip {
+                asset_in,
+                ..c.clone()
+            };
+            after.rebase_crop_keys(-delta);
+            after
         }
     } else {
         if t <= edge {

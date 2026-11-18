@@ -33,6 +33,7 @@ fn every_action_has_a_colon_spelling() {
         "annotation add hi --timeline --at 1",
         "annotation rm 1",
         "annotation resolve 1",
+        "effect crop --clip 1 --at 1 --x 10 --w 90",
     ];
     let mut seen = vec![false; SLOTS];
     for spec in SPECS {
@@ -184,7 +185,8 @@ fn crop_is_a_percentage_window() {
             x: 25.0,
             y: 25.0,
             w: 100.0 - 25.0 - 25.0,
-            h: 100.0 - 25.0 - 25.0
+            h: 100.0 - 25.0 - 25.0,
+            keys: Vec::new(),
         }
     );
     assert_eq!(
@@ -268,6 +270,7 @@ fn crop_after_scale_resolves_against_the_scaled_picture() {
             y: 0.0,
             w: 100.0 - 30.0 - 0.0,
             h: 100.0 - 0.0 - 0.0,
+            keys: Vec::new(),
         },
     ];
     // 320×240 → a 160×120 picture at (80,60); 30% of 160 = 48 px.
@@ -344,6 +347,7 @@ fn offset_counts_the_distance_to_the_edge() {
             y: 0.0,
             w: 100.0 - 30.0 - 0.0,
             h: 100.0 - 0.0 - 0.0,
+            keys: Vec::new(),
         },
         Effect::Offset { x: 80.0, y: 0.0 },
     ];
@@ -363,6 +367,7 @@ fn offset_counts_the_distance_to_the_edge() {
             y: 0.0,
             w: 100.0 - 30.0 - 0.0,
             h: 100.0 - 0.0 - 0.0,
+            keys: Vec::new(),
         },
         Effect::Offset { x: 100.0, y: 0.0 },
     ];
