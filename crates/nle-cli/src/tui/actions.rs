@@ -170,9 +170,10 @@ pub(crate) fn reaction_for(
             }
         }
         Action::Transition { .. } => Some(CrocAct::Slither),
-        Action::AddEffect { .. } | Action::RemoveEffect { .. } | Action::ClearEffects { .. } => {
-            Some(CrocAct::Wink)
-        }
+        Action::AddEffect { .. }
+        | Action::CropKey { .. }
+        | Action::RemoveEffect { .. }
+        | Action::ClearEffects { .. } => Some(CrocAct::Wink),
         Action::TrackMute { .. } => Some(CrocAct::Sleep),
         Action::AssetRm { .. } => Some(CrocAct::Chomp),
         Action::PurgeStumps { .. } => Some(CrocAct::Nibble),

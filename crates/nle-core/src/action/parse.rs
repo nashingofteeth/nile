@@ -362,7 +362,7 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 /// The `:effect` / `nile effect` usage string — one spelling for both
 /// front-ends.
 pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] [--index N] \
-     crop --x P --y P --w P --h P (% window: x/y top-left, w/h size) | \
+     [--at T] crop --x P --y P --w P --h P (% window: x/y top-left, w/h size) | \
      scale --w P --h P (%: 100 = unchanged) | \
      offset --x P --y P (% of the way to the edge; ±100 = off-screen) | \
      eq [--brightness --contrast --saturation] | lut --path P | \
@@ -424,7 +424,13 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
                     "crop y + height must be at most 100%".to_string(),
                 ));
             }
-            Ok(Effect::Crop { x, y, w, h })
+            Ok(Effect::Crop {
+                x,
+                y,
+                w,
+                h,
+                keys: Vec::new(),
+            })
         }
         "scale" => Ok(Effect::Scale {
             w: pct(a.w, "scale width", 100.0, 1.0, 1000.0)?,
@@ -624,6 +630,7 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                 }
                 _ => {
                     let index = opt_usize(&mut f, "index")?;
+                    let at = opt_time(&mut f, "at")?;
                     let args = EffectArgs {
                         w: opt_time(&mut f, "w")?,
                         h: opt_time(&mut f, "h")?,
@@ -636,6 +643,22 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     };
                     let effect = effect_from_args(&kind, args)?;
                     f.finish(EFFECT_USAGE)?;
+                    if let Some(at) = at {
+                        let Effect::Crop { x, y, w, h, .. } = effect else {
+                            return Err(ParseError::Invalid(
+                                "--at adds a crop key; other effects have no keyframes".to_string(),
+                            ));
+                        };
+                        return Ok(Action::CropKey {
+                            track,
+                            clip,
+                            at,
+                            x,
+                            y,
+                            w,
+                            h,
+                        });
+                    }
                     Ok(Action::AddEffect {
                         track,
                         clip,

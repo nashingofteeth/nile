@@ -293,6 +293,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             clip,
             track,
             index,
+            at,
             w,
             h,
             x,
@@ -323,11 +324,29 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     },
                 )
                 .map_err(|e| e.to_string())
-                .map(|effect| Action::AddEffect {
-                    track,
-                    clip: *clip,
-                    effect,
-                    index: *index,
+                .and_then(|effect| {
+                    if let Some(at) = at {
+                        let nle_core::timeline::Effect::Crop { x, y, w, h, .. } = effect else {
+                            return Err(
+                                "--at adds a crop key; other effects have no keyframes".to_string()
+                            );
+                        };
+                        return Ok(Action::CropKey {
+                            track,
+                            clip: *clip,
+                            at: cli_time(at)?,
+                            x,
+                            y,
+                            w,
+                            h,
+                        });
+                    }
+                    Ok(Action::AddEffect {
+                        track,
+                        clip: *clip,
+                        effect,
+                        index: *index,
+                    })
                 }),
             }
         })),

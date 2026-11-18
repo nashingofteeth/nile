@@ -31,8 +31,9 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// v10 stores the monotonic model `revision`;
 /// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
 /// v12 adds logical media groups; v13 adds annotations; v14 adds
-/// clip-relative timeline anchors; v15 stores crop as a window.
-pub const PROJECT_VERSION: u32 = 15;
+/// clip-relative timeline anchors; v15 stores crop as a window; v16 adds
+/// crop keyframes.
+pub const PROJECT_VERSION: u32 = 16;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -1284,6 +1285,7 @@ mod tests {
                 y: 109.115_355_159_373_05,
                 w: 100.0 - 25.936_916_977_875_356 - -51.972_412_671_360_22,
                 h: 100.0 - 109.115_355_159_373_05 - 137.207_469_284_410_93,
+                keys: Vec::new(),
             });
         }
         let json = serde_json::to_string(&p).unwrap();
@@ -1404,7 +1406,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 15);
+        assert_eq!(PROJECT_VERSION, 16);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);

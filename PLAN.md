@@ -44,7 +44,7 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v15, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v16, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
@@ -479,7 +479,7 @@ shared by the TUI and agents — with no clipgen code present.
 - `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
   land now; derived sequences come later but must be traceable from day one.
 - Export takes a sequence; proxy/export caches key per sequence.
-- Landed: v15 projects with shared media, media groups and annotations, v22
+- Landed: v16 projects with shared media, media groups and annotations, v23
   per-sequence histories with
   grouped batches, `nile sequence ls|add|use`, `:sequence`, and `--sequence`
   on `show`/`edl`/`export` (it reads another timeline without switching). The
@@ -523,7 +523,7 @@ shared by the TUI and agents — with no clipgen code present.
   every analysis consumer need.
 - Importers emit maps alongside clips from the start; `nile show --json --maps`
   exposes the mapping so it is exercised, not dead code.
-- Landed: `TimeMap`, `MediaGroup`/`MediaPart`, project v15, validation,
+- Landed: `TimeMap`, `MediaGroup`/`MediaPart`, project v16, validation,
   `MediaGroup::asset_map` + `Project::group_time_map` (timeline → file →
   group), `nile show --json --maps` (per-track/asset maps plus `group_maps`),
   and importer grouping: `nile import --group NAME FILES…` adds the assets and
@@ -549,8 +549,8 @@ shared by the TUI and agents — with no clipgen code present.
   `wordsComplete`, `absent`, `noSliver`, …) evaluated against a render
   report. Protocol + TUI add/list/resolve; provenance shows human/model/
   analysis.
-- Landed: source- and clip-relative timeline notes and markers (project v15,
-  history v22), `nile annotation add|ls|rm|resolve` (including `--timeline`),
+- Landed: source- and clip-relative timeline notes and markers (project v16,
+  history v23), `nile annotation add|ls|rm|resolve` (including `--timeline`),
   `:note`, and the additive `annotation.list` method. Timeline anchors follow
   trims/splits/ripples, a split re-anchors, and undo restores dropped notes.
   Remaining: expectation payloads (after the render report).
@@ -575,8 +575,9 @@ shared by the TUI and agents — with no clipgen code present.
   retained reports; the TUI job list becomes the real queue.
 - Landed so far: `RenderReport` v1 beside each export (piecewise frame map,
   topmost video, blends both sides, chunk windows) and `nile report FILE
-  [--json]`; `Effect::Crop` is a window (project v15, history v22), ready for
-  keyframes. Remaining: keyframed crop, audio post, jobs.
+  [--json]`; `Effect::Crop` is a window with keyframes (project v16, history
+  v23): x/y animate, w/h step at keys, and height rungs are authoring-only.
+  Remaining: audio post, jobs.
 - **Gate:** a keyframed crop export is frame-exact and its report maps a
   moved note to the right frame; a cancelled job leaves no half-written
   deliverable.
