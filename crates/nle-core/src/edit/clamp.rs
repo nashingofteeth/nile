@@ -6,6 +6,26 @@ use crate::project::Project;
 use crate::time::{Seconds, format_seconds};
 use crate::timeline::{Clip, Gap, Segment, Track, TransitionSource};
 
+/// Whole frames in `span` at `fps`, rounded, or `None` when that count does
+/// not fit `i64`. The i128 product keeps `span * fps` exact instead of letting
+/// `Rational64` cross-multiply two i64s into an overflow (a debug panic, a
+/// silent wrap in release); an unrepresentable count means the grid is finer
+/// than any position this timeline can encode, so callers leave the value be.
+fn whole_frames(span: Seconds, fps: Seconds) -> Option<i64> {
+    let num = i128::from(*span.numer()) * i128::from(*fps.numer());
+    let den = i128::from(*span.denom()) * i128::from(*fps.denom());
+    if den == 0 {
+        return None;
+    }
+    // Half away from zero, like `Rational64::round`.
+    let rounded = if num >= 0 {
+        (num + den / 2) / den
+    } else {
+        (num - den / 2) / den
+    };
+    i64::try_from(rounded).ok()
+}
+
 /// Keep one track's clips inside their media and on the frame grid. The
 /// source range is clamped to `[0, media]` (in-point ≥ 0, out-point ≤ the
 /// media's duration), then the timeline duration is snapped to whole frames
@@ -42,13 +62,24 @@ pub fn clamp_to_media(
             // EDL source TC before its offset, say) reads before the file start.
             let in_ = c.asset_in.max(zero);
             let out = c.asset_out.min(d);
-            let mut frames = ((out - in_) / c.speed * fps).round().to_integer();
-            let mut new_out = in_ + frame_secs(frames) * c.speed;
-            if new_out > d {
-                frames -= 1;
-                new_out = in_ + frame_secs(frames) * c.speed;
-            }
-            if frames < 1 {
+            let mut frames = whole_frames((out - in_) / c.speed, fps);
+            let new_out = match frames {
+                Some(n) => {
+                    let mut new_out = in_ + frame_secs(n) * c.speed;
+                    if new_out > d {
+                        frames = Some(n - 1);
+                        new_out = in_ + frame_secs(n - 1) * c.speed;
+                    }
+                    new_out
+                }
+                // A frame below the `Rational64` grid this timeline can
+                // encode: keep the media-clamped out-point, the closest
+                // expressible one. An unrepresentable count from an inverted
+                // span is not a grid problem — the whole-frame check below
+                // drops it.
+                None => out,
+            };
+            if !frames.map_or(out > in_, |frames| frames >= 1) {
                 notes.push(format!("clip #{}: holds no whole frame — dropped", c.id));
                 return false;
             }
@@ -76,20 +107,26 @@ pub fn clamp_to_media(
             let id = t.id;
             // The duration lands on the frame grid; each source span stays
             // inside its media.
-            let frames = (t.dur * fps).round().to_integer();
-            if frames < 1 {
-                notes.push(format!("transition #{id}: holds no whole frame — dropped"));
-                return false;
+            match whole_frames(t.dur, fps) {
+                Some(frames) if frames < 1 => {
+                    notes.push(format!("transition #{id}: holds no whole frame — dropped"));
+                    return false;
+                }
+                Some(frames) => {
+                    let dur = frame_secs(frames);
+                    if dur != t.dur {
+                        notes.push(format!(
+                            "transition #{id}: dur {} → {}",
+                            format_seconds(&t.dur),
+                            format_seconds(&dur)
+                        ));
+                    }
+                    t.dur = dur;
+                }
+                // A frame below the `Rational64` grid: `t.dur` is already the
+                // closest expressible duration.
+                None => {}
             }
-            let dur = frame_secs(frames);
-            if dur != t.dur {
-                notes.push(format!(
-                    "transition #{id}: dur {} → {}",
-                    format_seconds(&t.dur),
-                    format_seconds(&dur)
-                ));
-            }
-            t.dur = dur;
             let mut outside = false;
             let mut clamped = false;
             for side in [&mut t.a, &mut t.b] {
@@ -148,7 +185,12 @@ pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
         return (track.segments.clone(), 0);
     }
     let frame = Seconds::from_integer(1) / fps;
-    let snap = |t: Seconds| Seconds::new((t * fps).round().to_integer(), 1) / fps;
+    let snap = |t: Seconds| match whole_frames(t, fps) {
+        Some(frames) => Seconds::new(frames, 1) / fps,
+        // A frame below the `Rational64` grid: the position is already the
+        // closest expressible one.
+        None => t,
+    };
     let mut pos = Seconds::from_integer(0);
     let mut out: Vec<Segment> = Vec::with_capacity(track.segments.len());
     let mut dropped = 0usize;
