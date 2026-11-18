@@ -31,6 +31,18 @@ fn v_selects_whole_segments_and_d_deletes_them_as_one_undo() {
     );
 }
 
+// Entering visual mode is not itself an event worth a notice: hints_for owns
+// the key cheat-sheet, so `v` must not overwrite the last real message.
+#[test]
+fn entering_visual_mode_leaves_the_message_alone() {
+    let mut app = visual_app();
+    let fake = FakeMpv::new();
+    app.set_message("sentinel notice");
+    handle_key(&mut app, &fake, key('v'));
+    assert!(matches!(app.mode, Mode::Visual(_)), "{:?}", app.mode);
+    assert_eq!(app.message, "sentinel notice");
+}
+
 // Visual mode delegates motions (and counts) to normal mode, so a zoom key
 // must consume a pending count the way normal mode's do — otherwise `3` then
 // `+` leaves the 3 to multiply the next motion.
