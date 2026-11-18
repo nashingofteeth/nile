@@ -616,7 +616,7 @@ pub fn run_action(
                 h: *h,
             };
             let key = CropKey {
-                h: key.snapped_h(),
+                h: key.snapped_h().ok_or(EditError::CropKeyHeight)?,
                 ..key
             };
             match keys.binary_search_by(|probe| probe.at.cmp(&key.at)) {

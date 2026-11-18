@@ -8,7 +8,7 @@
 use crate::project::Project;
 use crate::time::{Seconds, format_seconds, frames_to_seconds};
 use crate::timeline::{
-    Clip, MAX_TIMELINE_SECONDS, Segment, Track, TrackKind, Transition, TransitionKind,
+    Clip, Effect, MAX_TIMELINE_SECONDS, Segment, Track, TrackKind, Transition, TransitionKind,
     TransitionSource,
 };
 
@@ -73,6 +73,9 @@ pub fn add_transition(
             Segment::Transition(_) => return Err(EditError::Transition),
             Segment::Gap(_) => {}
             Segment::Clip(c) => {
+                if c.effects.iter().any(Effect::is_keyed_crop) {
+                    return Err(EditError::KeyedCropTransition(c.id));
+                }
                 let rem = c.duration() - dur;
                 at_least_a_frame(project, &rem)?;
                 let tail = source_span(c, dur);
@@ -103,6 +106,9 @@ pub fn add_transition(
             Segment::Transition(_) => return Err(EditError::Transition),
             Segment::Gap(_) => {}
             Segment::Clip(c) => {
+                if c.effects.iter().any(Effect::is_keyed_crop) {
+                    return Err(EditError::KeyedCropTransition(c.id));
+                }
                 let rem = c.duration() - dur;
                 at_least_a_frame(project, &rem)?;
                 let head = source_span(c, dur);

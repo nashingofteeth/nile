@@ -156,6 +156,14 @@ pub enum EditError {
     NoCropEffect,
     #[error("a crop key must be inside the clip")]
     CropKeyOutside,
+    #[error("crop y leaves no room for a keyframe height")]
+    CropKeyHeight,
+    #[error("crop has keyframes — add a key with --at, or clear it first")]
+    CropKeysWouldBeLost,
+    #[error("a keyframed crop must be the only effect on clip #{0}")]
+    KeyedCropExclusive(u32),
+    #[error("a keyframed crop can't sit beside a transition (clip #{0})")]
+    KeyedCropTransition(u32),
     #[error("no frame rate set — add a clip first")]
     NoFps,
     #[error(transparent)]

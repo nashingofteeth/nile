@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::time::{Seconds, checked_add, checked_div, checked_sub, format_seconds, rational_ser};
+use crate::time::{
+    Seconds, checked_add, checked_div, checked_sub, format_seconds, rational_ser, secs_f64,
+};
 
 #[derive(Debug, Error)]
 pub enum TimelineError {
@@ -55,13 +57,14 @@ pub struct CropKey {
 pub const CROP_RUNGS: &[f64] = &[20.0, 25.0, 33.0, 40.0, 50.0, 60.0, 66.0, 75.0, 80.0, 100.0];
 
 impl CropKey {
-    /// The nearest allowed height for an authoring path.
-    pub fn snapped_h(&self) -> f64 {
+    /// The nearest allowed height that still fits below `y`, for an
+    /// authoring path. `None` when no rung fits.
+    pub fn snapped_h(&self) -> Option<f64> {
         CROP_RUNGS
             .iter()
             .copied()
+            .filter(|rung| *rung <= 100.0 - self.y)
             .min_by(|a, b| (a - self.h).abs().total_cmp(&(b - self.h).abs()))
-            .unwrap_or(self.h)
     }
 }
 
@@ -113,6 +116,14 @@ impl Effect {
             Effect::Eq { .. } => "eq",
             Effect::Lut { .. } => "lut",
         }
+    }
+
+    /// Does this effect carry crop keyframes?
+    pub fn is_keyed_crop(&self) -> bool {
+        matches!(
+            self,
+            Effect::Crop { keys, .. } if !keys.is_empty()
+        )
     }
 
     /// Why this effect cannot be persisted, or `None` when it is valid.
@@ -212,7 +223,10 @@ impl Effect {
         if effects.iter().any(|effect| {
             matches!(
                 effect,
-                Effect::Crop { keys, .. } if !keys.is_empty()
+                Effect::Crop { keys, .. }
+                    if keys.iter().any(|key| {
+                        key.x != 0.0 || key.y != 0.0 || key.w != 100.0 || key.h != 100.0
+                    })
             )
         }) {
             return true;
@@ -498,7 +512,128 @@ pub struct Clip {
     pub effects: Vec<Effect>,
 }
 
+/// A resolved crop window, in percentages.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CropWindow {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Effect {
+    /// The crop window at clip-relative timeline `at`. Before the first key
+    /// the static size is held and x/y move toward the first key; between
+    /// keys size steps from the earlier key and x/y interpolate; after the
+    /// last key everything holds.
+    pub fn crop_window_at(&self, at: Seconds) -> Option<CropWindow> {
+        let Effect::Crop { x, y, w, h, keys } = self else {
+            return None;
+        };
+        let base = CropWindow {
+            x: *x,
+            y: *y,
+            w: *w,
+            h: *h,
+        };
+        if keys.is_empty() {
+            return Some(base);
+        }
+        let mut keys = keys.clone();
+        keys.sort_by_key(|key| key.at);
+        let lerp = |a: f64, b: f64, f: f64| a + (b - a) * f;
+        let at_f = secs_f64(&at);
+        if at_f <= 0.0 {
+            return Some(base);
+        }
+        if at < keys[0].at {
+            let end = secs_f64(&keys[0].at);
+            let f = (at_f / end).clamp(0.0, 1.0);
+            return Some(CropWindow {
+                x: lerp(base.x, keys[0].x, f),
+                y: lerp(base.y, keys[0].y, f),
+                ..base
+            });
+        }
+        let Some(index) = keys.iter().rposition(|key| key.at <= at) else {
+            return Some(base);
+        };
+        let key = &keys[index];
+        let Some(next) = keys.get(index + 1) else {
+            return Some(CropWindow {
+                x: key.x,
+                y: key.y,
+                w: key.w,
+                h: key.h,
+            });
+        };
+        let start = secs_f64(&key.at);
+        let end = secs_f64(&next.at);
+        let f = ((at_f - start) / (end - start).max(f64::EPSILON)).clamp(0.0, 1.0);
+        Some(CropWindow {
+            x: lerp(key.x, next.x, f),
+            y: lerp(key.y, next.y, f),
+            w: key.w,
+            h: key.h,
+        })
+    }
+}
+
 impl Clip {
+    /// Re-base crop keys after `removed` timeline seconds disappear from the
+    /// head (negative grows it). The value at the new head becomes the key at
+    /// 0, so a split or trim does not restart the animation from the old base.
+    pub fn rebase_crop_keys(&mut self, removed: Seconds) {
+        if removed == Seconds::from_integer(0) {
+            return;
+        }
+        for effect in &mut self.effects {
+            let Some(value) = effect.crop_window_at(removed) else {
+                continue;
+            };
+            let Effect::Crop { keys, .. } = effect else {
+                continue;
+            };
+            keys.retain(|key| key.at > removed);
+            for key in keys.iter_mut() {
+                key.at -= removed;
+            }
+            keys.push(CropKey {
+                at: Seconds::from_integer(0),
+                x: value.x,
+                y: value.y,
+                w: value.w,
+                h: value.h,
+            });
+            keys.sort_by_key(|key| key.at);
+        }
+    }
+
+    /// Drop keys at/after `at` (the left half of a split has no time there).
+    pub fn truncate_crop_keys(&mut self, at: Seconds) {
+        for effect in &mut self.effects {
+            if let Effect::Crop { keys, .. } = effect {
+                keys.retain(|key| key.at < at);
+            }
+        }
+    }
+
+    /// Scale key offsets after a retime. `ratio` is old duration / new
+    /// duration, so material that was at timeline `t` stays at the same
+    /// source frame.
+    pub fn scale_crop_keys(&mut self, ratio: Seconds) {
+        if ratio <= Seconds::from_integer(0) {
+            return;
+        }
+        for effect in &mut self.effects {
+            if let Effect::Crop { keys, .. } = effect {
+                for key in keys.iter_mut() {
+                    key.at *= ratio;
+                }
+            }
+        }
+    }
+
     /// A normal-speed clip (`speed = 1`) with no effects.
     pub fn new(id: u32, asset: u32, asset_in: Seconds, asset_out: Seconds) -> Self {
         Self {
@@ -1026,6 +1161,55 @@ mod tests {
             }
             other => panic!("expected a finite refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn crop_keys_rebase_and_scale_with_the_clip() {
+        let mut c = Clip::new(1, 1, Seconds::from_integer(0), Seconds::from_integer(2));
+        c.effects = vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![
+                CropKey {
+                    at: Seconds::new(1, 2),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                CropKey {
+                    at: Seconds::new(3, 2),
+                    x: 50.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+            ],
+        }];
+        c.rebase_crop_keys(Seconds::from_integer(1));
+        let Effect::Crop { keys, .. } = &c.effects[0] else {
+            panic!("crop");
+        };
+        assert_eq!(keys[0].at, Seconds::from_integer(0));
+        assert_eq!(keys[0].x, 25.0, "the cut value becomes the new head");
+        assert_eq!(keys[0].w, 100.0);
+        assert_eq!(keys[1].at, Seconds::new(1, 2));
+        assert_eq!(keys[1].x, 50.0);
+
+        c.scale_crop_keys(Seconds::new(1, 2));
+        let Effect::Crop { keys, .. } = &c.effects[0] else {
+            panic!("crop");
+        };
+        assert_eq!(keys[0].at, Seconds::from_integer(0));
+        assert_eq!(keys[1].at, Seconds::new(1, 4));
+
+        c.truncate_crop_keys(Seconds::new(1, 8));
+        let Effect::Crop { keys, .. } = &c.effects[0] else {
+            panic!("crop");
+        };
+        assert_eq!(keys.len(), 1, "the tail key is gone");
     }
 
     #[test]
