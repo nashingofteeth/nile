@@ -458,7 +458,7 @@ fn show_json_exposes_time_maps_and_groups() {
     s.base();
     let project: serde_json::Value =
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
-    assert_eq!(project["version"], 15);
+    assert_eq!(project["version"], 16);
     assert_eq!(project["groups"], serde_json::json!([]));
     assert!(
         project.get("time_maps").is_none(),
@@ -909,6 +909,35 @@ fn multi_track_overlay_mute_base_promotion() {
         0.5,
         BLACK,
         "…and it is black where the overlay is a gap",
+    );
+}
+
+#[test]
+fn a_keyed_crop_moves_between_passes() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["effect", "crop", "--clip", "1", "--x", "0", "--w", "100"]);
+    s.ok(&[
+        "effect", "crop", "--clip", "1", "--at", "1", "--x", "50", "--w", "50",
+    ]);
+
+    s.export("keyed.mp4");
+    // Before the key, the window starts at the left edge and slides right;
+    // by 0.5 s it already masks the left quarter.
+    s.assert_px_at("keyed.mp4", 0.5, 20, 120, BLACK, "the moving head masks");
+    let kept = s.px_at("keyed.mp4", 0.5, 200, 120);
+    assert!(
+        kept[0] > 200 && kept[1] < 20 && kept[2] < 20,
+        "the kept side stays red: {kept:?}"
+    );
+    // After the key, the window is half width at the centre line.
+    s.assert_px_at("keyed.mp4", 1.5, 40, 120, BLACK, "the keyed window masks");
+    let kept = s.px_at("keyed.mp4", 1.5, 280, 120);
+    assert!(
+        kept[0] > 200 && kept[1] < 20 && kept[2] < 20,
+        "the keyed window keeps picture: {kept:?}"
     );
 }
 

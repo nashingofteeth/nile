@@ -66,8 +66,9 @@ pub const MAX_HISTORY: usize = 100;
 /// change's `{ actor, at }` provenance; v17 keys the stacks by sequence;
 /// v18 adds grouped changes (one undo step for a batch of actions);
 /// v19 adds media-group creation/removal; v20 adds annotations; v21 scopes
-/// timeline annotations into track changes; v22 stores crop as a window.
-pub const HISTORY_VERSION: u32 = 22;
+/// timeline annotations into track changes; v22 stores crop as a window;
+/// v23 adds crop keyframes.
+pub const HISTORY_VERSION: u32 = 23;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -151,6 +152,10 @@ pub enum EditError {
     History(String),
     #[error("annotation #{0} belongs to sequence #{1} — switch to it first")]
     AnnotationSequence(u32, u32),
+    #[error("add a crop first — `effect crop --x …`")]
+    NoCropEffect,
+    #[error("a crop key must be inside the clip")]
+    CropKeyOutside,
     #[error("no frame rate set — add a clip first")]
     NoFps,
     #[error(transparent)]

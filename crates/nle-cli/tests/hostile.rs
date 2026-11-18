@@ -246,6 +246,16 @@ fn effects() {
         &s,
         &[
             (
+                "crop key without a crop",
+                &[&["effect", "crop", "--clip", "1", "--at", "1"]],
+            ),
+            (
+                "crop key outside the clip",
+                &[&[
+                    "effect", "crop", "--clip", "1", "--at", "9", "--x", "0", "--w", "100",
+                ]],
+            ),
+            (
                 "effect crop x 101",
                 &[&["effect", "crop", "--clip", "1", "--x", "101"]],
             ),

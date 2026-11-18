@@ -18,6 +18,7 @@ fn effects_panel_drops_the_selected_row_and_undo_restores_it() {
         y: 0.0,
         w: 100.0 - 10.0 - 10.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     set_effects(&mut app, 1, vec![scale.clone(), crop.clone()]);
 
@@ -71,6 +72,7 @@ fn effects_panel_digits_open_a_row() {
                 y: 0.0,
                 w: 100.0 - 10.0 - 0.0,
                 h: 100.0 - 0.0 - 0.0,
+                keys: Vec::new(),
             },
             Effect::Eq {
                 brightness: 0.0,
@@ -184,7 +186,8 @@ fn effects_panel_form_takes_values_and_exits() {
             x: 10.0,
             y: 10.0,
             w: 90.0,
-            h: 90.0
+            h: 90.0,
+            keys: Vec::new(),
         })
     );
 }
@@ -243,7 +246,8 @@ fn effect_form_letters_jump_and_tab_moves() {
             x: 0.0,
             y: 0.0,
             w: 100.0,
-            h: 12.0
+            h: 12.0,
+            keys: Vec::new(),
         })
     );
 }
@@ -435,6 +439,7 @@ fn selecting_an_effect_opens_it_for_editing() {
         y: 0.0,
         w: 100.0 - 30.0 - 0.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     set_effects(&mut app, 1, vec![old.clone()]);
     handle_key(&mut app, &fake, key('x'));
@@ -458,7 +463,8 @@ fn selecting_an_effect_opens_it_for_editing() {
             x: 30.0,
             y: 0.0,
             w: 10.0,
-            h: 100.0
+            h: 100.0,
+            keys: Vec::new(),
         }]
     );
     assert!(app.message.starts_with("edit crop"), "{}", app.message);
@@ -535,6 +541,7 @@ fn the_edit_form_shows_the_old_value_beside_a_blank_input() {
         y: 0.0,
         w: 100.0 - 30.0 - 0.0,
         h: 100.0 - 0.0 - 0.0,
+        keys: Vec::new(),
     };
     app.mode = Mode::Fx(FxState {
         clip: 1,
@@ -569,6 +576,7 @@ fn adding_an_existing_kind_opens_it_for_editing() {
             y: 0.0,
             w: 100.0 - 30.0 - 0.0,
             h: 100.0 - 0.0 - 0.0,
+            keys: Vec::new(),
         }],
     );
     handle_key(&mut app, &fake, key('x'));
@@ -589,7 +597,8 @@ fn adding_an_existing_kind_opens_it_for_editing() {
             x: 30.0,
             y: 0.0,
             w: 10.0,
-            h: 100.0
+            h: 100.0,
+            keys: Vec::new(),
         }],
         "still one crop row"
     );
@@ -612,12 +621,14 @@ fn an_existing_duplicate_edits_the_selected_row() {
                 y: 0.0,
                 w: 100.0 - 10.0 - 0.0,
                 h: 100.0 - 0.0 - 0.0,
+                keys: Vec::new(),
             },
             Effect::Crop {
                 x: 20.0,
                 y: 0.0,
                 w: 100.0 - 20.0 - 0.0,
                 h: 100.0 - 0.0 - 0.0,
+                keys: Vec::new(),
             },
         ],
     );
@@ -648,6 +659,7 @@ fn the_effects_panel_shows_rows_or_an_empty_hint() {
                 y: 10.0,
                 w: 100.0 - 10.0 - 10.0,
                 h: 100.0 - 10.0 - 10.0,
+                keys: Vec::new(),
             },
             nle_core::timeline::Effect::Eq {
                 brightness: 0.1,
@@ -750,6 +762,7 @@ fn moving_a_full_width_crop_shrinks_it_to_the_edge() {
             y: 0.0,
             w: 100.0,
             h: 100.0,
+            keys: Vec::new(),
         }],
     );
 
@@ -771,8 +784,44 @@ fn moving_a_full_width_crop_shrinks_it_to_the_edge() {
             x: 10.0,
             y: 0.0,
             w: 90.0,
-            h: 100.0
+            h: 100.0,
+            keys: Vec::new(),
         }],
         "a blank width shrinks to the edge"
     );
+}
+
+#[test]
+fn a_keyed_crop_refuses_the_static_edit_form() {
+    let fake = FakeMpv::new();
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let mut app = App::new(asset_project(), temp_project_path("fx-crop-key"));
+    app.loaded = true;
+    app.playhead = 1.0;
+    set_effects(
+        &mut app,
+        1,
+        vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![nle_core::timeline::CropKey {
+                at: Seconds::from_integer(1),
+                x: 10.0,
+                y: 0.0,
+                w: 90.0,
+                h: 100.0,
+            }],
+        }],
+    );
+
+    handle_key(&mut app, &fake, key('x'));
+    handle_key(&mut app, &fake, enter);
+    assert!(app.message.contains("keyed crop"), "{}", app.message);
+    assert!(fx_state(&app).unwrap().form.is_none(), "no static form");
+    let Effect::Crop { keys, .. } = &clip_of(&app.project, 1).effects[0] else {
+        panic!("crop");
+    };
+    assert_eq!(keys.len(), 1, "the key survived the refusal");
 }

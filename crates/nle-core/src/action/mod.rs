@@ -18,7 +18,7 @@ use crate::edit::{self, EditError, EditOp, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
 use crate::time::{Seconds, frame_of, grid_time, secs_f64};
-use crate::timeline::{Effect, Gap, Segment, Track, TrackKind, TransitionKind};
+use crate::timeline::{CropKey, Effect, Gap, Segment, Track, TrackKind, TransitionKind};
 
 /// Default crossfade length, in project frames.
 pub const DEFAULT_TRANSITION_FRAMES: i64 = 12;
@@ -151,6 +151,16 @@ pub enum Action {
         to: Option<f64>,
         kind: AnnotationKind,
     },
+    /// Add or replace a crop keyframe at a timeline position.
+    CropKey {
+        track: usize,
+        clip: u32,
+        at: f64,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    },
     /// Remove an annotation by id.
     AnnotationRemove {
         id: u32,
@@ -265,13 +275,14 @@ impl Action {
             Action::AnnotationAddAt { .. } => 26,
             Action::AnnotationRemove { .. } => 24,
             Action::AnnotationResolve { .. } => 25,
+            Action::CropKey { .. } => 27,
         }
     }
 }
 
 /// How many slots the catalog has — the coverage tests assert exactly
 /// this many are reachable from each spelling.
-pub const SLOTS: usize = 27;
+pub const SLOTS: usize = 28;
 
 /// One representative action per [`Action::slot`], in slot order. Shared by
 /// the core wire test and the protocol's wire walk, so a new variant cannot be
@@ -384,6 +395,15 @@ pub fn sample_actions() -> Vec<Action> {
             at: 1.0,
             to: None,
             kind: AnnotationKind::Marker,
+        },
+        Action::CropKey {
+            track: 0,
+            clip: 1,
+            at: 1.0,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
         },
     ]
 }
@@ -552,6 +572,58 @@ pub fn run_action(
                 Some(i) => edit::replace_effect_on(project, ti, *clip, *i, effect.clone())?,
                 None => edit::add_effect_on(project, ti, *clip, effect.clone())?,
             };
+            apply(project, history, batch, from)
+        }
+        Action::CropKey {
+            track,
+            clip,
+            at,
+            x,
+            y,
+            w,
+            h,
+        } => {
+            let ti = resolve_track(project, *track, Target::Clip(*clip))?;
+            let tr = project
+                .timeline
+                .track(ti)
+                .ok_or(EditError::TrackNotFound(ti))?;
+            let si = tr.clip_index(*clip).ok_or(EditError::ClipNotFound(*clip))?;
+            let Segment::Clip(c) = &tr.segments[si] else {
+                return Err(EditError::ClipNotFound(*clip));
+            };
+            let start = tr.start_of(si);
+            let at = grid_time(project.fps.as_ref(), *at);
+            if at < start || at >= start + c.duration() {
+                return Err(EditError::CropKeyOutside);
+            }
+            let Some(pos) = c
+                .effects
+                .iter()
+                .position(|e| matches!(e, Effect::Crop { .. }))
+            else {
+                return Err(EditError::NoCropEffect);
+            };
+            let mut effect = c.effects[pos].clone();
+            let Effect::Crop { keys, .. } = &mut effect else {
+                unreachable!("position found a crop");
+            };
+            let key = CropKey {
+                at: at - start,
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+            };
+            let key = CropKey {
+                h: key.snapped_h(),
+                ..key
+            };
+            match keys.binary_search_by(|probe| probe.at.cmp(&key.at)) {
+                Ok(i) => keys[i] = key,
+                Err(i) => keys.insert(i, key),
+            }
+            let batch = edit::add_effect_on(project, ti, *clip, effect)?;
             apply(project, history, batch, from)
         }
         Action::RemoveEffect { track, clip, index } => {
