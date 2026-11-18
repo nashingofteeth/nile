@@ -45,6 +45,18 @@ entry, and edits still take an explicit `--at`.
   last ulp — a float diff re-triggers the transport flush forever
   (`playhead_moved` compares `frame_of`).
 
+## Edge trims
+
+- `i`/`I` consume the segment **ending** at the playhead; `o`/`O` the one
+  **starting** there (`trim_consume_target_on`). At a shared cut those are two
+  different neighbours.
+- `trim_in_on`/`trim_out_on` on a gap *extend the neighbour into it* (extend
+  mode's non-ripple grow); the trim keys and CLI ripple gaps first via
+  `trim_at_on`. Don't simplify that branch away —
+  `extend_moves_an_edge_under_the_same_rules_as_the_tui` guards it.
+- An opposite-end extend commit is a delete: by id for a clip, by index for a
+  gap.
+
 Implemented by capturing an anchor before `history.apply` and resolving it
 after (`run.resume` for the pool).
 `playhead_placement_after_each_action` is the audit table (one row per rule);
