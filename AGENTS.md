@@ -27,6 +27,7 @@ build — see "Learning Rust along the way".
 | annotations, `nile annotation` | `docs/pitfalls/annotations.md` |
 | render reports, `nile report`, export | `docs/pitfalls/render-report.md` |
 | crop keyframes, keyed crop | `docs/pitfalls/crop-keyframes.md` |
+| worktrees, parallel agents | `docs/worktrees.md` |
 | the borrow checker or clippy | `docs/rust-notes.md` |
 | long audits, `/audit` | `docs/review-loop.md` |
 
@@ -111,6 +112,10 @@ to say so.
 
 After pushing `main`, track CI with `gh run list` / `gh run watch`; report the
 result and call queue/runner-capacity failures infrastructure, not code.
+
+Worktrees live under `.worktrees/<branch>` (gitignored, one target dir each);
+run `CHECK_SKIP_INSTALL=1 scripts/check.sh` there and remove the tree + branch
+after merge. The audit loop owns `.review/worktree`.
 
 **Report each slice** with its branch and commit range, exact test counts,
 what was not done, and the next decision. Report flaky tests or rerun gates
