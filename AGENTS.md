@@ -51,8 +51,8 @@ transitive tree for most needs).
 `README.md` = how to **use** it; `PLAN.md` = where it is **going**;
 `AGENTS.md` = the always-on rules; `docs/` = per-area notes read on demand.
 
-**Ask before editing `PLAN.md` or `AGENTS.md`**, and propose the exact
-wording. `README.md` and `docs/` may be updated as part of a change.
+**Propose exact wording for `PLAN.md`/`AGENTS.md` changes; apply only after
+approval.** `README.md` and `docs/` may move with the code.
 
 **Default is don't add.** A note earns a place only if it changes an agent's
 default action and is not obvious from the code, a test, `README.md`, or a
@@ -92,24 +92,41 @@ explainers, and commit-adjacent notes:
 - Keep it short and tied to the code at hand — a concrete explainer beats a
   tutorial dump. Tie lessons to a real file/line.
 
-## Branch and merge
+## Working loop
 
-One slice, one branch. Keep review fixes on that same branch: commit them
-onto the feature branch and push; do not create a separate `fix/...-review`
-branch. The branch reviewed is the branch that merges.
+One slice, one branch. Each step is the default; skipping one needs the user
+to say so.
 
-Do not commit directly to `main`. **Never merge to `main` without an explicit
-request** — "review" is not permission; wait for a clear "merge". After
-approval, merge with `--no-ff`, rerun `scripts/check.sh` on `main`, then push.
+1. **Plan first.** Discuss scope, model/API, tests, docs and the genuinely
+   open choices before editing; offer options instead of inventing a second
+   roadmap. In Plan mode, do not modify files — the user switches agents when
+   ready.
+2. **Branch from `main`.** `feat/<slice>` or `fix/<slice>`; never work or
+   commit on `main`.
+3. **Commit in reviewable slices.** Core/model first, then front-ends and
+   protocol, then tests/docs when they do not belong with the code. One
+   logical change per commit (`feat:`/`fix:`/`refactor:`/`docs:`), subject then
+   a short why; name the Rust concept the change teaches and the test that
+   guards it.
+4. **Verify before the final commit.** Focused tests while iterating;
+   `scripts/check.sh` (fmt, shellcheck, clippy, docs, tests, release build,
+   install, demo) before pushing. Keep `--no-default-features` green. Push the
+   branch with a clean tree when it is reviewable.
+5. **Review fixes stay here.** A review is not merge permission. Commit fixes
+   onto the feature branch and push; do not open a separate
+   `fix/...-review` branch. The branch reviewed is the branch that merges.
+6. **Merge only on an explicit request.** `git merge --no-ff`, rerun
+   `scripts/check.sh` on `main`, push, then delete the merged branch locally
+   and remotely. "review" or "proceed" is not "merge".
+7. **Plan next after merge.** Propose the next slice before starting it; update
+   `PLAN.md` status and the next pointer only with approval.
 
-## Verify before every commit
+After pushing `main`, track CI with `gh run list` / `gh run watch`; report the
+result and call queue/runner-capacity failures infrastructure, not code.
 
-Run `scripts/check.sh`; do not commit otherwise — it is the gate list (fmt,
-shellcheck, clippy, `cargo doc -D warnings`, tests, release build, install,
-`demo.sh`). CI runs the same gates minus the install.
-
-Commit one logical change at a time (`feat:`/`fix:`/`refactor:`/`docs:`),
-subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
+**Report each slice** with its branch and commit range, exact test counts,
+what was not done, and the next decision. Report flaky tests or rerun gates
+plainly; never claim a pass you did not observe.
 
 ## Model invariants
 
