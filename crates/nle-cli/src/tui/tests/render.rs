@@ -1127,12 +1127,19 @@ fn dump_reports_a_scratch_dir_it_cannot_create() {
     let dir = tempfile::tempdir().unwrap();
     let blocker = dir.path().join("not-a-dir");
     std::fs::write(&blocker, b"x").unwrap();
+    let root = blocker.join("child");
     let err = dump_with_dir(
         asset_project(),
         temp_project_path("dump-scratch"),
         (40, 8),
         "",
-        blocker.join("child"),
+        root.clone(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("nle-dump-"), "{err}");
+    assert!(
+        err.contains(&format!("{}", root.display())),
+        "the error names the scratch root: {err}"
     );
-    assert!(err.is_err(), "an unwritable scratch root must be an error");
 }

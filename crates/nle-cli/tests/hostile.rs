@@ -1002,7 +1002,10 @@ fn output_plumbing() {
 }
 
 // The diagnostic path runs without a monitor, but it still creates a scratch
-// copy. A TMPDIR it cannot use must be refused cleanly (1), never panicked (101).
+// copy. A TMPDIR it cannot use must be refused cleanly (1), never panicked
+// (101). Non-unix `temp_dir()` ignores TMPDIR, so this only means something
+// on unix.
+#[cfg(all(unix, feature = "tui"))]
 #[test]
 fn an_unwritable_tmpdir_cannot_panic_the_dump() {
     let s = Sandbox::new();
@@ -1016,7 +1019,7 @@ fn an_unwritable_tmpdir_cannot_panic_the_dump() {
         .output()
         .expect("spawn nile");
     let code = out.status.code().expect("an exit code");
-    assert!((0..=2).contains(&code), "exit {code}: {}", merged(&out));
+    assert_eq!(code, 1, "a bad TMPDIR is a clean refusal: {}", merged(&out));
     assert!(
         !merged(&out).contains("panicked"),
         "a diagnostic must not panic: {}",
