@@ -26,9 +26,10 @@ entry, and edits still take an explicit `--at`.
 - Deletes: plain (`dd`) keeps the same offset in the resulting gap; ripple
   (`D`) and gap deletes land on the seam between the neighbours.
 - **A no-op edit must not move the playhead.** `run_action` reanchors only
-  when the outcome `changed`; only `Yank` reports `false`. Reanchoring a read
-  slid the playhead because a transition anchor resolves to the transition's
-  end (and `dd` yanks first).
+  when the outcome `changed`, and no-op actions (`Yank`, `YankRange`, an
+  unchanged transition retime) report `false`. Reanchoring a read slid the
+  playhead because a transition anchor resolves to the transition's end (and
+  `dd` yanks first).
 - **A gap/transition anchor keeps the playhead while the segment survives.**
   `edit_anchor` maps a transition to its end (the seam a removal leaves), but
   the seam is used only once the segment under the playhead is gone — an
