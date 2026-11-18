@@ -49,7 +49,7 @@ pub(crate) fn cmd_edit(
             });
         print!(
             "{}",
-            tui::dump(project, project_path.to_path_buf(), (w, h), dump_keys)
+            tui::dump(project, project_path.to_path_buf(), (w, h), dump_keys)?
         );
         return Ok(());
     }
