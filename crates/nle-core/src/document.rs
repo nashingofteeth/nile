@@ -659,6 +659,39 @@ mod tests {
             }]
         );
 
+        // Snapping must fit below y, not push the window past the frame.
+        doc.edit(
+            &crate::Action::CropKey {
+                track: 0,
+                clip: 1,
+                at: 1.0,
+                x: 0.0,
+                y: 62.0,
+                w: 50.0,
+                h: 38.0,
+            },
+            0.0,
+            &mut register,
+        )
+        .unwrap();
+        assert_eq!(keys(&doc)[0].h, 33.0, "38 snaps down to fit below y=62");
+        assert!(matches!(
+            doc.edit(
+                &crate::Action::CropKey {
+                    track: 0,
+                    clip: 1,
+                    at: 1.0,
+                    x: 0.0,
+                    y: 95.0,
+                    w: 5.0,
+                    h: 5.0,
+                },
+                0.0,
+                &mut register,
+            ),
+            Err(EditError::CropKeyHeight)
+        ));
+
         assert!(matches!(
             doc.edit(
                 &crate::Action::CropKey {

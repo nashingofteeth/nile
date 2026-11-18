@@ -88,6 +88,9 @@ pub fn set_speed_on(
     if let Some(a) = adjacent.iter().find(|a| a.outgoing) {
         after.asset_out = a.outer - a.dur * speed;
     }
+    if let Some(ratio) = checked_div(&c.duration(), &after.duration()) {
+        after.scale_crop_keys(ratio);
+    }
 
     // A slow-down lengthens the track: keep it inside the timeline limit
     // (the validate backstop would call it "corrupt", which it isn't).

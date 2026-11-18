@@ -331,9 +331,7 @@ fn keyed_crop_video(
         let dur = pass.end - pass.start;
         let dur_s = format_seconds(&dur);
         let (pw, ph, px0, py0) = window_pixels(canvas, pass.x0, pass.y0, pass.w, pass.h);
-        let (pw1, ph1, px1, py1) = window_pixels(canvas, pass.x1, pass.y1, pass.w, pass.h);
-        let pw = pw.min(pw1);
-        let ph = ph.min(ph1);
+        let (_, _, px1, py1) = window_pixels(canvas, pass.x1, pass.y1, pass.w, pass.h);
         let xexpr = move_expr(px0, px1, dur);
         let yexpr = move_expr(py0, py1, dur);
         let c = format!("{label}_c{i}");

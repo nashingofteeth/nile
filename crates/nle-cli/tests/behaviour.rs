@@ -924,6 +924,13 @@ fn a_keyed_crop_moves_between_passes() {
     ]);
 
     s.export("keyed.mp4");
+    assert_eq!(s.frame_count("keyed.mp4"), 60, "2 s at 30 fps");
+    // The lead-in keeps the authored full-size window from frame 0.
+    let first = s.px_at("keyed.mp4", 0.0, 2, 120);
+    assert!(
+        first[0] > 200 && first[1] < 20 && first[2] < 20,
+        "frame 0 is full width: {first:?}"
+    );
     // Before the key, the window starts at the left edge and slides right;
     // by 0.5 s it already masks the left quarter.
     s.assert_px_at("keyed.mp4", 0.5, 20, 120, BLACK, "the moving head masks");
