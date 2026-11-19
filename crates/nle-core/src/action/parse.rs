@@ -3,6 +3,7 @@
 
 use crate::annotation::{Anchor, AnnotationKind, SourceRef};
 use crate::edit::EditError;
+use crate::expect::Expectation;
 use crate::time::{Seconds, frames_to_seconds, parse_signed_time, secs_f64};
 use crate::timeline::{Effect, MAX_TIMELINE_SECONDS, TrackKind, TransitionKind};
 
@@ -29,7 +30,7 @@ pub enum ParseError {
 }
 
 /// Boolean options (everything else takes a value).
-const BOOL_FLAGS: &[&str] = &["ripple", "range", "timeline"];
+const BOOL_FLAGS: &[&str] = &["ripple", "range", "timeline", "no-hold-size", "black"];
 
 /// Short flags the CLI uses, spelled `-o` in the `:cmd` line too
 /// (`:export -o out.mp4`). Only the ones that exist on the CLI.
@@ -262,6 +263,30 @@ fn opt_u32(f: &mut Flags, name: &str) -> Result<Option<u32>, ParseError> {
     }
 }
 
+/// A signed count (`--tolerance-frames`, `--min-frames`). `i64`, because the
+/// model's tolerance fields are `i64` and a negative is a payload the check
+/// validation refuses with its own message.
+fn opt_i64(f: &mut Flags, name: &str) -> Result<Option<i64>, ParseError> {
+    match f.take(name) {
+        Some(v) => v
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| ParseError::Invalid(format!("--{name} expects a number, got {v:?}"))),
+        None => Ok(None),
+    }
+}
+
+/// A percentage or fraction (`--max-move`, `--margin`, `--min-coverage`).
+fn opt_f64(f: &mut Flags, name: &str) -> Result<Option<f64>, ParseError> {
+    match f.take(name) {
+        Some(v) => v
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| ParseError::Invalid(format!("--{name} expects a number, got {v:?}"))),
+        None => Ok(None),
+    }
+}
+
 /// Inclusive whole-segment range: `--from-seg A --to-seg B` (0-based, as
 /// printed by `nile show`). Both or neither; the two forms are validated by
 /// the caller.
@@ -471,6 +496,133 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
     }
 }
 
+/// The parameters of an `--expect` call, before the check kind picks which of
+/// them apply. Shared by the CLI and the `:cmd` grammar so a new flag cannot
+/// drift between the two.
+#[derive(Debug, Clone, Default)]
+pub struct ExpectArgs {
+    /// The check name, either spelling (`crop-stable` or `crop_stable`).
+    pub check: String,
+    pub asset: Option<u32>,
+    pub group: Option<u32>,
+    pub tolerance_frames: Option<i64>,
+    pub max_move_pct_per_sec: Option<f64>,
+    /// The negative flag (`--no-hold-size`), so an absent flag means "hold".
+    pub no_hold_size: bool,
+    pub margin_pct: Option<f64>,
+    pub min_coverage: Option<f64>,
+    pub transcript: Option<String>,
+    pub black: bool,
+    pub min_frames: Option<i64>,
+}
+
+/// The flags set on this call, by their long name — the set a check either
+/// owns or refuses.
+fn expect_flags_set(a: &ExpectArgs) -> Vec<&'static str> {
+    let mut set = Vec::new();
+    if a.asset.is_some() {
+        set.push("asset");
+    }
+    if a.group.is_some() {
+        set.push("group");
+    }
+    if a.tolerance_frames.is_some() {
+        set.push("tolerance-frames");
+    }
+    if a.max_move_pct_per_sec.is_some() {
+        set.push("max-move");
+    }
+    if a.no_hold_size {
+        set.push("no-hold-size");
+    }
+    if a.margin_pct.is_some() {
+        set.push("margin");
+    }
+    if a.min_coverage.is_some() {
+        set.push("min-coverage");
+    }
+    if a.transcript.is_some() {
+        set.push("transcript");
+    }
+    if a.black {
+        set.push("black");
+    }
+    if a.min_frames.is_some() {
+        set.push("min-frames");
+    }
+    set
+}
+
+/// Build a typed [`Expectation`] from a check name and its flags.
+///
+/// The check owns its flags: `--black` is an `absent` argument, `--margin` a
+/// `work-in-frame` one, and passing it to another check is refused rather
+/// than silently dropped. The *values* are not range-checked here — the model
+/// does that in `Expectation::validation_error` — so `--margin 99` lands on
+/// the project and is refused there with the same message a hand-edited file
+/// gets.
+pub fn expect_from_args(a: ExpectArgs) -> Result<Expectation, ParseError> {
+    // `:cmd` also accepts the model spelling (`crop_stable`): the check names
+    // are wire values there, and normalising is cheaper than a second alias
+    // table. The CLI's ValueEnum offers only the dashed spelling; this
+    // superset is deliberate (the annotations doc records it).
+    let check = a.check.replace('-', "_");
+    // The display name is the user's spelling, not the normalised key.
+    let display = a.check.clone();
+    let owned: &[&str] = match check.as_str() {
+        "cam" => &["asset", "group", "tolerance-frames"],
+        "crop_stable" => &["max-move", "no-hold-size"],
+        "work_in_frame" => &["margin"],
+        "words_complete" => &["min-coverage", "transcript"],
+        "absent" => &["asset", "group", "black", "tolerance-frames"],
+        "no_sliver" => &["min-frames", "asset"],
+        other => {
+            return Err(ParseError::Invalid(format!(
+                "unknown expect check {other:?} — use cam, crop-stable, work-in-frame, \
+                 words-complete, absent or no-sliver"
+            )));
+        }
+    };
+    for flag in expect_flags_set(&a) {
+        if !owned.contains(&flag) {
+            return Err(ParseError::Invalid(format!(
+                "--{flag} does not apply to the {display} check"
+            )));
+        }
+    }
+    let tolerance = a.tolerance_frames.unwrap_or(0);
+    Ok(match check.as_str() {
+        "cam" => Expectation::Cam {
+            asset: a.asset,
+            group: a.group,
+            tolerance_frames: tolerance,
+        },
+        "crop_stable" => Expectation::CropStable {
+            max_move_pct_per_sec: a.max_move_pct_per_sec.unwrap_or(25.0),
+            hold_size: !a.no_hold_size,
+        },
+        "work_in_frame" => Expectation::WorkInFrame {
+            margin_pct: a.margin_pct.unwrap_or(5.0),
+        },
+        "words_complete" => Expectation::WordsComplete {
+            min_coverage: a.min_coverage.unwrap_or(1.0),
+            transcript: a.transcript,
+        },
+        "absent" => Expectation::Absent {
+            asset: a.asset,
+            group: a.group,
+            black: a.black,
+            tolerance_frames: tolerance,
+        },
+        "no_sliver" => Expectation::NoSliver {
+            min_frames: a.min_frames.unwrap_or(2),
+            asset: a.asset,
+        },
+        // `owned` above already refused everything else.
+        _ => unreachable!("checked above"),
+    })
+}
+
 /// A saturating frame count divided by a non-integer fps would multiply
 /// into overflow inside num-rational *before* `add_transition`'s own
 /// "whole frames, at least one" check sees it: `--frames 2^63-1` panicked
@@ -672,6 +824,7 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             let sub = f.positional().ok_or_else(|| {
                 ParseError::Invalid(
                     "usage: :annotation add TEXT (--asset N | --group N) --time T | \
+                     :annotation add --expect CHECK --timeline [--at T] | \
                      :annotation ls | :annotation check --report FILE | \
                      :annotation rm N | :annotation resolve N"
                         .to_string(),
@@ -679,11 +832,68 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             })?;
             match sub.as_str() {
                 "add" => {
-                    let text = f.positional().ok_or_else(|| {
-                        ParseError::Invalid(":annotation add needs TEXT".to_string())
-                    })?;
+                    let expect_check = f.take("expect");
+                    let text = f.positional();
+                    if expect_check.is_some() && text.is_some() {
+                        return Err(ParseError::Invalid(
+                            ":annotation add takes TEXT or --expect CHECK, not both".to_string(),
+                        ));
+                    }
                     let timeline = f.take_bool("timeline");
+                    if let Some(check) = expect_check {
+                        if !timeline {
+                            return Err(ParseError::Invalid(
+                                ":annotation add --expect needs --timeline (a render span)"
+                                    .to_string(),
+                            ));
+                        }
+                        let args = ExpectArgs {
+                            check,
+                            asset: opt_u32(&mut f, "asset")?,
+                            group: opt_u32(&mut f, "group")?,
+                            tolerance_frames: opt_i64(&mut f, "tolerance-frames")?,
+                            max_move_pct_per_sec: opt_f64(&mut f, "max-move")?,
+                            no_hold_size: f.take_bool("no-hold-size"),
+                            margin_pct: opt_f64(&mut f, "margin")?,
+                            min_coverage: opt_f64(&mut f, "min-coverage")?,
+                            transcript: f.take("transcript"),
+                            black: f.take_bool("black"),
+                            min_frames: opt_i64(&mut f, "min-frames")?,
+                        };
+                        let expect = expect_from_args(args)?;
+                        let at = opt_time(&mut f, "at")?.or(d.at).ok_or_else(|| {
+                            ParseError::Invalid(
+                                ":annotation add --timeline needs --at T".to_string(),
+                            )
+                        })?;
+                        let to = opt_time(&mut f, "to")?;
+                        let track = parse_track(&mut f, d)?;
+                        f.finish(ANNOTATION_EXPECT_USAGE)?;
+                        return Ok(Action::AnnotationAddAt {
+                            track,
+                            at,
+                            to,
+                            kind: AnnotationKind::Expectation { expect },
+                        });
+                    }
+                    let text = text.ok_or_else(|| {
+                        ParseError::Invalid(
+                            ":annotation add needs TEXT (or --expect CHECK)".to_string(),
+                        )
+                    })?;
                     if timeline {
+                        // `--asset`/`--group` select a check's subject; a note
+                        // is anchored to the timeline, so carrying them would
+                        // silently ignore the flag.
+                        let asset = opt_u32(&mut f, "asset")?;
+                        let group = opt_u32(&mut f, "group")?;
+                        if asset.is_some() || group.is_some() {
+                            return Err(ParseError::Invalid(
+                                ":annotation add --timeline cannot carry --asset/--group — \
+                                 drop them, or use --expect for a check"
+                                    .to_string(),
+                            ));
+                        }
                         let at = opt_time(&mut f, "at")?.or(d.at).ok_or_else(|| {
                             ParseError::Invalid(
                                 ":annotation add --timeline needs --at T".to_string(),
@@ -958,6 +1168,13 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
 
 pub const TRACK_USAGE: &str =
     "usage: :track add video|audio · :track mute [N] · :track rm N · :track ls";
+
+/// The `--expect` flags, one spelling for the CLI and `:cmd`. A check only
+/// owns some of them; `expect_from_args` refuses the rest.
+const ANNOTATION_EXPECT_USAGE: &str = "usage: :annotation add --expect cam|crop-stable|work-in-frame|words-complete|absent|no-sliver \
+     --timeline [--at T] [--to T] [--track N] [--asset N | --group N] \
+     [--tolerance-frames N] [--max-move P] [--no-hold-size] [--margin P] \
+     [--min-coverage F] [--transcript NAME] [--black] [--min-frames N]";
 
 /// A speed percentage: `100` = normal, `50` = half, `200` = double. Returns
 /// the model's rate (`percent / 100`, so 1 = normal).

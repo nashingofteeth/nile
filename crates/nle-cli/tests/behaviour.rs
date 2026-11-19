@@ -453,12 +453,321 @@ fn a_range_end_on_a_cut_belongs_to_the_left_clip() {
 }
 
 #[test]
+fn annotation_check_passes_a_matching_render_and_fails_a_wrong_camera() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6 at 30 fps
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--to",
+        "1.5",
+        "--asset",
+        "1",
+    ]);
+    let listing = s.ok(&["annotation", "ls"]);
+    assert!(listing.contains("expect"), "{listing}");
+    assert!(listing.contains("cam"), "{listing}");
+    s.export("out.mp4");
+
+    let out = s.run(&["annotation", "check", "--report", "out.mp4"]);
+    assert!(
+        out.status.success(),
+        "a matching cam passes:\n{}",
+        merged(&out)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains('✓'), "{text}");
+    assert!(
+        text.contains("1 check(s): 1 pass, 0 fail, 0 unverifiable"),
+        "{text}"
+    );
+
+    // The other camera fails at the first checked frame, and `--json` still
+    // prints the whole report when the exit code is 1.
+    s.ok(&["annotation", "rm", "1"]);
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--to",
+        "1.5",
+        "--asset",
+        "2",
+    ]);
+    let out = s.run(&["annotation", "check", "--report", "out.mp4", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("json on exit 1: {e}\n{}", merged(&out)));
+    assert_eq!(report["summary"]["fail"], 1, "{report}");
+    let detail = report["checks"][0]["detail"].as_str().expect("detail");
+    assert!(detail.contains("frame 15"), "{detail}");
+    assert!(detail.contains("asset #1"), "{detail}");
+}
+
+#[test]
+fn annotation_check_counts_unverifiable_and_resolved_failures_as_failed() {
+    let s = Sandbox::new();
+    s.base();
+    // A transcript has no store yet, so the check cannot answer.
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "words-complete",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--transcript",
+        "take",
+    ]);
+    s.export("out.mp4");
+    let out = s.run(&["annotation", "check", "--report", "out.mp4"]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    let text = merged(&out);
+    assert!(text.contains('?'), "{text}");
+    assert!(text.contains("unverifiable"), "{text}");
+
+    // Resolving acknowledges a failure; it does not waive it.
+    s.ok(&["annotation", "rm", "1"]);
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--asset",
+        "2",
+    ]);
+    s.ok(&["annotation", "resolve", "1"]);
+    let out = s.run(&["annotation", "check", "--report", "out.mp4"]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    let text = merged(&out);
+    assert!(text.contains("[resolved]"), "{text}");
+    assert!(text.contains("0 pass, 1 fail"), "{text}");
+}
+
+#[test]
+fn annotation_check_narrows_to_ids_and_follows_the_reports_sequence() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--asset",
+        "1",
+    ]);
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--asset",
+        "2",
+    ]);
+    // A second, empty sequence becomes active: the report still names #1, so
+    // its expectations are the ones checked.
+    s.ok(&["sequence", "add", "Second"]);
+    s.ok(&["sequence", "use", "2"]);
+    s.ok(&["export", "--sequence", "1", "-o", "one.mp4"]);
+
+    let out = s.run(&["annotation", "check", "--report", "one.mp4", "--id", "1"]);
+    assert!(out.status.success(), "{}", merged(&out));
+    let out = s.run(&["annotation", "check", "--report", "one.mp4", "--id", "2"]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    let out = s.run(&["annotation", "check", "--report", "one.mp4"]);
+    assert_eq!(out.status.code(), Some(1), "both checks: {}", merged(&out));
+
+    // `--report` takes the video or its sidecar.
+    let out = s.run(&[
+        "annotation",
+        "check",
+        "--report",
+        "one.mp4.report.json",
+        "--id",
+        "1",
+    ]);
+    assert!(out.status.success(), "{}", merged(&out));
+
+    // Asking for another sequence is a seam error (2), not a silent answer
+    // about the wrong frame map; so is a missing report.
+    let out = s.run(&[
+        "annotation",
+        "check",
+        "--report",
+        "one.mp4",
+        "--sequence",
+        "2",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", merged(&out));
+    let out = s.run(&["annotation", "check", "--report", "nope.mp4"]);
+    assert_eq!(out.status.code(), Some(2), "{}", merged(&out));
+}
+
+#[test]
+fn an_expectation_selector_guards_media_and_group_removal() {
+    let s = Sandbox::new();
+    s.base(); // red/green/blue on the timeline, assets #1–#3
+    s.ok(&["import", "tiny.mp4"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let tiny = project["media"]
+        .as_array()
+        .expect("media")
+        .iter()
+        .find(|asset| {
+            asset["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("tiny.mp4"))
+        })
+        .and_then(|asset| asset["id"].as_u64())
+        .expect("tiny.mp4 is pooled");
+    let tiny_id = tiny;
+    let tiny = tiny.to_string();
+    let pooled_ids = || -> Vec<u64> {
+        let project: serde_json::Value =
+            serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+        project["media"]
+            .as_array()
+            .expect("media")
+            .iter()
+            .filter_map(|asset| asset["id"].as_u64())
+            .collect()
+    };
+
+    // The asset is pool-only (not on any timeline), but the check names it.
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--asset",
+        &tiny,
+    ]);
+    // Resolving is not a waiver: a resolved check still holds the reference.
+    s.ok(&["annotation", "resolve", "1"]);
+    let err = s.err(&["media", "rm", &tiny]);
+    let expected = format!("asset #{tiny} is used by annotation(s) [1]");
+    assert!(err.contains(&expected), "{err}");
+    assert!(err.contains("nile annotation rm"), "{err}");
+    assert!(
+        pooled_ids().contains(&tiny_id),
+        "the refused asset is still pooled"
+    );
+
+    // The group equivalent: a group of pool-only parts named by a check.
+    s.ok(&["import", "--group", "PAIR", "wide169.mp4", "video_only.mp4"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let group = project["groups"][0]["id"]
+        .as_u64()
+        .expect("group id")
+        .to_string();
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--group",
+        &group,
+    ]);
+    let err = s.err(&["group", "rm", &group]);
+    let expected = format!("media group #{group} is used by annotation(s) [2]");
+    assert!(err.contains(&expected), "{err}");
+    assert!(s.ok(&["group", "ls"]).contains("PAIR"), "still present");
+
+    s.ok(&["annotation", "rm", "2"]);
+    s.ok(&["group", "rm", &group]);
+    // The asset check remains and still blocks the pooled file.
+    let err = s.err(&["media", "rm", &tiny]);
+    assert!(
+        err.contains(&format!("asset #{tiny} is used by annotation(s) [1]")),
+        "{err}"
+    );
+    s.ok(&["annotation", "rm", "1"]);
+    s.ok(&["media", "rm", &tiny]);
+    assert!(!pooled_ids().contains(&tiny_id));
+}
+
+#[test]
+fn annotation_check_refuses_an_id_that_selects_nothing() {
+    let s = Sandbox::new();
+    s.base();
+    // #1 is an expectation on sequence #1; #2 is a note there.
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--asset",
+        "1",
+    ]);
+    s.ok(&["annotation", "add", "pin", "--timeline", "--at", "1"]);
+    // #3 is an expectation on another sequence.
+    s.ok(&["sequence", "add", "Second", "--fps", "30/1"]);
+    s.ok(&["sequence", "use", "2"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--asset",
+        "1",
+    ]);
+    s.ok(&["export", "--sequence", "1", "-o", "one.mp4"]);
+
+    for id in ["99", "2", "3"] {
+        let out = s.run(&["annotation", "check", "--report", "one.mp4", "--id", id]);
+        assert_eq!(out.status.code(), Some(2), "id {id}: {}", merged(&out));
+        let text = merged(&out);
+        assert!(
+            text.contains(&format!("no expectation with id #{id} on sequence #1")),
+            "id {id}: {text}"
+        );
+    }
+    // The real expectation still checks.
+    let out = s.run(&["annotation", "check", "--report", "one.mp4", "--id", "1"]);
+    assert!(out.status.success(), "{}", merged(&out));
+}
+
+#[test]
 fn show_json_exposes_time_maps_and_groups() {
     let s = Sandbox::new();
     s.base();
     let project: serde_json::Value =
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
-    assert_eq!(project["version"], 16);
+    assert_eq!(project["version"], 17);
     assert_eq!(project["groups"], serde_json::json!([]));
     assert!(
         project.get("time_maps").is_none(),
