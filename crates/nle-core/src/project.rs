@@ -338,10 +338,26 @@ impl Project {
     /// `[0, dur)`, so its final frame is `dur - 1/fps` (0 on an empty one).
     pub fn last_frame(&self) -> Seconds {
         let end = self.timeline.end();
-        match self.fps.as_ref() {
-            Some(f) if *f > Seconds::from_integer(0) => {
-                (end - Seconds::from_integer(1) / *f).max(Seconds::from_integer(0))
-            }
+        let zero = Seconds::from_integer(0);
+        let Some(fps) = self.fps.filter(|fps| *fps > zero) else {
+            return end;
+        };
+        // `end - 1/fps` = (end.num * fps.num - end.den * fps.den) /
+        // (end.den * fps.num), computed in i128. `Rational64` would
+        // cross-multiply two i64s here and overflow: a debug panic, a silent
+        // wrap in release. When the exact one-frame inset is not representable
+        // — the frame is below the `Rational64` grid this timeline can encode,
+        // e.g. `end - 1/i64::MAX` on a multi-second timeline — fall back to
+        // `end`, the closest safe finite bound (never 0 for a non-empty
+        // timeline, never a panic, never an f64 approximation).
+        let num = i128::from(*end.numer()) * i128::from(*fps.numer())
+            - i128::from(*end.denom()) * i128::from(*fps.denom());
+        let den = i128::from(*end.denom()) * i128::from(*fps.numer());
+        if num <= 0 {
+            return zero;
+        }
+        match (i64::try_from(num), i64::try_from(den)) {
+            (Ok(num), Ok(den)) => Seconds::new(num, den).max(zero),
             _ => end,
         }
     }
@@ -1323,6 +1339,34 @@ mod tests {
             "{landed} s is not on the {fps} fps grid"
         );
         assert_eq!(secs_f64(&p.playhead), landed, "the stored value agrees");
+    }
+
+    #[test]
+    fn last_frame_is_one_frame_before_the_end_at_a_normal_rate() {
+        let mut p = sample_project(); // 5 s: [0..2) + [2..5)
+        p.fps = Some(Seconds::from_integer(30));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+        assert_eq!(
+            p.last_frame(),
+            Seconds::new(149, 30),
+            "5 s - 1/30 s, exactly"
+        );
+    }
+
+    #[test]
+    fn last_frame_falls_back_to_the_end_when_the_inset_is_unrepresentable() {
+        let mut p = sample_project(); // 5 s, non-empty
+        let end = p.timeline.end();
+        p.fps = Some(Seconds::new(i64::MAX, 1));
+        // 5 - 1/i64::MAX has a numerator past i64: the exact inset cannot be
+        // encoded, so the bound is `end` itself — not 0, not a panic.
+        assert_eq!(p.last_frame(), end);
+        let landed = p.set_playhead(1.0);
+        assert!(landed.is_finite(), "{landed} is not finite");
+        assert!(
+            (0.0..=secs_f64(&p.last_frame())).contains(&landed),
+            "{landed} escaped [0, {end}]"
+        );
     }
 
     #[test]
