@@ -1281,6 +1281,134 @@ mod tests {
         assert!(seen.iter().all(|&s| s), "CLI-unreachable actions: {seen:?}");
     }
 
+    /// Parse one argv through clap into the catalog, exactly as `main` does.
+    fn clap_action(argv: &[&str]) -> Action {
+        let mut full = vec!["nile"];
+        full.extend_from_slice(argv);
+        let cli = Cli::try_parse_from(&full).unwrap_or_else(|e| panic!("clap {argv:?}: {e}"));
+        to_action(&cli.command)
+            .unwrap_or_else(|| panic!("{argv:?} is not an edit command"))
+            .unwrap_or_else(|e| panic!("{argv:?}: {e}"))
+    }
+
+    /// The three layers a front-end shares: clap's spelling, `to_action`'s
+    /// mapping, and the `Action` wire form `nle-protocol` sends. The
+    /// slot-reachability test builds `Cmd` values directly, so a mis-wired
+    /// long flag (two arguments naming one field) would slip past it.
+    #[test]
+    fn clap_spellings_survive_the_action_wire_form() {
+        let argv: &[&[&str]] = &[
+            // `--at`, `--track` and `--ripple` in one command.
+            &["trim-in", "--at", "2", "--track", "2", "--ripple"],
+            &["split", "--at", "1.5"],
+            // The three ways to address a segment.
+            &["delete", "--at", "2"],
+            &["delete", "--clip", "7", "--ripple"],
+            &["delete", "--seg", "3"],
+            &["delete", "--from-seg", "1", "--to-seg", "2"],
+            // `--edge out`, and `--edge in` on a clip id.
+            &[
+                "extend", "--seg", "1", "--edge", "out", "--to", "3", "--track", "2",
+            ],
+            &["extend", "--clip", "1", "--edge", "in", "--to", "2"],
+            // The two gap lengths.
+            &["gap", "--at", "1", "--frames", "3"],
+            &["gap", "--at", "1", "--dur", "2.5"],
+            // Speed is a percentage on the CLI, a rate in the model.
+            &["speed", "1", "200"],
+            // One effect's argument set.
+            &[
+                "effect",
+                "eq",
+                "--clip",
+                "1",
+                "--brightness",
+                "0.5",
+                "--saturation",
+                "0.8",
+            ],
+            // One named transition kind.
+            &["transition", "fade", "--at", "3", "--frames", "15"],
+        ];
+        for argv in argv {
+            let action = clap_action(argv);
+            let json = serde_json::to_string(&action).expect("serialize the action");
+            let back: Action = serde_json::from_str(&json).expect("deserialize the action");
+            assert_eq!(action, back, "{argv:?} does not survive {json}");
+        }
+        // A defaulted `--track` is track 1, not a distinct spelling.
+        assert_eq!(
+            clap_action(&["split", "--at", "1"]),
+            clap_action(&["split", "--at", "1", "--track", "1"]),
+            "an omitted --track must mean track 1"
+        );
+    }
+
+    /// Parsing and wire round-tripping are not enough: a flag can survive both
+    /// while mapping to the wrong unit or a default. Pin the ambiguous
+    /// spellings by value.
+    #[test]
+    fn clap_spellings_map_to_their_values() {
+        match clap_action(&["speed", "1", "200"]) {
+            Action::SetSpeed { track, clip, rate } => {
+                assert_eq!(track, 0, "track is 0-based in the model");
+                assert_eq!(clip, 1);
+                assert_eq!(rate, Seconds::from_integer(2), "200% is 2×");
+            }
+            other => panic!("speed 200 parsed as {other:?}"),
+        }
+        match clap_action(&["gap", "--at", "1", "--frames", "3"]) {
+            Action::InsertGap { len, .. } => assert_eq!(len, GapLen::Frames(3)),
+            other => panic!("gap --frames parsed as {other:?}"),
+        }
+        // `--dur` is seconds (5/2), never frames.
+        match clap_action(&["gap", "--at", "1", "--dur", "2.5"]) {
+            Action::InsertGap { len, .. } => assert_eq!(len, GapLen::Seconds(2.5)),
+            other => panic!("gap --dur parsed as {other:?}"),
+        }
+        match clap_action(&["transition", "fade", "--at", "3", "--frames", "15"]) {
+            Action::Transition { kind, .. } => {
+                assert_eq!(
+                    kind,
+                    nle_core::TransitionKind::FadeBlack,
+                    "fade is FadeBlack"
+                );
+            }
+            other => panic!("transition fade parsed as {other:?}"),
+        }
+        // The effect's arguments reach the effect, with `contrast` left at its
+        // neutral default rather than dropped.
+        let Action::AddEffect { effect, .. } = clap_action(&[
+            "effect",
+            "eq",
+            "--clip",
+            "1",
+            "--brightness",
+            "0.5",
+            "--saturation",
+            "0.8",
+        ]) else {
+            panic!("effect eq is not an AddEffect");
+        };
+        assert_eq!(
+            effect,
+            nle_core::timeline::Effect::Eq {
+                brightness: 0.5,
+                contrast: 1.0,
+                saturation: 0.8,
+            }
+        );
+
+        // The three addressing flags land on three different target shapes.
+        let target = |argv: &[&str]| match clap_action(argv) {
+            Action::Delete { target, .. } => target,
+            other => panic!("{argv:?} parsed as {other:?}"),
+        };
+        assert_eq!(target(&["delete", "--at", "2"]), Target::At(2.0));
+        assert_eq!(target(&["delete", "--clip", "7"]), Target::Clip(7));
+        assert_eq!(target(&["delete", "--seg", "3"]), Target::Segment(3));
+    }
+
     // `nile show` names a clip's effects, in the order the export applies
     // them, so a shell-only session can see what is on a clip.
     #[test]
