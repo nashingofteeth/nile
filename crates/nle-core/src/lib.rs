@@ -11,6 +11,7 @@ pub mod detect;
 pub mod document;
 pub mod edit;
 pub mod edl;
+pub mod expect;
 pub mod extend;
 mod group;
 pub mod media;
@@ -39,6 +40,10 @@ pub use edit::{
     trim_out_ripple,
 };
 pub use edl::{EdlDoc, EdlError, EdlEvent};
+pub use expect::{
+    CheckOutcome, CheckReport, CheckResult, CheckSummary, Expectation, ReportRef, TimeRange,
+    evaluate,
+};
 pub use extend::{
     Armed, CommitKind, armed_edge, clip_span, commit_batch, gap_span, plan_commit, resolve_armed,
 };
@@ -50,7 +55,9 @@ pub use project::{
     VideoSettings,
 };
 pub use provenance::{Actor, Provenance};
-pub use report::{FrameLocation, FrameSource, FrameSpan, RenderReport, RenderWindow, SourceSide};
+pub use report::{
+    FrameLocation, FrameSource, FrameSpan, RenderReport, RenderWindow, SourceSide, frame_edge,
+};
 pub use time::{
     Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, grid_time,
     nominal_fps, parse_rate, parse_signed_time, parse_time, parse_timecode, secs_f64,

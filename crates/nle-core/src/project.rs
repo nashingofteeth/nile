@@ -32,7 +32,8 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
 /// v12 adds logical media groups; v13 adds annotations; v14 adds
 /// clip-relative timeline anchors; v15 stores crop as a window; v16 adds
-/// crop keyframes.
+/// crop keyframes and (additively) the `expectation` annotation payload;
+/// writing expectations will bump the version once a front-end can.
 pub const PROJECT_VERSION: u32 = 16;
 
 #[derive(Debug, Error)]
@@ -906,6 +907,21 @@ impl Project {
                 annotation.id,
                 "a note needs text".to_string(),
             ));
+        }
+        if let AnnotationKind::Expectation { expect } = &annotation.kind {
+            // An expectation is checked against output frames, which only a
+            // timeline anchor resolves to; a source anchor would have no
+            // render range to judge.
+            if matches!(annotation.anchor, Anchor::Source { .. }) {
+                return Err(ProjectError::Annotation(
+                    annotation.id,
+                    "an expectation must be anchored to a timeline range, not a source time"
+                        .to_string(),
+                ));
+            }
+            if let Some(reason) = expect.validation_error() {
+                return Err(ProjectError::Annotation(annotation.id, reason.to_string()));
+            }
         }
         match &annotation.anchor {
             Anchor::Timeline { start, end } => {
