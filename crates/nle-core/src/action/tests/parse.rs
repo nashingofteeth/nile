@@ -529,4 +529,128 @@ fn a_quoted_path_is_one_argument() {
     ));
 }
 
+// ------------------------------------------------------------ annotation expectations
+
+/// The `:annotation add --expect` grammar is the CLI's: every check, the
+/// same core defaults, and the same "this flag is not yours" refusal.
+#[test]
+fn annotation_expectations_mirror_the_cli_flags() {
+    use crate::expect::Expectation;
+
+    let expect = |spec: &str| match parse(spec, &defaults()) {
+        Ok(Action::AnnotationAddAt {
+            kind: AnnotationKind::Expectation { expect },
+            ..
+        }) => expect,
+        other => panic!("{spec:?} parsed as {other:?}"),
+    };
+
+    assert_eq!(
+        expect("annotation add --expect cam --timeline --at 1 --asset 2"),
+        Expectation::Cam {
+            asset: Some(2),
+            group: None,
+            tolerance_frames: 0,
+        }
+    );
+    assert_eq!(
+        expect("annotation add --expect cam --timeline --at 1 --group 3 --tolerance-frames 4"),
+        Expectation::Cam {
+            asset: None,
+            group: Some(3),
+            tolerance_frames: 4,
+        }
+    );
+    assert_eq!(
+        expect("annotation add --expect crop-stable --timeline --at 1"),
+        Expectation::CropStable {
+            max_move_pct_per_sec: 25.0,
+            hold_size: true,
+        }
+    );
+    assert_eq!(
+        expect(
+            "annotation add --expect crop-stable --timeline --at 1 --max-move 10 --no-hold-size"
+        ),
+        Expectation::CropStable {
+            max_move_pct_per_sec: 10.0,
+            hold_size: false,
+        }
+    );
+    assert_eq!(
+        expect("annotation add --expect work-in-frame --timeline --at 1"),
+        Expectation::WorkInFrame { margin_pct: 5.0 }
+    );
+    assert_eq!(
+        expect(
+            "annotation add --expect words-complete --timeline --at 1 --min-coverage 0.5 --transcript take"
+        ),
+        Expectation::WordsComplete {
+            min_coverage: 0.5,
+            transcript: Some("take".into()),
+        }
+    );
+    assert_eq!(
+        expect("annotation add --expect absent --timeline --at 1 --black"),
+        Expectation::Absent {
+            asset: None,
+            group: None,
+            black: true,
+            tolerance_frames: 0,
+        }
+    );
+    assert_eq!(
+        expect("annotation add --expect no-sliver --timeline --at 1 --asset 1"),
+        Expectation::NoSliver {
+            min_frames: 2,
+            asset: Some(1),
+        }
+    );
+    // A check flag with no value is a parse error, not a silent `true`.
+    assert!(
+        parse(
+            "annotation add --expect cam --timeline --at 1 --asset 1 --black",
+            &defaults()
+        )
+        .is_err()
+    );
+}
+
+/// A check owns its flags; the same rule guards the `:cmd` line, and an
+/// expectation without a render span is refused.
+#[test]
+fn annotation_expectations_reject_stray_flags() {
+    let invalid = |spec: &str| match parse(spec, &defaults()) {
+        Err(ParseError::Invalid(msg)) => msg,
+        other => panic!("{spec:?} parsed as {other:?}"),
+    };
+    // `--black` is an absent flag.
+    let msg = invalid("annotation add --expect cam --timeline --at 1 --asset 1 --black");
+    assert!(
+        msg.contains("--black does not apply to the cam check"),
+        "{msg}"
+    );
+    // A group is not a no_sliver selector.
+    let msg = invalid("annotation add --expect no-sliver --timeline --at 1 --group 1");
+    assert!(msg.contains("--group does not apply"), "{msg}");
+    // No check at all: `--expect` is what makes it a check.
+    let msg = invalid("annotation add note --timeline --at 1 --asset 1");
+    assert!(msg.contains("cannot carry --asset"), "{msg}");
+    // A note and a check are alternatives.
+    let msg = invalid("annotation add note --expect cam --timeline --at 1 --asset 1");
+    assert!(msg.contains("not both"), "{msg}");
+    // An expectation needs a timeline range: a source anchor has no render.
+    assert!(parse("annotation add --expect cam --at 1 --asset 1", &defaults()).is_err());
+    let msg = invalid("annotation add --expect nope --timeline --at 1");
+    assert!(msg.contains("unknown expect check"), "{msg}");
+    // A check flag on a plain note is an unknown option (it never vanishes).
+    assert!(
+        parse(
+            "annotation add note --asset 1 --time 0 --black",
+            &defaults()
+        )
+        .is_err()
+    );
+}
+
 // ------------------------------------------------------------ run
