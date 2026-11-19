@@ -2397,3 +2397,53 @@ fn a_symlinked_project_directory_keeps_state_beside_the_real_file() {
         "state leaked into the sandbox root beside the alias"
     );
 }
+
+// A symlinked project *file* is the same project under another name: an edit
+// made through `alias.json` must be visible when the real spelling undoes it.
+// `state_dir` canonicalizes the project path, so both spellings key the same
+// `.nile/p/` history instead of an `.nile/alias/` of their own.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_project_file_shares_one_history() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6
+    std::os::unix::fs::symlink("p.json", s.path().join("alias.json"))
+        .expect("alias.json -> p.json");
+
+    let segments = |s: &Sandbox| -> usize {
+        let project: serde_json::Value =
+            serde_json::from_str(&s.read(P)).expect("the project JSON");
+        project["sequences"][0]["timeline"]["tracks"][0]["segments"]
+            .as_array()
+            .expect("segments")
+            .len()
+    };
+    assert_eq!(segments(&s), 3, "the base fixture's three clips");
+
+    // An edit through the alias …
+    s.ok_on("alias.json", &["split", "--at", "1"]);
+    assert_eq!(segments(&s), 4, "the split through the alias persisted");
+
+    // … is undone through the real spelling, so the two share one history.
+    s.ok(&["undo"]);
+    assert_eq!(segments(&s), 3, "the real spelling undid the alias's split");
+
+    // State lives under the real file's stem, never the alias's. Check
+    // existence physically: /var vs /private/var makes macOS paths differ
+    // lexically while naming the same directory.
+    assert!(
+        s.path()
+            .join(".nile")
+            .join("p")
+            .join("history.json")
+            .is_file(),
+        "history is not under .nile/p"
+    );
+    assert!(
+        !s.path().join(".nile").join("alias").exists(),
+        "the alias grew its own state directory: {:?}",
+        fs::read_dir(s.path().join(".nile"))
+            .map(|entries| entries.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+}
