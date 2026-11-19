@@ -292,8 +292,8 @@ fn build_frame_map(project: &Project, fps: Seconds) -> Vec<FrameSpan> {
         if end <= start {
             continue;
         }
-        let start_frame = (secs_f64(&start) * secs_f64(&fps)).round() as i64;
-        let end_frame = (secs_f64(&end) * secs_f64(&fps)).round() as i64;
+        let start_frame = frame_edge(&start, &fps);
+        let end_frame = frame_edge(&end, &fps);
         if end_frame <= start_frame {
             continue;
         }
@@ -307,6 +307,16 @@ fn build_frame_map(project: &Project, fps: Seconds) -> Vec<FrameSpan> {
         });
     }
     spans
+}
+
+/// The output frame a timeline time lands on: `round(t × fps)`.
+///
+/// The frame map is built with this, and every reader of it — the expectation
+/// evaluator, `nile report` — must use the same function. A second quantiser
+/// drifts by a frame at 29.97 and the two disagree about which frame a cut is
+/// on.
+pub fn frame_edge(at: &Seconds, fps: &Seconds) -> i64 {
+    (secs_f64(at) * secs_f64(fps)).round() as i64
 }
 
 /// The highest unmuted video texture at `at`; a gap lets the layer below

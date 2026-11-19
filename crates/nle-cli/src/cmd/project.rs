@@ -683,6 +683,12 @@ pub(crate) fn cmd_annotation_ls(project_path: &Path, sequence: Option<u32>) -> R
                 annotation.id,
                 "marker"
             ),
+            nle_core::AnnotationKind::Expectation { expect } => say!(
+                "  #{:<3} [{status}] {:<6} {anchor} — {}",
+                annotation.id,
+                "expect",
+                expect.name()
+            ),
         }
     }
     Ok(())

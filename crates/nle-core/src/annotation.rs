@@ -1,4 +1,4 @@
-//! Notes, markers and (later) expectations anchored to source media.
+//! Notes, markers and expectations anchored to source media or the timeline.
 //!
 //! A source anchor is a media time, not a timeline position: trimming,
 //! splitting or rippling the timeline cannot move it. A timeline anchor is
@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::expect::Expectation;
 use crate::provenance::Provenance;
 use crate::time::{Seconds, rational_ser};
 use crate::timeline::{Clip, Segment, Track};
@@ -27,7 +28,7 @@ impl Annotation {
     pub fn text(&self) -> Option<&str> {
         match &self.kind {
             AnnotationKind::Note { text } => Some(text),
-            AnnotationKind::Marker => None,
+            AnnotationKind::Marker | AnnotationKind::Expectation { .. } => None,
         }
     }
 
@@ -36,6 +37,7 @@ impl Annotation {
         match self.kind {
             AnnotationKind::Note { .. } => "note",
             AnnotationKind::Marker => "marker",
+            AnnotationKind::Expectation { .. } => "expect",
         }
     }
 }
@@ -45,8 +47,14 @@ impl Annotation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnnotationKind {
-    Note { text: String },
+    Note {
+        text: String,
+    },
     Marker,
+    /// A check a finished render must satisfy (see [`crate::expect`]).
+    Expectation {
+        expect: Expectation,
+    },
 }
 
 /// Where the annotation points.
