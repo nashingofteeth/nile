@@ -22,6 +22,8 @@ use nle_core::expect::{CheckReport, CheckResult, evaluate};
 use nle_core::report::RenderReport;
 use nle_core::{AnnotationKind, AnnotationStatus, Project, ProjectError};
 
+use crate::{say, say_err};
+
 /// The report path for either a video (`out.mp4` → `out.mp4.report.json`) or
 /// its sidecar (returned unchanged). A sidecar's name already ends in
 /// `.report.json`, so appending again would look for a file nobody writes.
@@ -53,7 +55,6 @@ pub(crate) fn report_sidecar(path: &Path) -> PathBuf {
 /// expectation on the sequence". An id that names nothing is not an error — a
 /// caller may filter with a stale selection and deserves an empty report
 /// rather than a crash.
-#[allow(dead_code)] // wave 0: the CLI/protocol/TUI callers land next
 pub(crate) fn check_with(
     project: &Project,
     report: &Path,
@@ -89,7 +90,6 @@ pub(crate) fn check_with(
 /// The TUI and the CLI print the same lines; keeping the strings here stops
 /// the two front-ends drifting. Deterministic: no timings, no paths, no
 /// terminal width.
-#[allow(dead_code)] // wave 0: the CLI/protocol/TUI callers land next
 pub(crate) fn format_human(report: &CheckReport) -> Vec<String> {
     let mut lines = Vec::with_capacity(report.checks().len() + 1);
     for check in report.checks() {
@@ -126,6 +126,74 @@ pub(crate) fn format_human(report: &CheckReport) -> Vec<String> {
         summary.unverifiable
     ));
     lines
+}
+
+/// The process status a check report earns: 0 when every check passed, 1 when
+/// any failed or was unverifiable. Seam errors are the caller's 2.
+fn check_exit_code(report: &CheckReport) -> i32 {
+    let summary = report.summary();
+    if summary.fail + summary.unverifiable > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// `nile annotation check --report FILE [--sequence N] [--id N]… [--json]` —
+/// evaluate the sequence's expectations against a render report.
+///
+/// The exit code is part of the interface (CI gates on it): 0 when every
+/// check passes, 1 when any fails **or** is unverifiable (a resolved failure
+/// still fails), 2 for a seam error — a missing or corrupt report, a sequence
+/// the report does not name, or an `--id` that selects no expectation. clap's
+/// own usage errors are already 2.
+pub(crate) fn cmd_annotation_check(
+    project_path: &Path,
+    report: &Path,
+    sequence: Option<u32>,
+    ids: &[u32],
+    json: bool,
+) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let check = match check_with(&project, report, sequence, ids) {
+        Ok(check) => check,
+        Err(e) => {
+            say_err!("Error: {e}");
+            std::process::exit(2);
+        }
+    };
+    // The seam returns an empty report for a stale id so a protocol/TUI caller
+    // can show "nothing selected". The CLI is a gate: an id that names no
+    // expectation (a typo, a note, another sequence) must not pass silently.
+    if !ids.is_empty() && check.checks().is_empty() {
+        let wanted = ids
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        say_err!(
+            "Error: no expectation with id {wanted} on sequence #{} — ids come from `nile annotation ls`",
+            check.sequence()
+        );
+        std::process::exit(2);
+    }
+    if json {
+        say!("{}", serde_json::to_string_pretty(&check)?);
+    } else {
+        for line in format_human(&check) {
+            say!("{line}");
+        }
+    }
+    // `say!` tolerates a closed pipe, but the exit code *is* this command's
+    // output: flush before handing the status to the OS so a redirected
+    // report arrives whole.
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let code = check_exit_code(&check);
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -492,5 +560,39 @@ mod tests {
         let from_sidecar = check_with(&project, &sidecar, None, &[]).expect("from the sidecar");
         assert_eq!(from_video, from_sidecar);
         assert_eq!(from_video.summary().pass, 1);
+    }
+
+    #[test]
+    fn the_exit_code_is_zero_only_when_every_check_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut passing = project(1);
+        add(&mut passing, cam(1));
+        let out = write_report(&passing, dir.path());
+        let report = check_with(&passing, &out, None, &[]).expect("check");
+        assert_eq!(check_exit_code(&report), 0, "{report:?}");
+
+        // A sequence with nothing to check is a vacuous pass.
+        let empty = project(1);
+        let none = check_with(&empty, &out, None, &[]).expect("check");
+        assert!(none.checks().is_empty());
+        assert_eq!(check_exit_code(&none), 0);
+
+        // A failed cam and an unverifiable words check both gate at 1.
+        let rendered = project(2);
+        let mut failing = project(1);
+        add(&mut failing, cam(1));
+        add(
+            &mut failing,
+            Expectation::WordsComplete {
+                min_coverage: 1.0,
+                transcript: Some("take".to_string()),
+            },
+        );
+        let rendered_dir = tempfile::tempdir().unwrap();
+        let out = write_report(&rendered, rendered_dir.path());
+        let report = check_with(&failing, &out, None, &[]).expect("check");
+        assert_eq!(report.summary().fail, 1);
+        assert_eq!(report.summary().unverifiable, 1);
+        assert_eq!(check_exit_code(&report), 1);
     }
 }

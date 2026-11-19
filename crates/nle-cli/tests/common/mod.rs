@@ -543,9 +543,20 @@ impl Sandbox {
         child.wait().expect("wait")
     }
 
-    /// Spawn `nile serve --stdio` for a protocol test.
+    /// Spawn `nile serve --stdio` for a protocol test, from the sandbox's cwd.
     pub fn serve(&self) -> Serve {
-        let mut cmd = self.command(P, &["serve", "--stdio"]);
+        self.serve_in(self.path())
+    }
+
+    /// Spawn `nile serve --stdio` with `cwd` as the process directory while
+    /// the project is named absolutely. Proves a path rule that must not
+    /// depend on the client and server sharing a cwd.
+    pub fn serve_in(&self, cwd: &Path) -> Serve {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nile"));
+        cmd.current_dir(cwd)
+            .arg("--project")
+            .arg(self.file(P))
+            .args(["serve", "--stdio"]);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -831,6 +842,13 @@ impl Serve {
     pub fn request(&mut self, value: Value) -> Value {
         self.send(&value);
         self.read()
+    }
+
+    /// The typed client over this child's pipes. Request ids restart at 1 per
+    /// client; the server echoes whatever id it was given, so that is fine.
+    pub fn client(&mut self) -> nle_protocol::Client<&mut BufReader<ChildStdout>, &mut ChildStdin> {
+        let stdin = self.stdin.as_mut().expect("serve stdin is open");
+        nle_protocol::Client::new(&mut self.stdout, stdin)
     }
 
     /// Close stdin, let the server drain EOF, and return its exit status.

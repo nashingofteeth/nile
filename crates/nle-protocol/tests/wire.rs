@@ -5,7 +5,11 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use nle_core::{Action, Project, ProjectDiff, Seconds, TransitionKind, TransitionLen};
+use nle_core::expect::{CheckOutcome, CheckReport, CheckSummary, ReportRef};
+use nle_core::{
+    Action, AnnotationStatus, CheckResult, Project, ProjectDiff, Seconds, TransitionKind,
+    TransitionLen,
+};
 use nle_protocol::{
     AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, Id, METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage, Notification,
@@ -165,6 +169,34 @@ impl Handler for Fake {
                 sequence: sequence.unwrap_or(1),
                 annotations: Vec::new(),
             })),
+            Call::AnnotationCheck {
+                report,
+                sequence,
+                id,
+            } => Ok(Reply::Checks(CheckReport {
+                report: ReportRef {
+                    output: report.display().to_string(),
+                    sequence: sequence.unwrap_or(1),
+                    revision: self.revision,
+                    frame_count: 60,
+                },
+                checks: id
+                    .iter()
+                    .map(|id| CheckOutcome {
+                        id: *id,
+                        check: "cam".to_string(),
+                        status: AnnotationStatus::Open,
+                        result: CheckResult::Pass,
+                        span: None,
+                        frames: Some((0, 60)),
+                        detail: None,
+                    })
+                    .collect(),
+                summary: CheckSummary {
+                    pass: id.len(),
+                    ..CheckSummary::default()
+                },
+            })),
         }
     }
 
@@ -263,6 +295,11 @@ fn all_calls() -> Vec<Call> {
             at: Seconds::new(3, 2),
         },
         Call::AnnotationList { sequence: Some(1) },
+        Call::AnnotationCheck {
+            report: PathBuf::from("/media/out.mp4"),
+            sequence: Some(1),
+            id: vec![2],
+        },
     ]
 }
 
@@ -1050,6 +1087,96 @@ fn undo_and_redo_are_accepted_as_apply_actions() {
         let params = call.params().expect("params");
         assert_eq!(Call::decode(call.method(), params).expect("decode"), call);
     }
+}
+
+#[test]
+fn annotation_check_round_trips_with_and_without_ids() {
+    let bare = Call::AnnotationCheck {
+        report: PathBuf::from("/media/out.mp4"),
+        sequence: None,
+        id: Vec::new(),
+    };
+    let params = bare.params().expect("params");
+    assert_eq!(params["report"], "/media/out.mp4");
+    assert_eq!(
+        Call::decode("annotation.check", params).expect("decode"),
+        bare
+    );
+    // Both filters are optional, so a hand-written request may omit them and
+    // still land on the same typed call.
+    assert_eq!(
+        Call::decode("annotation.check", json!({"report": "/media/out.mp4"}))
+            .expect("omitted filters"),
+        bare
+    );
+
+    let call = Call::AnnotationCheck {
+        report: PathBuf::from("/media/out.mp4"),
+        sequence: Some(1),
+        id: vec![3, 4],
+    };
+    let (reply, output) = exchange(&mut Fake::new(7), call);
+    let Reply::Checks(checks) = reply.expect("checks") else {
+        panic!("expected a check report");
+    };
+    assert_eq!(checks.report().sequence, 1);
+    assert_eq!(checks.report().frame_count, 60);
+    assert_eq!(checks.checks().len(), 2);
+    assert_eq!(checks.summary().pass, 2);
+
+    let output = String::from_utf8(output).expect("utf-8");
+    let response: Value =
+        serde_json::from_str(output.lines().next().expect("one response")).expect("json");
+    assert_eq!(
+        response["result"]["report"],
+        json!({
+            "output": "/media/out.mp4",
+            "sequence": 1,
+            "revision": 7,
+            "frame_count": 60
+        })
+    );
+    assert_eq!(
+        response["result"]["checks"][0],
+        json!({
+            "id": 3,
+            "check": "cam",
+            "status": "open",
+            "result": "pass",
+            "frames": [0, 60]
+        })
+    );
+    assert_eq!(
+        response["result"]["summary"],
+        json!({"pass": 2, "fail": 0, "unverifiable": 0})
+    );
+}
+
+#[test]
+fn the_checks_helper_sends_and_decodes_the_report() {
+    let result = json!({
+        "report": {"output": "/media/out.mp4", "sequence": 1, "revision": 7, "frame_count": 60},
+        "checks": [{"id": 2, "check": "cam", "status": "open", "result": "pass",
+                    "frames": [0, 60]}],
+        "summary": {"pass": 1, "fail": 0, "unverifiable": 0}
+    });
+    let input = format!("{}\n", json!({"jsonrpc": "2.0", "id": 1, "result": result}));
+    let mut output = Vec::new();
+    let checks = {
+        let mut client = Client::new(Cursor::new(input), &mut output);
+        client
+            .checks(PathBuf::from("/media/out.mp4"), Some(1), vec![2])
+            .expect("checks")
+    };
+    assert_eq!(checks.report().output, "/media/out.mp4");
+    assert_eq!(checks.checks()[0].id, 2);
+    assert_eq!(checks.summary().pass, 1);
+
+    let request: Request = serde_json::from_slice(&output).expect("request");
+    assert_eq!(request.method, "annotation.check");
+    assert_eq!(request.params["report"], "/media/out.mp4");
+    assert_eq!(request.params["sequence"], 1);
+    assert_eq!(request.params["id"], json!([2]));
 }
 
 #[test]

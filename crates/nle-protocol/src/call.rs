@@ -11,7 +11,9 @@
 
 use std::path::PathBuf;
 
-use nle_core::{Action, Annotation, Project, ProjectDiff, Seconds, Sequence, VideoSettings};
+use nle_core::{
+    Action, Annotation, CheckReport, Project, ProjectDiff, Seconds, Sequence, VideoSettings,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -100,6 +102,17 @@ wire_catalog! {
             #[serde(default, skip_serializing_if = "Option::is_none")]
             sequence: Option<u32>,
         } = "annotation.list";
+        /// Check a render report against the expectations on its sequence.
+        /// A read: it evaluates the sidecar and changes nothing.
+        AnnotationCheck {
+            /// The exported video or its `.report.json` sidecar.
+            report: PathBuf,
+            #[serde(default)]
+            sequence: Option<u32>,
+            /// Annotation ids to check; empty means every expectation.
+            #[serde(default)]
+            id: Vec<u32>,
+        } = "annotation.check";
     }
 }
 
@@ -194,6 +207,7 @@ pub enum Reply {
     Sequence(SequenceReply),
     Media(MediaList),
     Annotations(AnnotationList),
+    Checks(CheckReport),
     Preview(Preview),
     Playhead(PlayheadReply),
 }
@@ -209,6 +223,7 @@ impl Reply {
             Reply::Sequence(_) => "sequence",
             Reply::Media(_) => "media",
             Reply::Annotations(_) => "annotations",
+            Reply::Checks(_) => "checks",
             Reply::Preview(_) => "preview",
             Reply::Playhead(_) => "playhead",
         }
@@ -239,6 +254,8 @@ impl Reply {
                 .map_err(|e| {
                     RpcError::internal(format!("annotation reply is not serializable: {e}"))
                 }),
+            (Reply::Checks(checks), Call::AnnotationCheck { .. }) => serde_json::to_value(checks)
+                .map_err(|e| RpcError::internal(format!("check report is not serializable: {e}"))),
             (Reply::Playhead(at), Call::PlayheadSet { .. }) => {
                 serde_json::to_value(at).map_err(|e| {
                     RpcError::internal(format!("playhead reply is not serializable: {e}"))
@@ -274,6 +291,7 @@ impl Reply {
                 serde_json::from_value(result).map(Reply::Media)
             }
             Call::AnnotationList { .. } => serde_json::from_value(result).map(Reply::Annotations),
+            Call::AnnotationCheck { .. } => serde_json::from_value(result).map(Reply::Checks),
             Call::PlayheadSet { .. } => serde_json::from_value(result).map(Reply::Playhead),
             Call::ActionPreview { .. } => serde_json::from_value(result).map(Reply::Preview),
             Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {

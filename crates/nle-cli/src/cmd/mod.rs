@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use nle_core::action::{EffectArgs, effect_from_args};
+use nle_core::action::{EffectArgs, ExpectArgs, effect_from_args, expect_from_args};
 use nle_core::timeline::TrackKind;
 use nle_core::{
     Action, Asset, DEFAULT_TRANSITION_FRAMES, Edge, GapLen, Target, TransitionKind, TransitionLen,
@@ -378,7 +378,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             MediaCmd::Rm { id } => Some(Ok(Action::AssetRm { id: *id })),
         },
         Cmd::Annotation { action } => match action {
-            AnnotationCmd::Ls { .. } => None,
+            AnnotationCmd::Ls { .. } | AnnotationCmd::Check { .. } => None,
             AnnotationCmd::Add {
                 text,
                 asset,
@@ -388,8 +388,60 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 at,
                 to,
                 track,
+                expect,
+                tolerance_frames,
+                max_move,
+                no_hold_size,
+                margin,
+                min_coverage,
+                transcript,
+                black,
+                min_frames,
             } => Some((|| {
-                if *timeline {
+                // A check flag is meaningless without the check, so name it
+                // instead of letting clap accept it and quietly ignore it.
+                if expect.is_none() {
+                    let stray = [
+                        (tolerance_frames.is_some(), "--tolerance-frames"),
+                        (max_move.is_some(), "--max-move"),
+                        (*no_hold_size, "--no-hold-size"),
+                        (margin.is_some(), "--margin"),
+                        (min_coverage.is_some(), "--min-coverage"),
+                        (transcript.is_some(), "--transcript"),
+                        (*black, "--black"),
+                        (min_frames.is_some(), "--min-frames"),
+                    ]
+                    .into_iter()
+                    .find_map(|(given, name)| given.then_some(name));
+                    if let Some(name) = stray {
+                        return Err(format!("{name} needs --expect"));
+                    }
+                }
+                if text.is_some() && expect.is_some() {
+                    return Err("use TEXT or --expect, not both".to_string());
+                }
+                let expect = expect
+                    .map(|check| {
+                        expect_from_args(ExpectArgs {
+                            check: check.name().to_string(),
+                            asset: *asset,
+                            group: *group,
+                            tolerance_frames: *tolerance_frames,
+                            max_move_pct_per_sec: *max_move,
+                            no_hold_size: *no_hold_size,
+                            margin_pct: *margin,
+                            min_coverage: *min_coverage,
+                            transcript: transcript.clone(),
+                            black: *black,
+                            min_frames: *min_frames,
+                        })
+                        .map_err(|e| e.to_string())
+                    })
+                    .transpose()?;
+                if expect.is_some() && !*timeline {
+                    return Err("--expect needs --timeline (a render span)".to_string());
+                }
+                if let Some(expect) = expect {
                     let at = at
                         .as_deref()
                         .ok_or("annotation add --timeline needs --at TIME")?;
@@ -397,7 +449,31 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                         track: cli_index(*track, "--track")?,
                         at: cli_time(at)?,
                         to: to.as_deref().map(cli_time).transpose()?,
-                        kind: nle_core::AnnotationKind::Note { text: text.clone() },
+                        kind: nle_core::AnnotationKind::Expectation { expect },
+                    });
+                }
+                let text = text
+                    .as_deref()
+                    .ok_or("annotation add needs TEXT (or --expect CHECK)")?;
+                if *timeline {
+                    // A note is anchored to the timeline; `--asset`/`--group`
+                    // select a check's subject, so carrying them would
+                    // silently ignore the flag.
+                    if asset.is_some() || group.is_some() {
+                        return Err("annotation add --timeline cannot carry --asset/--group — \
+                             drop them, or use --expect for a check"
+                            .to_string());
+                    }
+                    let at = at
+                        .as_deref()
+                        .ok_or("annotation add --timeline needs --at TIME")?;
+                    return Ok(Action::AnnotationAddAt {
+                        track: cli_index(*track, "--track")?,
+                        at: cli_time(at)?,
+                        to: to.as_deref().map(cli_time).transpose()?,
+                        kind: nle_core::AnnotationKind::Note {
+                            text: text.to_string(),
+                        },
                     });
                 }
                 let time = time
@@ -416,7 +492,9 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 };
                 Ok(Action::AnnotationAdd {
                     anchor: nle_core::Anchor::Source { source, time },
-                    kind: nle_core::AnnotationKind::Note { text: text.clone() },
+                    kind: nle_core::AnnotationKind::Note {
+                        text: text.to_string(),
+                    },
                 })
             })()),
             AnnotationCmd::Rm { id } => Some(Ok(Action::AnnotationRemove { id: *id })),
