@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use crate::filmstrip::{FILMSTRIP_ROWS, FilmstripKey};
+use nle_core::expect::CheckResult;
 use nle_core::project::Project;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind};
 use nle_core::track_label;
@@ -661,6 +662,11 @@ pub(crate) fn draw_track_row(
 /// Draw the playhead marker row: red ▏ normally, WHITE exactly on a cut
 /// frame, ▕ at EOF. In extend mode it also carries the workable span
 /// (yellow) and the material extent (dim), with a yellow playhead.
+///
+/// Verdicts from `:annotation check` share the row: a ✓/✗/? sits where the
+/// checked expectation's span starts, drawn from the same quantizer
+/// (`Viewport::col`) and visibility rule as the playhead, which is painted
+/// after and keeps the cell when both land on it.
 pub(crate) fn draw_marker_row(
     f: &mut Frame,
     bar: Rect,
@@ -668,11 +674,41 @@ pub(crate) fn draw_marker_row(
     view: Viewport,
     in_extend: bool,
 ) {
+    if bar.width == 0 {
+        return;
+    }
     let ph = view.col(app.playhead, bar.width);
     let visible =
         app.playhead >= view.start - 1e-9 && app.playhead <= view.start + view.span + 1e-9;
     let at_end = app.eof;
     let mut marker_cells: Vec<(char, Style)> = vec![(' ', Style::default()); bar.width as usize];
+    // The join is by id against the *active* sequence's annotations and its
+    // own verdict map: a result from another sequence, or one whose
+    // annotation has since vanished, has no annotation here and so no cell. A
+    // start off the viewport hides like the playhead instead of piling up on
+    // the edge, and two verdicts on one column keep the most severe — a pass
+    // must never hide a fail.
+    let active = app.project.active_id();
+    let mut verdicts: Vec<Option<CheckResult>> = vec![None; bar.width as usize];
+    if let Some(marks) = app.checks.get(&active) {
+        for annotation in app.project.annotations_for(active) {
+            let Some(mark) = marks.get(&annotation.id) else {
+                continue;
+            };
+            if mark.start < view.start - 1e-9 || mark.start > view.start + view.span + 1e-9 {
+                continue;
+            }
+            let col = view.col(mark.start, bar.width) as usize;
+            if verdicts[col].is_none_or(|seen| rank(mark.result) > rank(seen)) {
+                verdicts[col] = Some(mark.result);
+            }
+        }
+    }
+    for (col, result) in verdicts.into_iter().enumerate() {
+        if let Some(result) = result {
+            marker_cells[col] = check_glyph(result);
+        }
+    }
     if let Mode::Extend(st) = &app.mode {
         let white_here = (app.playhead - st.edge_pos).abs() < 1e-9;
         let color = if white_here {
@@ -733,6 +769,26 @@ pub(crate) fn draw_marker_row(
         marker.push(Span::styled(run, s));
     }
     f.render_widget(Paragraph::new(Line::from(marker)), bar);
+}
+
+/// The marker-row glyph and colour for one verdict: the same ✓/✗/? vocabulary
+/// `format_human` prints, so the row and the log never disagree.
+fn check_glyph(result: CheckResult) -> (char, Style) {
+    match result {
+        CheckResult::Pass => ('✓', Style::default().fg(Color::Green)),
+        CheckResult::Fail => ('✗', Style::default().fg(Color::Red)),
+        CheckResult::Unverifiable => ('?', Style::default().fg(Color::Yellow)),
+    }
+}
+
+/// Severity of a verdict when two land on the same column: `Fail` outranks
+/// `Unverifiable`, which outranks `Pass`.
+fn rank(result: CheckResult) -> u8 {
+    match result {
+        CheckResult::Pass => 0,
+        CheckResult::Unverifiable => 1,
+        CheckResult::Fail => 2,
+    }
 }
 
 /// Paint `glyph` with `style` over the cells spanning `[a, b)` in

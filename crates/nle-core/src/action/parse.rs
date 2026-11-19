@@ -672,7 +672,8 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             let sub = f.positional().ok_or_else(|| {
                 ParseError::Invalid(
                     "usage: :annotation add TEXT (--asset N | --group N) --time T | \
-                     :annotation ls | :annotation rm N | :annotation resolve N"
+                     :annotation ls | :annotation check --report FILE | \
+                     :annotation rm N | :annotation resolve N"
                         .to_string(),
                 )
             })?;
@@ -748,10 +749,12 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     f.finish(":annotation resolve ID")?;
                     Ok(Action::AnnotationResolve { id })
                 }
-                // A read, handled by the front-end (the TUI lists it).
-                "ls" => Err(ParseError::Unknown("annotation".to_string())),
+                // Reads, handled by the front-end: `ls` lists annotations,
+                // `check` evaluates them against a render report. Neither
+                // changes the project, so neither is an action.
+                "ls" | "check" => Err(ParseError::Unknown("annotation".to_string())),
                 other => Err(ParseError::Invalid(format!(
-                    "unknown annotation command {other:?} — use add, ls, rm or resolve"
+                    "unknown annotation command {other:?} — use add, ls, check, rm or resolve"
                 ))),
             }
         }

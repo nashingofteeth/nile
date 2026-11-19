@@ -17,7 +17,7 @@ use super::super::actions::{clip_under, persist_and_refresh, run_action, select_
 use super::super::jobs::{start_import, start_job};
 use super::super::keys::pool::leave_pool_command;
 use super::super::motion::fmt_timecode;
-use super::super::{App, Mode, persist_playhead, secs};
+use super::super::{App, CheckMark, Mode, persist_playhead, secs};
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
@@ -639,10 +639,12 @@ fn note_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
 
 /// `:annotation ls` — a short count in the message line, one line per
 /// annotation in the log. Mutations are catalog actions (`:annotation add`,
-/// `rm`, `resolve`) parsed by `action::parse`.
+/// `rm`, `resolve`) parsed by `action::parse`; `check` evaluates them.
 fn annotation_command(app: &mut App, f: &mut action::Flags) -> String {
-    // `action::parse` owns add/rm/resolve; only `ls` falls through here.
-    f.positional();
+    // `action::parse` owns add/rm/resolve; `ls` and `check` fall through here.
+    if f.positional().as_deref() == Some("check") {
+        return annotation_check_command(app, f);
+    }
     let sequence = match f.take("sequence") {
         Some(value) => match value.parse::<u32>() {
             Ok(id) => id,
@@ -682,6 +684,74 @@ fn annotation_command(app: &mut App, f: &mut action::Flags) -> String {
         "{} annotation(s) on sequence #{sequence} — details in the log",
         annotations.len()
     )
+}
+
+/// `:annotation check --report FILE [--sequence N] [--id N]` — evaluate the
+/// expectations on the report's sequence against a finished render.
+///
+/// A query, not an edit: nothing is written and there is no undo entry or
+/// keybinding. The seam ([`crate::cmd::check::check_with`]) owns the rules;
+/// this only decides how the TUI shows them — every `format_human` line in
+/// the log, its summary in the message line, and the verdicts kept in
+/// [`App::checks`] under the **report's** sequence for the marker row.
+fn annotation_check_command(app: &mut App, f: &mut action::Flags) -> String {
+    const USAGE: &str = "usage: :annotation check --report FILE [--sequence N] [--id N]";
+    let report = match f.take("report") {
+        Some(path) => PathBuf::from(path),
+        None => return USAGE.to_string(),
+    };
+    let sequence = match f.take("sequence") {
+        Some(value) => match value.parse::<u32>() {
+            Ok(id) => Some(id),
+            Err(_) => return format!("--sequence expects a number, got {value:?}"),
+        },
+        None => None,
+    };
+    // Repeatable, like the CLI's ids: `--id 3 --id 5` narrows to those two.
+    let mut ids = Vec::new();
+    for value in f.take_all("id") {
+        match value.parse::<u32>() {
+            Ok(id) => ids.push(id),
+            Err(_) => return format!("--id expects a number, got {value:?}"),
+        }
+    }
+    if let Err(e) = f.finish(USAGE) {
+        return e.to_string();
+    }
+    // A missing/corrupt report or a mismatched sequence is a message, never a
+    // panic: the previous verdicts stay, so a typo does not wipe the marks.
+    let report = match crate::cmd::check::check_with(&app.project, &report, sequence, &ids) {
+        Ok(report) => report,
+        Err(e) => return format!("check failed: {e}"),
+    };
+    let lines = crate::cmd::check::format_human(&report);
+    for line in &lines {
+        crate::log::line(line);
+    }
+    // Keep only what the marker row can place: a verdict whose anchor still
+    // resolves. The row joins these ids against the annotations of whichever
+    // sequence is active, and the key is the report's sequence, so a check
+    // made for another sequence survives a switch and shows when it returns.
+    app.checks.insert(
+        report.sequence(),
+        report
+            .checks()
+            .iter()
+            .filter_map(|check| {
+                let span = check.span?;
+                Some((
+                    check.id,
+                    CheckMark {
+                        result: check.result,
+                        start: secs(&span.start),
+                    },
+                ))
+            })
+            .collect(),
+    );
+    // The last `format_human` line is the summary: reusing it keeps the log
+    // and the message from wording the same counts two different ways.
+    lines.last().cloned().unwrap_or_default()
 }
 
 /// `:show` — the summary line; the full segment dump goes to the log.

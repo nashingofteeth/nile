@@ -224,6 +224,9 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
         _ => app.playhead,
     };
     let playhead_before = app.playhead;
+    // The sequence this action applies to, before it can change the active
+    // one (undoing a `:sequence use` does).
+    let active_before = app.project.active_id();
     match app.project.apply_action(action, from) {
         Ok(outcome) => {
             // The one landing policy: the action's own frame, else the media
@@ -244,6 +247,10 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
                 app.follow_timeline();
             }
             if outcome.changed {
+                // The report described this sequence before the edit, so its
+                // verdicts can no longer be trusted for it. Other sequences
+                // did not change and keep theirs.
+                app.checks.remove(&active_before);
                 let removed = removed_material(&stamp, &timeline_stamp(&app.project));
                 if let Some(act) = reaction_for(action, removed, speed_before) {
                     app.croc.play(act);
