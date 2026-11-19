@@ -2323,27 +2323,31 @@ fn a_cli_edit_keeps_the_stored_playhead_inside_the_timeline() {
     );
 }
 
-// A LUT path crosses two parsers: `:` splits filter options and `'` closes the
-// graph quote, so each needs its own escape. The unit test pins the emitted
-// string; only a real ffmpeg run proves the string parses.
+// A LUT path crosses two parsers: `:` splits filter options, `,` separates
+// option values and `'` closes the graph quote, so each needs its own escape.
+// The unit test pins the emitted string; only a real ffmpeg run proves the
+// string parses, and a comma needs a different escape from the others.
 #[test]
 fn a_lut_path_with_metacharacters_exports() {
-    let s = Sandbox::new();
-    s.base();
-    let lut = s.file("a:b'c[;x].cube");
-    std::fs::write(
-        &lut,
-        "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
-    )
-    .expect("write the LUT");
-    s.ok(&[
-        "effect",
-        "lut",
-        "--clip",
-        "1",
-        "--path",
-        lut.to_str().expect("utf-8 path"),
-    ]);
-    s.ok(&["export", "-o", "lut.mp4"]);
-    s.assert_dur("lut.mp4", 6.0, "the export parses the escaped path");
+    const CUBE: &str = "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    for name in ["a:b'c[;x].cube", "a,b:c'[;x].cube"] {
+        let s = Sandbox::new();
+        s.base();
+        let lut = s.file(name);
+        std::fs::write(&lut, CUBE).expect("write the LUT");
+        s.ok(&[
+            "effect",
+            "lut",
+            "--clip",
+            "1",
+            "--path",
+            lut.to_str().expect("utf-8 path"),
+        ]);
+        s.ok(&["export", "-o", "lut.mp4"]);
+        s.assert_dur(
+            "lut.mp4",
+            6.0,
+            &format!("the export parses the escaped path {name:?}"),
+        );
+    }
 }
