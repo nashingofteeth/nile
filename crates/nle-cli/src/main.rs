@@ -390,7 +390,7 @@ enum Cmd {
         #[command(subcommand)]
         action: GroupCmd,
     },
-    /// Notes and markers anchored to source media
+    /// Notes, markers and render expectations
     Annotation {
         #[command(subcommand)]
         action: AnnotationCmd,
@@ -635,27 +635,32 @@ enum MediaCmd {
 /// Annotation subcommands.
 #[derive(Debug, Subcommand)]
 enum AnnotationCmd {
-    /// Add a note anchored to a source time or a timeline position
+    /// Add a note anchored to a source time or timeline position, or an
+    /// expectation a finished render must satisfy
     Add {
-        /// Note text
-        text: String,
-        /// Source asset id (from `nile media ls`)
+        /// Note text (omit with --expect)
+        #[arg(required_unless_present = "expect")]
+        text: Option<String>,
+        /// Source asset id (from `nile media ls`), or the cam/absent/no-sliver
+        /// subject
         #[arg(long, group = "source")]
         asset: Option<u32>,
-        /// Media group id; --time is then on the group clock
+        /// Media group id; --time is then on the group clock, or the
+        /// cam/absent subject
         #[arg(long, group = "source")]
         group: Option<u32>,
         /// Source time (seconds or timecode)
         #[arg(long, value_name = "TIME", required_unless_present = "timeline")]
         time: Option<String>,
-        /// Anchor to the timeline clip under --at instead of a source time
-        #[arg(long, conflicts_with_all = ["asset", "group", "time"])]
+        /// Anchor to the timeline clip under --at instead of a source time;
+        /// required for --expect
+        #[arg(long, conflicts_with = "time")]
         timeline: bool,
         /// Timeline position to pin (with --timeline)
         #[arg(
             long,
             value_name = "TIME",
-            conflicts_with_all = ["asset", "group", "time"],
+            conflicts_with = "time",
             requires = "timeline"
         )]
         at: Option<String>,
@@ -663,19 +668,68 @@ enum AnnotationCmd {
         #[arg(
             long,
             value_name = "TIME",
-            conflicts_with_all = ["asset", "group", "time"],
+            conflicts_with = "time",
             requires = "timeline"
         )]
         to: Option<String>,
         /// Track for --timeline (1-based; default 1)
         #[arg(long, value_name = "N", default_value_t = 1)]
         track: usize,
+        /// Write a check a finished render must satisfy (needs --timeline)
+        #[arg(
+            long,
+            value_enum,
+            value_name = "CHECK",
+            conflicts_with = "text",
+            requires = "timeline"
+        )]
+        expect: Option<ExpectCheck>,
+        /// cam/absent: frames trimmed from each end before checking (default 0)
+        #[arg(long, value_name = "N")]
+        tolerance_frames: Option<i64>,
+        /// crop-stable: maximum crop movement, percent per second (default 25)
+        #[arg(long, value_name = "P")]
+        max_move: Option<f64>,
+        /// crop-stable: a panning crop must not change size (default: hold)
+        #[arg(long)]
+        no_hold_size: bool,
+        /// work-in-frame: percent of the picture kept on every side (default 5)
+        #[arg(long, value_name = "P")]
+        margin: Option<f64>,
+        /// words-complete: fraction of checked frames that must carry audio
+        /// (default 1.0)
+        #[arg(long, value_name = "F")]
+        min_coverage: Option<f64>,
+        /// words-complete: named transcript (no store yet: unverifiable)
+        #[arg(long, value_name = "NAME")]
+        transcript: Option<String>,
+        /// absent: also refuse black frames (and a blend's black side)
+        #[arg(long)]
+        black: bool,
+        /// no-sliver: shortest visible run, in frames (default 2)
+        #[arg(long, value_name = "N")]
+        min_frames: Option<i64>,
     },
     /// List annotations (id, status, anchor, text)
     Ls {
         /// Sequence id (default: the active one)
         #[arg(long)]
         sequence: Option<u32>,
+    },
+    /// Check a render's report against the sequence's expectations
+    Check {
+        /// The exported video (or its .report.json)
+        #[arg(long, value_name = "FILE")]
+        report: PathBuf,
+        /// Sequence id (default: the report's own)
+        #[arg(long)]
+        sequence: Option<u32>,
+        /// Only these annotation ids (repeatable)
+        #[arg(long = "id", value_name = "N")]
+        id: Vec<u32>,
+        /// Print the check report as JSON (also when a check fails)
+        #[arg(long)]
+        json: bool,
     },
     /// Remove an annotation
     Rm {
@@ -687,6 +741,37 @@ enum AnnotationCmd {
         /// Annotation id
         id: u32,
     },
+}
+
+/// The `--expect` checks, spelled like the check's wire name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ExpectCheck {
+    /// Every checked frame shows this asset (or a member of this group)
+    Cam,
+    /// The crop window never moves faster than --max-move and keeps its size
+    CropStable,
+    /// Every crop keeps --margin percent of the picture on every side
+    WorkInFrame,
+    /// The checked span carries audio for --min-coverage of its frames
+    WordsComplete,
+    /// Nothing named appears (and, with --black, no black frame either)
+    Absent,
+    /// No visible run is shorter than --min-frames
+    NoSliver,
+}
+
+impl ExpectCheck {
+    /// The model spelling (`crop_stable`), not the clap spelling.
+    fn name(self) -> &'static str {
+        match self {
+            ExpectCheck::Cam => "cam",
+            ExpectCheck::CropStable => "crop_stable",
+            ExpectCheck::WorkInFrame => "work_in_frame",
+            ExpectCheck::WordsComplete => "words_complete",
+            ExpectCheck::Absent => "absent",
+            ExpectCheck::NoSliver => "no_sliver",
+        }
+    }
 }
 
 /// Media-group subcommands.
@@ -796,6 +881,7 @@ impl From<EncoderArg> for Encoder {
     }
 }
 
+use cmd::check::cmd_annotation_check;
 use cmd::detect::{DetectArgs, cmd_detect_edits};
 use cmd::export::{ExportOptions, QualityPreset, cmd_export};
 use cmd::import::{EdlImport, GroupSpec, OtioImport, cmd_import, cmd_import_edl, cmd_import_otio};
@@ -889,6 +975,15 @@ fn main() -> Result<()> {
         Cmd::Annotation {
             action: AnnotationCmd::Ls { sequence },
         } => return cmd_annotation_ls(&project, *sequence),
+        Cmd::Annotation {
+            action:
+                AnnotationCmd::Check {
+                    report,
+                    sequence,
+                    id,
+                    json,
+                },
+        } => return cmd_annotation_check(&project, report, *sequence, id, *json),
         Cmd::Report { .. } => unreachable!("handled before project resolution"),
         Cmd::ImportEdl {
             file,
@@ -1240,7 +1335,7 @@ mod tests {
             },
             Cmd::Annotation {
                 action: AnnotationCmd::Add {
-                    text: "hi".into(),
+                    text: Some("hi".into()),
                     asset: Some(1),
                     group: None,
                     time: Some("0".into()),
@@ -1248,11 +1343,20 @@ mod tests {
                     at: None,
                     to: None,
                     track: 1,
+                    expect: None,
+                    tolerance_frames: None,
+                    max_move: None,
+                    no_hold_size: false,
+                    margin: None,
+                    min_coverage: None,
+                    transcript: None,
+                    black: false,
+                    min_frames: None,
                 },
             },
             Cmd::Annotation {
                 action: AnnotationCmd::Add {
-                    text: "pin".into(),
+                    text: Some("pin".into()),
                     asset: None,
                     group: None,
                     time: None,
@@ -1260,6 +1364,15 @@ mod tests {
                     at: Some("1".into()),
                     to: None,
                     track: 1,
+                    expect: None,
+                    tolerance_frames: None,
+                    max_move: None,
+                    no_hold_size: false,
+                    margin: None,
+                    min_coverage: None,
+                    transcript: None,
+                    black: false,
+                    min_frames: None,
                 },
             },
             Cmd::Annotation {
@@ -1476,7 +1589,7 @@ mod tests {
         );
         let cmd = Cmd::Annotation {
             action: AnnotationCmd::Add {
-                text: "range".into(),
+                text: Some("range".into()),
                 asset: None,
                 group: None,
                 time: None,
@@ -1484,6 +1597,15 @@ mod tests {
                 at: Some("1".into()),
                 to: Some("2".into()),
                 track: 1,
+                expect: None,
+                tolerance_frames: None,
+                max_move: None,
+                no_hold_size: false,
+                margin: None,
+                min_coverage: None,
+                transcript: None,
+                black: false,
+                min_frames: None,
             },
         };
         assert_eq!(
@@ -1847,5 +1969,340 @@ mod tests {
     fn an_empty_needle_never_fuzzy_matches() {
         let p = pool(&["/media/a.mp4", "/media/b.mp4"]);
         assert_eq!(match_asset(&p, ""), None);
+    }
+
+    /// Parse one argv through clap, without requiring it to be an action.
+    fn try_clap(argv: &[&str]) -> Result<Cli, clap::Error> {
+        let mut full = vec!["nile"];
+        full.extend_from_slice(argv);
+        Cli::try_parse_from(&full)
+    }
+
+    /// A clap-valid command whose `to_action` mapping refuses it.
+    fn action_error(argv: &[&str]) -> String {
+        let cli = try_clap(argv).unwrap_or_else(|e| panic!("clap {argv:?}: {e}"));
+        to_action(&cli.command)
+            .unwrap_or_else(|| panic!("{argv:?} is not an edit command"))
+            .unwrap_err()
+    }
+
+    /// `--expect` is one grammar for six checks: the clap spelling and the
+    /// shared `ExpectArgs` mapping must land on the model's payload, taking
+    /// the core defaults for an omitted flag.
+    #[test]
+    fn expect_checks_parse_and_take_the_core_defaults() {
+        let expectation = |argv: &[&str]| match clap_action(argv) {
+            Action::AnnotationAddAt {
+                kind: nle_core::AnnotationKind::Expectation { expect },
+                ..
+            } => expect,
+            other => panic!("{argv:?} parsed as {other:?}"),
+        };
+
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "cam",
+                "--timeline",
+                "--at",
+                "1",
+                "--asset",
+                "2",
+            ]),
+            nle_core::Expectation::Cam {
+                asset: Some(2),
+                group: None,
+                tolerance_frames: 0,
+            }
+        );
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "cam",
+                "--timeline",
+                "--at",
+                "1",
+                "--group",
+                "3",
+                "--tolerance-frames",
+                "4",
+            ]),
+            nle_core::Expectation::Cam {
+                asset: None,
+                group: Some(3),
+                tolerance_frames: 4,
+            }
+        );
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "crop-stable",
+                "--timeline",
+                "--at",
+                "1",
+            ]),
+            nle_core::Expectation::CropStable {
+                max_move_pct_per_sec: 25.0,
+                hold_size: true,
+            }
+        );
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "crop-stable",
+                "--timeline",
+                "--at",
+                "1",
+                "--max-move",
+                "10",
+                "--no-hold-size",
+            ]),
+            nle_core::Expectation::CropStable {
+                max_move_pct_per_sec: 10.0,
+                hold_size: false,
+            }
+        );
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "work-in-frame",
+                "--timeline",
+                "--at",
+                "1",
+            ]),
+            nle_core::Expectation::WorkInFrame { margin_pct: 5.0 }
+        );
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "words-complete",
+                "--timeline",
+                "--at",
+                "1",
+            ]),
+            nle_core::Expectation::WordsComplete {
+                min_coverage: 1.0,
+                transcript: None,
+            }
+        );
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "absent",
+                "--timeline",
+                "--at",
+                "1",
+                "--black",
+            ]),
+            nle_core::Expectation::Absent {
+                asset: None,
+                group: None,
+                black: true,
+                tolerance_frames: 0,
+            }
+        );
+        assert_eq!(
+            expectation(&[
+                "annotation",
+                "add",
+                "--expect",
+                "no-sliver",
+                "--timeline",
+                "--at",
+                "1",
+                "--asset",
+                "1",
+            ]),
+            nle_core::Expectation::NoSliver {
+                min_frames: 2,
+                asset: Some(1),
+            }
+        );
+        // `--to` makes the expectation a range, exactly like a note.
+        match clap_action(&[
+            "annotation",
+            "add",
+            "--expect",
+            "cam",
+            "--timeline",
+            "--at",
+            "1",
+            "--to",
+            "2",
+            "--asset",
+            "1",
+        ]) {
+            Action::AnnotationAddAt { at, to, .. } => {
+                assert_eq!(at, 1.0);
+                assert_eq!(to, Some(2.0));
+            }
+            other => panic!("expect range parsed as {other:?}"),
+        }
+    }
+
+    /// A check flag belongs to one check; passing it to another (or to a
+    /// note) is refused instead of silently dropped.
+    #[test]
+    fn expect_flags_reject_the_wrong_check_and_the_wrong_anchor() {
+        let note_with_black = Cmd::Annotation {
+            action: AnnotationCmd::Add {
+                text: Some("hi".into()),
+                asset: Some(1),
+                group: None,
+                time: Some("0".into()),
+                timeline: false,
+                at: None,
+                to: None,
+                track: 1,
+                expect: None,
+                tolerance_frames: None,
+                max_move: None,
+                no_hold_size: false,
+                margin: None,
+                min_coverage: None,
+                transcript: None,
+                black: true,
+                min_frames: None,
+            },
+        };
+        let err = to_action(&note_with_black).unwrap().unwrap_err();
+        assert!(err.contains("--black needs --expect"), "{err}");
+
+        let err = action_error(&[
+            "annotation",
+            "add",
+            "--expect",
+            "cam",
+            "--timeline",
+            "--at",
+            "1",
+            "--asset",
+            "1",
+            "--black",
+        ]);
+        assert!(
+            err.contains("--black does not apply to the cam check"),
+            "{err}"
+        );
+
+        let err = action_error(&[
+            "annotation",
+            "add",
+            "pin",
+            "--timeline",
+            "--at",
+            "1",
+            "--asset",
+            "1",
+        ]);
+        assert!(err.contains("cannot carry --asset"), "{err}");
+    }
+
+    /// clap owns the usage-level refusals (exit 2), the mapping owns the
+    /// rest: neither may accept a half-specified expectation.
+    #[test]
+    fn clap_refuses_text_with_expect_and_expect_without_timeline() {
+        assert!(
+            try_clap(&[
+                "annotation",
+                "add",
+                "note",
+                "--expect",
+                "cam",
+                "--timeline",
+                "--at",
+                "1",
+                "--asset",
+                "1",
+            ])
+            .is_err(),
+            "text and --expect conflict"
+        );
+        assert!(
+            try_clap(&[
+                "annotation",
+                "add",
+                "--expect",
+                "cam",
+                "--at",
+                "1",
+                "--asset",
+                "1",
+            ])
+            .is_err(),
+            "--expect needs --timeline"
+        );
+        assert!(
+            try_clap(&["annotation", "add", "--timeline", "--at", "1"]).is_err(),
+            "a note still needs TEXT"
+        );
+
+        // `to_action` is also called with hand-built values; it must refuse
+        // an expectation with no timeline rather than invent one.
+        let cmd = Cmd::Annotation {
+            action: AnnotationCmd::Add {
+                text: None,
+                asset: Some(1),
+                group: None,
+                time: None,
+                timeline: false,
+                at: Some("1".into()),
+                to: None,
+                track: 1,
+                expect: Some(ExpectCheck::Cam),
+                tolerance_frames: None,
+                max_move: None,
+                no_hold_size: false,
+                margin: None,
+                min_coverage: None,
+                transcript: None,
+                black: false,
+                min_frames: None,
+            },
+        };
+        let err = to_action(&cmd).unwrap().unwrap_err();
+        assert!(err.contains("--expect needs --timeline"), "{err}");
+    }
+
+    /// `check` names its report with `--report`, matching the `:cmd` grammar
+    /// the TUI will use; a positional is not accepted.
+    #[test]
+    fn annotation_check_takes_the_report_as_a_flag() {
+        assert!(
+            try_clap(&[
+                "annotation",
+                "check",
+                "--report",
+                "out.mp4",
+                "--sequence",
+                "1",
+                "--id",
+                "3",
+                "--json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            try_clap(&["annotation", "check", "out.mp4"]).is_err(),
+            "the report is a --report flag, not a positional"
+        );
+        assert!(
+            try_clap(&["annotation", "check"]).is_err(),
+            "--report is required"
+        );
     }
 }

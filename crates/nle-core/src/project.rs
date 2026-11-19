@@ -14,6 +14,7 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::annotation::{Anchor, Annotation, AnnotationKind, SourceRef};
+use crate::expect::Expectation;
 use crate::group::{MediaGroup, MediaPart};
 use crate::media::RawProbe;
 use crate::provenance::Provenance;
@@ -32,9 +33,9 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// v11 moves fps/video/timeline/playhead onto one or more `Sequence`s;
 /// v12 adds logical media groups; v13 adds annotations; v14 adds
 /// clip-relative timeline anchors; v15 stores crop as a window; v16 adds
-/// crop keyframes and (additively) the `expectation` annotation payload;
-/// writing expectations will bump the version once a front-end can.
-pub const PROJECT_VERSION: u32 = 16;
+/// crop keyframes; v17 adds the `expectation` annotation payload (a typed
+/// check a render must satisfy) and the CLI that writes and runs it.
+pub const PROJECT_VERSION: u32 = 17;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -246,6 +247,27 @@ impl DerefMut for Project {
 impl Default for Project {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Does `expect` name asset `id` among its selectors? The `cam`, `absent`
+/// and `no_sliver` payloads are the ones with an asset subject; a group
+/// selector reaches its assets through [`expectation_names_group`], not here.
+fn expectation_names_asset(expect: &Expectation, id: u32) -> bool {
+    match expect {
+        Expectation::Cam { asset, .. }
+        | Expectation::Absent { asset, .. }
+        | Expectation::NoSliver { asset, .. } => *asset == Some(id),
+        _ => false,
+    }
+}
+
+/// Does `expect` name media group `id` among its selectors? Only `cam` and
+/// `absent` take a group; `no_sliver` filters by asset alone.
+fn expectation_names_group(expect: &Expectation, id: u32) -> bool {
+    match expect {
+        Expectation::Cam { group, .. } | Expectation::Absent { group, .. } => *group == Some(id),
+        _ => false,
     }
 }
 
@@ -809,7 +831,8 @@ impl Project {
         self.annotations.splice(at..at, annotations);
     }
 
-    /// Annotation ids that anchor directly to asset `id`.
+    /// Annotation ids that anchor directly to asset `id`, or whose expectation
+    /// names it as a check selector.
     pub fn asset_annotation_usage(&self, id: u32) -> Vec<u32> {
         self.annotations
             .iter()
@@ -820,13 +843,17 @@ impl Project {
                         source: SourceRef::Asset { id: asset },
                         ..
                     } if *asset == id
+                ) || matches!(
+                    &a.kind,
+                    AnnotationKind::Expectation { expect } if expectation_names_asset(expect, id)
                 )
             })
             .map(|a| a.id)
             .collect()
     }
 
-    /// Annotation ids that anchor to media group `id`.
+    /// Annotation ids that anchor to media group `id`, or whose expectation
+    /// names it as a check selector.
     pub fn group_annotation_usage(&self, id: u32) -> Vec<u32> {
         self.annotations
             .iter()
@@ -837,6 +864,9 @@ impl Project {
                         source: SourceRef::Group { id: group },
                         ..
                     } if *group == id
+                ) || matches!(
+                    &a.kind,
+                    AnnotationKind::Expectation { expect } if expectation_names_group(expect, id)
                 )
             })
             .map(|a| a.id)
@@ -921,6 +951,46 @@ impl Project {
             }
             if let Some(reason) = expect.validation_error() {
                 return Err(ProjectError::Annotation(annotation.id, reason.to_string()));
+            }
+            // A selector names a project object by id; a hand-edited file (or
+            // a stale CLI argument) must not leave a check pointing at an
+            // asset/group that no longer exists. Runs on add and on load.
+            let check_asset = |asset: u32| {
+                if self.asset(asset).is_none() {
+                    return Err(ProjectError::Annotation(
+                        annotation.id,
+                        format!("asset #{asset} not found"),
+                    ));
+                }
+                Ok(())
+            };
+            let check_group = |group: u32| {
+                if self.group(group).is_none() {
+                    return Err(ProjectError::Annotation(
+                        annotation.id,
+                        format!("media group #{group} not found"),
+                    ));
+                }
+                Ok(())
+            };
+            match expect {
+                Expectation::Cam { asset, group, .. }
+                | Expectation::Absent { asset, group, .. } => {
+                    if let Some(asset) = asset {
+                        check_asset(*asset)?;
+                    }
+                    if let Some(group) = group {
+                        check_group(*group)?;
+                    }
+                }
+                Expectation::NoSliver { asset, .. } => {
+                    if let Some(asset) = asset {
+                        check_asset(*asset)?;
+                    }
+                }
+                Expectation::CropStable { .. }
+                | Expectation::WorkInFrame { .. }
+                | Expectation::WordsComplete { .. } => {}
             }
         }
         match &annotation.anchor {
@@ -1498,7 +1568,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 16);
+        assert_eq!(PROJECT_VERSION, 17);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);
@@ -2048,6 +2118,193 @@ mod tests {
                 if id == group && ids == &vec![group_annotation]
         ));
         assert!(p.group(group).is_some(), "the group survives the refusal");
+    }
+
+    /// A selector names a project object by id: add and load both refuse a
+    /// stale reference instead of evaluating a check that can never resolve.
+    #[test]
+    fn expectation_selectors_must_name_pooled_media() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (asset, _) = p.add_asset(
+            "/media/cam.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            asset,
+            Seconds::from_integer(0),
+            Seconds::from_integer(2),
+        ))];
+        let anchor = || Anchor::Timeline {
+            start: ClipPoint {
+                clip: 1,
+                source: Seconds::from_integer(0),
+            },
+            end: ClipPoint {
+                clip: 1,
+                source: Seconds::from_integer(1),
+            },
+        };
+        let expectation = |expect| AnnotationKind::Expectation { expect };
+
+        for (expect, message) in [
+            (
+                Expectation::Cam {
+                    asset: Some(99),
+                    group: None,
+                    tolerance_frames: 0,
+                },
+                "asset #99 not found",
+            ),
+            (
+                Expectation::Absent {
+                    asset: None,
+                    group: Some(99),
+                    black: false,
+                    tolerance_frames: 0,
+                },
+                "media group #99 not found",
+            ),
+            (
+                Expectation::NoSliver {
+                    min_frames: 2,
+                    asset: Some(99),
+                },
+                "asset #99 not found",
+            ),
+        ] {
+            let err = p
+                .add_annotation(1, expectation(expect), anchor(), provenance())
+                .unwrap_err();
+            assert!(
+                matches!(err, ProjectError::Annotation(_, ref e) if e == message),
+                "{err}"
+            );
+        }
+
+        // The pooled asset is accepted.
+        let id = p
+            .add_annotation(
+                1,
+                expectation(Expectation::Cam {
+                    asset: Some(asset),
+                    group: None,
+                    tolerance_frames: 0,
+                }),
+                anchor(),
+                provenance(),
+            )
+            .unwrap();
+        assert!(p.annotation(id).is_some());
+
+        // A hand-edited file is refused on load with the same message.
+        let mut value = serde_json::to_value(&p).unwrap();
+        value["annotations"][0]["kind"]["expect"]["asset"] = serde_json::json!(99);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nile.json");
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let err = Project::load(&path).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Annotation(_, ref e) if e == "asset #99 not found"),
+            "{err}"
+        );
+    }
+
+    /// A selector is a use: `media rm`/`group rm` refuse an expectation's
+    /// subject exactly like a source anchor, whatever the annotation status.
+    #[test]
+    fn expectation_selectors_guard_asset_and_group_removal() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (used, _) = p.add_asset(
+            "/media/used.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        let (spare, _) = p.add_asset(
+            "/media/spare.mp4".into(),
+            probe_report("2", 320, 240, "30/1", false),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            used,
+            Seconds::from_integer(0),
+            Seconds::from_integer(2),
+        ))];
+        let anchor = || Anchor::Timeline {
+            start: ClipPoint {
+                clip: 1,
+                source: Seconds::from_integer(0),
+            },
+            end: ClipPoint {
+                clip: 1,
+                source: Seconds::from_integer(1),
+            },
+        };
+        let cam_asset = p
+            .add_annotation(
+                1,
+                AnnotationKind::Expectation {
+                    expect: Expectation::Cam {
+                        asset: Some(spare),
+                        group: None,
+                        tolerance_frames: 0,
+                    },
+                },
+                anchor(),
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(p.asset_annotation_usage(spare), vec![cam_asset]);
+        assert!(matches!(
+            p.remove_asset(spare),
+            Err(ProjectError::AssetInAnnotation(id, ref ids))
+                if id == spare && ids == &vec![cam_asset]
+        ));
+
+        let group = p
+            .add_group(
+                "CAM 3",
+                vec![MediaPart {
+                    asset: spare,
+                    group_start: Seconds::from_integer(0),
+                    file_start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(2),
+                }],
+            )
+            .unwrap();
+        let cam_group = p
+            .add_annotation(
+                1,
+                AnnotationKind::Expectation {
+                    expect: Expectation::Cam {
+                        asset: None,
+                        group: Some(group),
+                        tolerance_frames: 0,
+                    },
+                },
+                anchor(),
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(p.group_annotation_usage(group), vec![cam_group]);
+        assert!(matches!(
+            p.remove_group(group),
+            Err(ProjectError::GroupInAnnotation(id, ref ids))
+                if id == group && ids == &vec![cam_group]
+        ));
+
+        // Removing the check releases the group, then the asset (still named
+        // by the first expectation) stays refused until that one goes too.
+        p.remove_annotation(cam_group).unwrap();
+        p.remove_group(group).unwrap();
+        assert!(matches!(
+            p.remove_asset(spare),
+            Err(ProjectError::AssetInAnnotation(id, ref ids))
+                if id == spare && ids == &vec![cam_asset]
+        ));
+        p.remove_annotation(cam_asset).unwrap();
+        assert!(p.remove_asset(spare).is_ok());
     }
 
     #[test]
