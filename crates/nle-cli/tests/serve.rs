@@ -1108,3 +1108,209 @@ fn annotation_list_and_add_over_the_protocol() {
     assert!(status.success(), "nile serve exited: {status:?}");
     assert!(sandbox.ok(&["annotation", "ls"]).contains("check the cut"));
 }
+
+#[test]
+fn annotation_check_reads_a_report_without_writing() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    // Export before serving: the report is an artifact of a render, and the
+    // read must work on whatever is on disk.
+    sandbox.export("out.mp4");
+    let out = sandbox.file("out.mp4");
+    let out_text = out.display().to_string();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    // One expectation covering the first clip (red, asset #1) at 0–2 s.
+    let applied = call(
+        &mut serve,
+        2,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "actions": [{
+                "action": "annotation_add_at",
+                "track": 0,
+                "at": 0.0,
+                "to": 2.0,
+                "kind": {
+                    "kind": "expectation",
+                    "expect": {"check": "cam", "asset": 1}
+                }
+            }]
+        })),
+    );
+    assert_eq!(applied["result"]["depth"], 1);
+    let after = applied["result"]["revision"].as_u64().expect("revision");
+    assert_eq!(after, revision + 1);
+    let event = serve.read();
+    assert_eq!(event["method"], "project.changed");
+
+    let listed = call(&mut serve, 3, "annotation.list", None);
+    let id = listed["result"]["annotations"][0]["id"]
+        .as_u64()
+        .expect("annotation id");
+
+    // A relative path is refused even when it names the file beside the
+    // server's cwd: the server cannot know the client's cwd.
+    let relative = call(
+        &mut serve,
+        4,
+        "annotation.check",
+        Some(json!({"report": "out.mp4"})),
+    );
+    assert_eq!(relative["error"]["code"], -32602);
+    assert!(
+        relative["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("must be absolute"),
+        "{relative}"
+    );
+
+    // Absolute report named as the exported video; sequence and id omitted.
+    let checked = call(
+        &mut serve,
+        5,
+        "annotation.check",
+        Some(json!({"report": out_text})),
+    );
+    assert_eq!(checked["result"]["report"]["sequence"], 1);
+    assert!(
+        checked["result"]["report"]["frame_count"]
+            .as_i64()
+            .is_some_and(|frames| frames > 0),
+        "{checked}"
+    );
+    assert_eq!(checked["result"]["checks"][0]["id"], id);
+    assert_eq!(checked["result"]["checks"][0]["check"], "cam");
+    assert_eq!(checked["result"]["checks"][0]["status"], "open");
+    assert_eq!(checked["result"]["checks"][0]["result"], "pass");
+    assert_eq!(checked["result"]["checks"][0]["frames"], json!([0, 60]));
+    assert!(
+        checked["result"]["checks"][0].get("detail").is_none(),
+        "a clean pass has no caveat: {checked}"
+    );
+    assert_eq!(
+        checked["result"]["summary"],
+        json!({"pass": 1, "fail": 0, "unverifiable": 0})
+    );
+
+    // The sidecar path is the other accepted spelling.
+    let from_sidecar = call(
+        &mut serve,
+        6,
+        "annotation.check",
+        Some(json!({"report": format!("{out_text}.report.json"), "sequence": 1})),
+    );
+    assert_eq!(from_sidecar["result"], checked["result"]);
+
+    // An id filter selects one annotation; a stale id selects nothing.
+    let one = call(
+        &mut serve,
+        7,
+        "annotation.check",
+        Some(json!({"report": out_text, "id": [id]})),
+    );
+    assert_eq!(one["result"]["checks"].as_array().expect("checks").len(), 1);
+    let none = call(
+        &mut serve,
+        8,
+        "annotation.check",
+        Some(json!({"report": out_text, "id": [99]})),
+    );
+    assert!(
+        none["result"]["checks"]
+            .as_array()
+            .expect("checks")
+            .is_empty()
+    );
+    assert_eq!(none["result"]["summary"]["pass"], 0);
+
+    // The typed helper decodes the same reply.
+    let typed = {
+        let mut client = serve.client();
+        client
+            .checks(out.clone(), Some(1), Vec::new())
+            .expect("typed checks")
+    };
+    assert_eq!(
+        serde_json::to_value(&typed).expect("check report json"),
+        checked["result"]
+    );
+
+    // A read leaves the model alone: no revision bump, no undo entry and no
+    // event. Reading hello here also proves no event was queued — it would
+    // have arrived before this response.
+    let after_read = call(&mut serve, 9, "hello", None);
+    assert_eq!(after_read["result"]["revision"], after);
+    assert_eq!(after_read["result"]["depth"], 1);
+
+    // A report of another sequence is refused, not answered with a fake pass.
+    let mismatch = call(
+        &mut serve,
+        10,
+        "annotation.check",
+        Some(json!({"report": out_text, "sequence": 2})),
+    );
+    assert_eq!(mismatch["error"]["code"], -32602);
+    let message = mismatch["error"]["message"]
+        .as_str()
+        .expect("error message");
+    assert!(message.contains("#2"), "{message}");
+    assert!(message.contains("#1"), "{message}");
+
+    // A missing report is the request's fault, not a server failure.
+    let missing = call(
+        &mut serve,
+        11,
+        "annotation.check",
+        Some(json!({"report": sandbox.file("missing.mp4").display().to_string()})),
+    );
+    assert_eq!(missing["error"]["code"], -32602);
+    assert!(
+        missing["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("does not exist"),
+        "{missing}"
+    );
+
+    // Refusals are reads too: serving continues, and the next call answers.
+    let show = call(&mut serve, 12, "project.show", None);
+    assert_eq!(show["result"]["revision"], after);
+
+    let status = serve.finish();
+    assert!(status.success(), "nile serve exited: {status:?}");
+
+    // From a cwd that does not hold the artifact, a relative path is still
+    // refused and the absolute one still resolves to the same file.
+    std::fs::create_dir_all(sandbox.file("elsewhere")).expect("mkdir");
+    let mut elsewhere = sandbox.serve_in(&sandbox.file("elsewhere"));
+    let relative = call(
+        &mut elsewhere,
+        1,
+        "annotation.check",
+        Some(json!({"report": "out.mp4"})),
+    );
+    assert_eq!(relative["error"]["code"], -32602);
+    assert!(
+        relative["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("must be absolute"),
+        "{relative}"
+    );
+    let absolute = call(
+        &mut elsewhere,
+        2,
+        "annotation.check",
+        Some(json!({"report": out_text})),
+    );
+    assert_eq!(absolute["result"]["checks"][0]["result"], "pass");
+    assert_eq!(absolute["result"], checked["result"]);
+    let status = elsewhere.finish();
+    assert!(status.success(), "nile serve exited: {status:?}");
+}
