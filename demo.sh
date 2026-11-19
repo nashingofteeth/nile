@@ -285,7 +285,10 @@ for t in 0.5 1.5 2.5 3.5; do
   printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
 done
 rm -f pixel.raw
-detect_gaps=$($N --project checks/detect.json show | grep -c 'gap' || true)
+# Whitespace-anchored: a checkout path may contain "gaps" or be a directory
+# literally named "gap", and every clip row repeats its path.
+detect_gaps=$($N --project checks/detect.json show \
+  | grep -cE '(^|[[:space:]])gap([[:space:]]|$)' || true)
 if [ "$detect_gaps" -eq 2 ]; then
   echo "  ✓ black span recovered as one gap (video + mirrored audio)"
 else
