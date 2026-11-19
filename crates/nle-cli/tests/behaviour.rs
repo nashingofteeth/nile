@@ -705,7 +705,13 @@ fn gaps_insert_merge_delete() {
     s.base();
     s.ok(&["gap", "--at", "2", "--frames", "30"]);
     s.ok(&["gap", "--at", "3", "--frames", "30"]);
-    let gaps = s.show().matches("gap").count();
+    // Count the row's `gap` token, not a substring: a checkout path can itself
+    // contain "gap" (`test-review-gaps`), which every clip path repeats.
+    let gaps = s
+        .show()
+        .lines()
+        .filter(|line| line.split_whitespace().any(|word| word == "gap"))
+        .count();
     assert_eq!(gaps, 1, "adjacent gaps coalesced ({gaps} gap rows)");
 
     s.base();
@@ -2317,27 +2323,77 @@ fn a_cli_edit_keeps_the_stored_playhead_inside_the_timeline() {
     );
 }
 
-// A LUT path crosses two parsers: `:` splits filter options and `'` closes the
-// graph quote, so each needs its own escape. The unit test pins the emitted
-// string; only a real ffmpeg run proves the string parses.
+// A LUT path crosses two parsers: `:` splits filter options, `,` separates
+// option values and `'` closes the graph quote, so each needs its own escape.
+// The unit test pins the emitted string; only a real ffmpeg run proves the
+// string parses, and a comma needs a different escape from the others.
 #[test]
 fn a_lut_path_with_metacharacters_exports() {
+    const CUBE: &str = "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    for name in ["a:b'c[;x].cube", "a,b:c'[;x].cube"] {
+        let s = Sandbox::new();
+        s.base();
+        let lut = s.file(name);
+        std::fs::write(&lut, CUBE).expect("write the LUT");
+        s.ok(&[
+            "effect",
+            "lut",
+            "--clip",
+            "1",
+            "--path",
+            lut.to_str().expect("utf-8 path"),
+        ]);
+        s.ok(&["export", "-o", "lut.mp4"]);
+        s.assert_dur(
+            "lut.mp4",
+            6.0,
+            &format!("the export parses the escaped path {name:?}"),
+        );
+    }
+}
+
+// A directory symlink is a second spelling of the directory, not a canonical
+// path: an edit addressed through `alias/nile.json` must still keep its state
+// in the real tree. This says nothing about a symlinked *file* — whether that
+// is canonicalized stays a separate finding.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_project_directory_keeps_state_beside_the_real_file() {
     let s = Sandbox::new();
-    s.base();
-    let lut = s.file("a:b'c[;x].cube");
-    std::fs::write(
-        &lut,
-        "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
-    )
-    .expect("write the LUT");
-    s.ok(&[
-        "effect",
-        "lut",
-        "--clip",
-        "1",
-        "--path",
-        lut.to_str().expect("utf-8 path"),
-    ]);
-    s.ok(&["export", "-o", "lut.mp4"]);
-    s.assert_dur("lut.mp4", 6.0, "the export parses the escaped path");
+    s.base(); // red 0–2, green 2–4, blue 4–6
+    let real = s.path().join("real");
+    fs::create_dir_all(&real).expect("real/");
+    fs::copy(s.file(P), real.join("nile.json")).expect("copy the project");
+    std::os::unix::fs::symlink("real", s.path().join("alias")).expect("alias -> real");
+
+    // An edit addressed through the link …
+    s.ok_on("alias/nile.json", &["split", "--at", "1"]);
+
+    // … persisted in the file the link points at …
+    let text = fs::read_to_string(real.join("nile.json")).expect("the real project file");
+    let project: serde_json::Value = serde_json::from_str(&text).expect("the project JSON");
+    let segments = &project["sequences"][0]["timeline"]["tracks"][0]["segments"];
+    assert!(
+        segments.as_array().is_some_and(|segs| segs.len() >= 4),
+        "the split through the symlink did not land: {text}"
+    );
+
+    // `alias` is a symlink to `real`, so `alias/.nile` and `real/.nile` are
+    // the same directory: what matters is that the history lands in the real
+    // tree, and that no second `.nile` appears beside the sandbox's other
+    // entries.
+    assert!(
+        real.join(".nile")
+            .join("nile")
+            .join("history.json")
+            .is_file(),
+        "history is not under real/.nile/nile: {:?}",
+        fs::read_dir(&real)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+    assert!(
+        !s.path().join(".nile").exists(),
+        "state leaked into the sandbox root beside the alias"
+    );
 }

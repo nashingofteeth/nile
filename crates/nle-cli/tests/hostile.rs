@@ -951,6 +951,186 @@ fn hostile_sequence_shapes() {
     }
 }
 
+/// Argv is bytes on Unix. A filename that is not UTF-8 has to reach the
+/// filesystem (a path flag) or be refused by clap (a `String` flag) — never be
+/// rewritten lossily on the way in.
+#[cfg(unix)]
+#[test]
+fn non_utf8_argv_is_refused_cleanly() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let s = Sandbox::new();
+    s.base();
+    let bad = OsStr::from_bytes(b"bad-\xff.mp4");
+
+    // A real file at the non-UTF-8 name: the import must get as far as the
+    // project save, so the refusal names UTF-8 rather than a missing file.
+    std::fs::copy(s.file("red.mp4"), s.path().join(bad)).expect("copy media to a non-UTF-8 name");
+
+    // A path flag: `import` takes a `PathBuf`, so the raw bytes reach the pool
+    // and the JSON save refuses to write them back.
+    let out = s.run_os(&[OsStr::new("import"), bad]);
+    let text = merged(&out);
+    assert!(
+        !text.contains("panicked"),
+        "a non-UTF-8 import panicked:\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a non-UTF-8 import should be a clean refusal:\n{text}"
+    );
+    assert!(
+        text.contains("invalid UTF-8"),
+        "the import refusal should name UTF-8:\n{text}"
+    );
+    s.assert_loads("non-UTF-8 import", &text);
+
+    // A string flag: clap rejects the value as not UTF-8 (usage, exit 2)
+    // instead of handing `to_action` a replacement character.
+    let out = s.run_os(&[OsStr::new("split"), OsStr::new("--at"), bad]);
+    let text = merged(&out);
+    assert!(
+        !text.contains("panicked"),
+        "a non-UTF-8 --at panicked:\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a non-UTF-8 --at is a clap usage error:\n{text}"
+    );
+    assert!(
+        text.contains("invalid UTF-8"),
+        "clap's refusal should name UTF-8:\n{text}"
+    );
+    s.assert_loads("non-UTF-8 --at", &text);
+}
+
+/// Clip ids are meant to be unique across tracks, but a hand-edited or
+/// imported project can repeat one. `--clip N` must resolve deterministically
+/// (the first track that has it) and edit only there.
+#[test]
+fn a_duplicate_clip_id_across_tracks_edits_the_first_track() {
+    let s = Sandbox::new();
+    s.hostile_base();
+    let mut project: serde_json::Value =
+        serde_json::from_str(&s.read(P)).expect("the base project");
+    let first = project["sequences"][0]["timeline"]["tracks"][0].clone();
+    let id = first["segments"][0]["Clip"]["id"]
+        .as_u64()
+        .expect("the first segment is a clip");
+    project["sequences"][0]["timeline"]["tracks"]
+        .as_array_mut()
+        .expect("tracks")
+        .push(first);
+    s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+
+    s.insist("duplicate clip id (show)", P, &["show"]);
+    let id_arg = id.to_string();
+    s.insist(
+        "duplicate clip id (delete)",
+        P,
+        &["delete", "--clip", &id_arg],
+    );
+    s.assert_loads("duplicate clip id", "");
+
+    let after: serde_json::Value = serde_json::from_str(&s.read(P)).expect("the project reloads");
+    let tracks = after["sequences"][0]["timeline"]["tracks"]
+        .as_array()
+        .expect("tracks");
+    assert_eq!(tracks.len(), 2, "the cloned track must still be there");
+    let clip_ids = |track: &serde_json::Value| -> Vec<u64> {
+        track["segments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|seg| seg.get("Clip"))
+            .filter_map(|clip| clip["id"].as_u64())
+            .collect()
+    };
+    assert!(
+        !clip_ids(&tracks[0]).contains(&id),
+        "track 0 still has clip {id}: {}",
+        tracks[0]
+    );
+    assert!(
+        clip_ids(&tracks[1]).contains(&id),
+        "the edit did not land on the first-matching track 0; track 1 lost clip {id}: {}",
+        tracks[1]
+    );
+}
+
+/// Frame fields that JSON can express but no CLI edit writes: the rational
+/// parser is the first gate (a negative is not a rate it accepts), and a huge
+/// but positive fps must not overflow the frame-grid arithmetic.
+#[test]
+fn hostile_frame_fields() {
+    fn negative_playhead(project: &mut serde_json::Value) {
+        project["sequences"][0]["playhead"] = json!("-3/1");
+    }
+    fn negative_source_span(project: &mut serde_json::Value) {
+        let clip = &mut project["sequences"][0]["timeline"]["tracks"][0]["segments"][0]["Clip"];
+        clip["asset_in"] = json!("-3/1");
+        clip["asset_out"] = json!("-1/1");
+    }
+    // i64::MAX is the extreme the old `last_frame` subtraction overflowed
+    // `Rational64` on. The i128 math in the `last_frame`/clamp fix keeps the
+    // save path finite, so the battery can hold the real extreme.
+    fn absurd_fps(project: &mut serde_json::Value) {
+        project["sequences"][0]["fps"] = json!("9223372036854775807/1");
+    }
+
+    let s = Sandbox::new();
+    type Refusal = (&'static str, fn(&mut serde_json::Value), &'static str);
+    let refused: &[Refusal] = &[
+        (
+            "negative playhead",
+            negative_playhead,
+            "invalid rational time",
+        ),
+        (
+            "negative source span",
+            negative_source_span,
+            "invalid rational time",
+        ),
+    ];
+    for &(label, mutate, expected) in refused {
+        s.hostile_base();
+        let mut project: serde_json::Value =
+            serde_json::from_str(&s.read(P)).expect("the base project");
+        mutate(&mut project);
+        s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+        for argv in [&["show"][..], &["seek", "1"][..]] {
+            let text = s.insist(label, P, argv);
+            assert!(text.contains(expected), "[{label}] {argv:?}: {text}");
+        }
+    }
+
+    // An absurd but positive rate is accepted: `show` reads it, and `seek`
+    // saves through the `last_frame` clamp. Both must succeed — no panic and a
+    // finite playhead on disk — not merely refuse cleanly.
+    s.hostile_base();
+    let mut project: serde_json::Value =
+        serde_json::from_str(&s.read(P)).expect("the base project");
+    absurd_fps(&mut project);
+    s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+    let shown = s.ok(&["show"]);
+    let saved = s.ok(&["seek", "1"]);
+    // "Finite" means the saved playhead is a real position inside the
+    // timeline, not just a value that happens to serialize.
+    let loaded =
+        nle_core::Project::load(&s.file(P)).expect("the saving seek left a loadable project");
+    assert!(
+        loaded.playhead >= nle_core::Seconds::from_integer(0)
+            && loaded.playhead <= loaded.timeline.end(),
+        "saved playhead {} is outside [0, {}]",
+        nle_core::format_seconds(&loaded.playhead),
+        nle_core::format_seconds(&loaded.timeline.end())
+    );
+    s.assert_loads("absurd fps", &format!("{shown}\n{saved}"));
+}
+
 #[test]
 fn a_truncated_cache_entry_is_rerendered() {
     let s = Sandbox::new();
