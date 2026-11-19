@@ -47,11 +47,11 @@ fn default_min_frames() -> i64 {
 }
 
 /// One check an annotation states about a render. Field names are wire-visible
-/// (they are what a hand-edited `nile.json` or a future `--expect` flag writes).
+/// (they are what a hand-edited `nile.json` or the `--expect` flag writes).
 ///
-/// Additive to the v16 annotation shape: a build without this module refuses
-/// the unknown `expectation` variant rather than misreading it, so the project
-/// version stays put until a front-end can write one.
+/// The payload is part of project v17: a build that predates it rejects the
+/// file by version before it could misread the variant, and `deny_unknown_fields`
+/// keeps a same-version payload from being read with a field it does not know.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "check", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expectation {
