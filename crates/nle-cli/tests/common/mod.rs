@@ -117,6 +117,19 @@ impl Sandbox {
         self.command(project, args).output().expect("spawn nile")
     }
 
+    /// [`Sandbox::run`] for arguments that are not valid UTF-8. A path flag
+    /// takes an `OsStr` straight through, so its refusal has to come from the
+    /// filesystem (or clap's own UTF-8 check for a string flag), never from a
+    /// lossy `to_str()` here.
+    pub fn run_os(&self, args: &[&std::ffi::OsStr]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nile"));
+        cmd.current_dir(self.path())
+            .arg("--project")
+            .arg(P)
+            .args(args);
+        cmd.output().expect("spawn nile")
+    }
+
     /// Run, require success, return stdout.
     pub fn ok(&self, args: &[&str]) -> String {
         self.ok_on(P, args)
