@@ -341,6 +341,12 @@ nile annotation add "check the cut" --asset 1 --time 1.5
 nile annotation add "mic check" --group 2 --time 3  # group-clock time
 nile annotation add "look here" --timeline --at 2.5 # clip-relative point
 nile annotation add "this take" --timeline --at 2 --to 5 # range
+# CHECK = cam|crop-stable|work-in-frame|words-complete|absent|no-sliver
+nile annotation add --expect cam --asset 1 --timeline --at 2 --to 5
+nile annotation add --expect crop-stable --max-move 10 --timeline --at 2 --track 2
+nile annotation check --report final.mp4   # video or .report.json
+nile annotation check --report final.mp4 --sequence 2 --id 3 --json
+# exit 0 pass · 1 fail or unverifiable · 2 error
 nile annotation ls                        # id, status, anchor and text
 nile annotation resolve 1                 # undoable; rm deletes instead
 nile remove 2                             # by clip id

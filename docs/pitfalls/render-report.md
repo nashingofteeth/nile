@@ -21,5 +21,8 @@ path.
   resolve to `None`.
 - **Chunked exports write the same sidecar.** `windows` lists the scheduler's
   half-open frame ranges; the frame map is still the whole output.
+- **A report is read, not just printed.** `nile annotation check` (and the
+  protocol's `annotation.check`) consumes it to evaluate a sequence's
+  expectations over the frame map.
 - **A report write failure must not lose the video.** Log it and keep the
   export; the summary says `report failed`.
