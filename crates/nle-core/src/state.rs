@@ -4,6 +4,10 @@
 //! hidden `.nile/<project-stem>/` directory beside the project file. Keeping
 //! them together makes one project self-contained and lets the proxy cache be
 //! pruned per project instead of globally.
+//!
+//! The directory is keyed on the project's **real** path: a symlinked project
+//! file and its target share one history, clipboard and socket. A project that
+//! does not exist yet (`init`) keeps the literal typed path until it does.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -15,7 +19,14 @@ pub const CONFIG_FILE: &str = "config.json";
 
 /// Directory holding all state for one project:
 /// `foo/nile.json` → `foo/.nile/nile/`.
+///
+/// An existing path resolves to its absolute real path first, so relative and
+/// symlinked spellings (`alias.json → foo/nile.json`) all land in
+/// `foo/.nile/nile/`. A path that does not exist yet — `init`, synthetic
+/// callers — keeps the literal `<parent>/.nile/<stem>`.
 pub fn state_dir(project_path: &Path) -> PathBuf {
+    let real = std::fs::canonicalize(project_path).ok();
+    let project_path = real.as_deref().unwrap_or(project_path);
     let parent = project_path.parent().filter(|p| !p.as_os_str().is_empty());
     let stem = project_path
         .file_stem()
@@ -140,6 +151,24 @@ mod tests {
             history_path(Path::new("nile.json")),
             PathBuf::from(".nile/nile/history.json")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_project_file_shares_the_real_state_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real = real_dir.join("nile.json");
+        std::fs::write(&real, "{}").unwrap();
+        let alias = dir.path().join("alias.json");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        assert_eq!(state_dir(&alias), state_dir(&real));
+        // `tempfile` may hand back /var/... where the real path is /private/var
+        // (macOS), so compare against the canonical parent, not `dir.path()`.
+        let canonical_real_dir = std::fs::canonicalize(&real_dir).unwrap();
+        assert_eq!(state_dir(&alias), canonical_real_dir.join(".nile/nile"));
     }
 
     #[test]
