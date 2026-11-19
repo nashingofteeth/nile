@@ -412,6 +412,11 @@ impl Handler for ServeHandler {
             } => self.media_add(*base_revision, paths),
             Call::PlayheadSet { at } => self.playhead_set(*at),
             Call::AnnotationList { sequence } => self.annotation_list(*sequence),
+            Call::AnnotationCheck {
+                report,
+                sequence,
+                id,
+            } => self.annotation_check(report, *sequence, id),
         }
     }
 
@@ -442,6 +447,31 @@ impl ServeHandler {
             )));
         }
         Ok(Reply::Annotations(AnnotationList::of(project, sequence)))
+    }
+
+    /// Evaluate a render report against the sequence's expectations. A read:
+    /// no save, no revision bump, no history entry and no event. The seam's
+    /// errors (missing/corrupt report, a sequence the report did not render,
+    /// an unknown sequence) are the request's fault, not the server's.
+    ///
+    /// The path must be absolute (after `~` expansion): the server's cwd is
+    /// its own, so a relative path would silently name a different file than
+    /// the client meant.
+    fn annotation_check(
+        &self,
+        report: &Path,
+        sequence: Option<u32>,
+        ids: &[u32],
+    ) -> Result<Reply, RpcError> {
+        let report = crate::cmd::import::expand_tilde(report);
+        if !report.is_absolute() {
+            return Err(RpcError::invalid_params(
+                "report path must be absolute (the server's cwd may differ from the client's)",
+            ));
+        }
+        let checks = crate::cmd::check::check_with(self.session.project(), &report, sequence, ids)
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        Ok(Reply::Checks(checks))
     }
 
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {
