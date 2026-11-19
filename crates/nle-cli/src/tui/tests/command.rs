@@ -1,8 +1,10 @@
+use super::super::actions::select_sequence;
 use super::super::jobs::start_job;
 use super::super::keys::command::{import_command, parse_defaults, run_command, split_paths};
 use super::super::keys::handle_key;
 use super::super::open_import_fallback;
 use super::*;
+use nle_core::expect::CheckResult;
 use nle_core::time::Seconds;
 use nle_core::{Action, Target};
 
@@ -631,6 +633,183 @@ fn annotation_ls_reads_the_requested_sequence() {
     assert!(cmd(&mut app, "annotation ls --sequence 2").contains("1 annotation(s)"));
     assert!(cmd(&mut app, "annotation ls --sequence 99").contains("not found"));
     assert!(cmd(&mut app, "annotation ls --sequence nope").contains("expects a number"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
+fn annotation_check_reports_verdicts_and_keeps_them_per_sequence() {
+    let path = temp_project_path("annotation-check");
+    let dir = tempfile::tempdir().unwrap();
+    let mut p = asset_project();
+    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    // Both spans sit on clip #1, which the report shows: a `cam` for asset 1
+    // passes, an `absent` for the same asset fails.
+    let anchor = || nle_core::Anchor::Timeline {
+        start: nle_core::ClipPoint {
+            clip: 1,
+            source: Seconds::from_integer(1),
+        },
+        end: nle_core::ClipPoint {
+            clip: 1,
+            source: Seconds::from_integer(2),
+        },
+    };
+    let provenance = || nle_core::Provenance {
+        actor: nle_core::Actor::Human,
+        at: 0,
+    };
+    let pass = p
+        .add_annotation(
+            1,
+            nle_core::AnnotationKind::Expectation {
+                expect: nle_core::Expectation::Cam {
+                    asset: Some(1),
+                    group: None,
+                    tolerance_frames: 0,
+                },
+            },
+            anchor(),
+            provenance(),
+        )
+        .unwrap();
+    let fail = p
+        .add_annotation(
+            1,
+            nle_core::AnnotationKind::Expectation {
+                expect: nle_core::Expectation::Absent {
+                    asset: Some(1),
+                    group: None,
+                    black: false,
+                    tolerance_frames: 0,
+                },
+            },
+            anchor(),
+            provenance(),
+        )
+        .unwrap();
+    p.save(&path).unwrap();
+    let out = dir.path().join("out.mp4");
+    let report = nle_core::report::RenderReport::build(&p, &out, 210, None);
+    report
+        .save(&nle_core::report::RenderReport::sidecar_path(&out))
+        .unwrap();
+    let mut app = App::new(p, path.clone());
+    let check = |app: &mut App, extra: &str| {
+        cmd(
+            app,
+            &format!("annotation check --report {}{extra}", out.display()),
+        )
+    };
+
+    // The message is `format_human`'s own summary, so log and message agree.
+    let notice = check(&mut app, "");
+    assert_eq!(notice, "2 check(s): 1 pass, 1 fail, 0 unverifiable");
+    assert_eq!(app.project.depth(), 0, "a query is not an undo entry");
+    // Both verdicts are kept under the report's sequence, with the start of
+    // the anchor they mark.
+    let marks = app.checks.get(&1).expect("the report's sequence");
+    assert_eq!(marks.len(), 2);
+    assert_eq!(marks[&pass].result, CheckResult::Pass);
+    assert_eq!(marks[&pass].start, 0.0);
+    assert_eq!(marks[&fail].result, CheckResult::Fail);
+    assert_eq!(marks[&fail].start, 0.0);
+
+    // A report belongs to its sequence: switching away and back keeps it,
+    // and the sequence we switched to has none of sequence #1's marks.
+    assert!(cmd(&mut app, &format!("sequence {second}")).contains("Second"));
+    assert_eq!(app.project.active_id(), second);
+    assert!(
+        app.checks.contains_key(&1),
+        "the left sequence keeps its map"
+    );
+    assert!(!app.checks.contains_key(&second));
+    assert!(cmd(&mut app, "sequence 1").contains("#1"));
+    assert_eq!(app.project.active_id(), 1);
+    assert_eq!(
+        app.checks[&1].len(),
+        2,
+        "the marks return with the sequence"
+    );
+
+    // `--id` is repeatable like the CLI's ids and narrows the run; a bad id
+    // is a message that leaves the last run intact.
+    let narrowed = check(&mut app, &format!(" --id {pass}"));
+    assert_eq!(narrowed, "1 check(s): 1 pass, 0 fail, 0 unverifiable");
+    assert_eq!(app.checks[&1].len(), 1);
+    assert!(app.checks[&1].contains_key(&pass));
+    let bad = check(&mut app, " --id nope");
+    assert!(bad.contains("--id expects a number"), "{bad}");
+    assert_eq!(app.checks[&1].len(), 1, "a bad id keeps the last run");
+
+    // `--report` is required; a missing file is a message, not a panic, and
+    // neither a typo nor a mismatched sequence wipes the marks.
+    assert!(cmd(&mut app, "annotation check").contains("usage"));
+    let missing = dir.path().join("missing.mp4");
+    let message = cmd(
+        &mut app,
+        &format!("annotation check --report {}", missing.display()),
+    );
+    assert!(message.starts_with("check failed:"), "{message}");
+    let wrong = check(&mut app, " --sequence 2");
+    assert!(wrong.contains("#1") && wrong.contains("#2"), "{wrong}");
+    assert_eq!(app.checks[&1].len(), 1, "the previous verdicts survive");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
+fn check_verdicts_survive_a_switch_and_drop_on_an_edit() {
+    let path = temp_project_path("annotation-check-clear");
+    let mut p = asset_project();
+    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+    let fake = FakeMpv::new();
+    let mark = |result, start| CheckMark { result, start };
+    let seed = |app: &mut App, sequence: u32, id: u32| {
+        app.checks
+            .entry(sequence)
+            .or_default()
+            .insert(id, mark(CheckResult::Pass, 0.0));
+    };
+
+    seed(&mut app, 1, 10);
+    seed(&mut app, second, 11);
+    assert!(select_sequence(&mut app, &fake, second).is_some());
+    assert!(
+        app.checks.contains_key(&1),
+        "the sequence we left keeps its map"
+    );
+    assert!(select_sequence(&mut app, &fake, 1).is_some());
+    assert!(app.checks[&1].contains_key(&10), "it is there on return");
+    assert!(app.checks[&second].contains_key(&11));
+
+    // A move is not an edit: the timeline the report describes is unchanged.
+    handle_key(&mut app, &fake, key('l'));
+    assert_eq!(
+        app.checks[&1].len(),
+        1,
+        "a playhead move keeps the verdicts"
+    );
+
+    // A changed edit invalidates only the sequence it changed.
+    assert!(cmd(&mut app, "split --at 1").contains("split"));
+    assert!(
+        !app.checks.contains_key(&1) || app.checks[&1].is_empty(),
+        "the edited sequence's marks drop"
+    );
+    assert!(
+        app.checks[&second].contains_key(&11),
+        "the other sequence did not change"
+    );
+
+    // A reload replaces the project outright: nobody's report survives.
+    seed(&mut app, 1, 12);
+    super::super::reload_project(&mut app, &fake, false).unwrap();
+    assert!(app.checks.is_empty());
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));

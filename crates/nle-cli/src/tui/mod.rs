@@ -14,6 +14,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use serde::{Deserialize, Serialize};
 
 use nle_core::action;
+use nle_core::expect::CheckResult;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
 use nle_core::{
     Armed, Clip, Histories, History, Project, frame_of, load_register_without_migration,
@@ -103,6 +104,15 @@ pub struct PoolState {
 pub(crate) struct PoolMarks {
     pub in_at: Option<f64>,
     pub out_at: Option<f64>,
+}
+
+/// One expectation's verdict from the last `:annotation check`: what the
+/// render said, and the timeline second its anchor starts at (the marker
+/// row's placement comes from the report, not from a second evaluation).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CheckMark {
+    pub result: CheckResult,
+    pub start: f64,
 }
 
 /// A one-field transition length form, opened by `x`/`X` when the playhead
@@ -273,6 +283,12 @@ pub struct App {
     last_pool_asset: Option<u32>,
     /// Source marks for pooled assets, keyed by asset id.
     pub(crate) pool_marks: BTreeMap<u32, PoolMarks>,
+    /// The last `:annotation check` verdicts, keyed by sequence and then
+    /// annotation id. A report describes one render of one sequence, so a
+    /// reload drops them all and an edit drops only the sequence it changed;
+    /// switching sequences keeps both maps, so returning to one shows its
+    /// marks again.
+    pub(crate) checks: BTreeMap<u32, BTreeMap<u32, CheckMark>>,
     /// Where the import picker last opened (session-only). Falls back to the
     /// selected asset's folder, then the project directory.
     pub(crate) last_import_dir: Option<PathBuf>,
@@ -366,6 +382,7 @@ impl App {
             last_pool_pos: 0.0,
             last_pool_asset: None,
             pool_marks: BTreeMap::new(),
+            checks: BTreeMap::new(),
             last_import_dir: None,
             pending_import_picker: false,
             import_job: None,
@@ -1234,6 +1251,8 @@ fn reset_render_caches(app: &mut App) {
     app.filmstrip_failed.clear();
     app.filmstrip_job = None;
     forget_missing_assets(app);
+    // Every report was evaluated against the project we just replaced.
+    app.checks.clear();
 }
 
 /// Reload the project (and its undo history) from disk and rebuild the
