@@ -1,7 +1,9 @@
 use super::super::util::split_sides;
 use super::*;
 use crate::time::Seconds;
-use crate::timeline::{Clip, Gap, Segment, Track, TrackKind};
+use crate::timeline::{
+    Clip, Gap, Segment, Track, TrackKind, Transition, TransitionKind, TransitionSource,
+};
 
 #[test]
 fn split_sides_refuses_sub_frame_pieces() {
@@ -197,4 +199,83 @@ fn clamp_to_media_ignores_nonpositive_speed() {
     let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(2)), fps);
     assert!(notes.is_empty(), "{notes:?}");
     assert_eq!(t.segments.len(), 1);
+}
+
+#[test]
+fn clamp_to_media_survives_a_frame_rate_past_the_rational_grid() {
+    // i64::MAX fps: one frame is finer than any `Rational64` position on a
+    // multi-second span, so `span * fps` does not fit i64 (the old form
+    // panicked in debug and wrapped in release).
+    let fps = Seconds::new(i64::MAX, 1);
+    let mut t = Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: vec![
+            Segment::Clip(Clip::new(
+                1,
+                1,
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+            )),
+            Segment::Transition(Transition {
+                id: 2,
+                dur: Seconds::from_integer(2),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: 1,
+                    src_in: Seconds::from_integer(0),
+                    src_out: Seconds::from_integer(2),
+                    effects: Vec::new(),
+                },
+                b: TransitionSource::Clip {
+                    asset: 1,
+                    src_in: Seconds::from_integer(2),
+                    src_out: Seconds::from_integer(4),
+                    effects: Vec::new(),
+                },
+            }),
+        ],
+    };
+    let before = t.clone();
+    let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(10)), fps);
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(
+        t, before,
+        "inside the media and already the closest expressible spans"
+    );
+}
+
+#[test]
+fn purge_stumps_survives_a_frame_rate_past_the_rational_grid() {
+    let p = fixture(); // [clip 2s][gap 1s][clip 2s]
+    let fps = Seconds::new(i64::MAX, 1);
+    let (cleaned, dropped) = purge_stumps(p.timeline.video_track().unwrap(), fps);
+    assert_eq!(dropped, 0, "no span is under an unrepresentable frame");
+    assert_eq!(cleaned, p.timeline.video_track().unwrap().segments);
+}
+
+#[test]
+fn clamp_to_media_drops_a_clip_whose_in_point_is_past_the_media_end() {
+    // 10^18 s in-point on a 6 s file: the media-clamped span is hugely
+    // negative, so the frame count is unrepresentable at i64::MAX fps too.
+    // Neither arm may keep a clip with asset_out <= asset_in.
+    let in_ = Seconds::new(10i64.pow(18), 1);
+    let mut t = Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: vec![Segment::Clip(Clip::new(
+            1,
+            1,
+            in_,
+            in_ + Seconds::from_integer(1),
+        ))],
+    };
+    let fps = Seconds::new(i64::MAX, 1);
+    let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(6)), fps);
+    assert!(
+        t.segments.is_empty(),
+        "no clip with asset_out <= asset_in survives"
+    );
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("holds no whole frame"), "{notes:?}");
 }
