@@ -389,7 +389,14 @@ impl Project {
 
     /// Atomic save: write a temp file in the same directory, then rename
     /// over the target. A crash mid-write can't corrupt the project.
+    ///
+    /// A symlinked project is an alias, not a second project: resolve the link
+    /// first so the rename updates the real file and the link survives (a
+    /// rename over the link would replace the link with a regular file). The
+    /// fallback keeps `init`'s not-yet-created path lexical.
     pub fn save(&self, path: &Path) -> Result<(), ProjectError> {
+        let real = std::fs::canonicalize(path).ok();
+        let path = real.as_deref().unwrap_or(path);
         let mut json = serde_json::to_string_pretty(self)?;
         json.push('\n');
         let dir = path
@@ -1317,6 +1324,31 @@ mod tests {
         p.save(&path).unwrap();
         let loaded = Project::load(&path).unwrap();
         assert_eq!(p, loaded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_symlink_updates_the_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("nile.json");
+        let p = sample_project();
+        p.save(&real).unwrap();
+        let alias = dir.path().join("alias.json");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        let mut edited = p.clone();
+        edited.playhead = Seconds::from_integer(1);
+        edited.save(&alias).unwrap();
+
+        assert_eq!(
+            Project::load(&real).unwrap(),
+            edited,
+            "the rename followed the link instead of replacing it"
+        );
+        assert!(
+            std::fs::symlink_metadata(&alias).unwrap().is_symlink(),
+            "the alias became a regular file"
+        );
     }
 
     #[test]
