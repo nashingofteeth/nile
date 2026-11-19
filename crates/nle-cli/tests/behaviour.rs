@@ -705,7 +705,13 @@ fn gaps_insert_merge_delete() {
     s.base();
     s.ok(&["gap", "--at", "2", "--frames", "30"]);
     s.ok(&["gap", "--at", "3", "--frames", "30"]);
-    let gaps = s.show().matches("gap").count();
+    // Count the row's `gap` token, not a substring: a checkout path can itself
+    // contain "gap" (`test-review-gaps`), which every clip path repeats.
+    let gaps = s
+        .show()
+        .lines()
+        .filter(|line| line.split_whitespace().any(|word| word == "gap"))
+        .count();
     assert_eq!(gaps, 1, "adjacent gaps coalesced ({gaps} gap rows)");
 
     s.base();
