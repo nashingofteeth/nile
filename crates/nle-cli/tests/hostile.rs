@@ -951,9 +951,11 @@ fn hostile_sequence_shapes() {
     }
 }
 
-/// Argv is bytes on Unix. A filename that is not UTF-8 has to reach the
-/// filesystem (a path flag) or be refused by clap (a `String` flag) — never be
-/// rewritten lossily on the way in.
+/// Argv is bytes on Unix, but a filename that is not UTF-8 is only half
+/// portable: the string-flag half (clap) runs everywhere Unix, while a *real*
+/// file at that name can only be created on Linux — macOS APFS rejects the
+/// name with `EILSEQ`, so the raw-path property is tested on Linux alone.
+/// Either way the bytes must never be rewritten lossily on the way in.
 #[cfg(unix)]
 #[test]
 fn non_utf8_argv_is_refused_cleanly() {
@@ -964,31 +966,9 @@ fn non_utf8_argv_is_refused_cleanly() {
     s.base();
     let bad = OsStr::from_bytes(b"bad-\xff.mp4");
 
-    // A real file at the non-UTF-8 name: the import must get as far as the
-    // project save, so the refusal names UTF-8 rather than a missing file.
-    std::fs::copy(s.file("red.mp4"), s.path().join(bad)).expect("copy media to a non-UTF-8 name");
-
-    // A path flag: `import` takes a `PathBuf`, so the raw bytes reach the pool
-    // and the JSON save refuses to write them back.
-    let out = s.run_os(&[OsStr::new("import"), bad]);
-    let text = merged(&out);
-    assert!(
-        !text.contains("panicked"),
-        "a non-UTF-8 import panicked:\n{text}"
-    );
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "a non-UTF-8 import should be a clean refusal:\n{text}"
-    );
-    assert!(
-        text.contains("invalid UTF-8"),
-        "the import refusal should name UTF-8:\n{text}"
-    );
-    s.assert_loads("non-UTF-8 import", &text);
-
     // A string flag: clap rejects the value as not UTF-8 (usage, exit 2)
-    // instead of handing `to_action` a replacement character.
+    // instead of handing `to_action` a replacement character. No file is
+    // needed, so this holds on every Unix, macOS included.
     let out = s.run_os(&[OsStr::new("split"), OsStr::new("--at"), bad]);
     let text = merged(&out);
     assert!(
@@ -1005,6 +985,42 @@ fn non_utf8_argv_is_refused_cleanly() {
         "clap's refusal should name UTF-8:\n{text}"
     );
     s.assert_loads("non-UTF-8 --at", &text);
+}
+
+/// The path-flag half: `import` takes a `PathBuf`, so the raw bytes reach the
+/// pool and the JSON save refuses to write them back. Linux-only because APFS
+/// cannot store an invalid-UTF-8 filename, so the copy below fails with
+/// `EILSEQ` on macOS.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_import_path_is_refused_at_save() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let s = Sandbox::new();
+    s.base();
+    let bad = OsStr::from_bytes(b"bad-\xff.mp4");
+
+    // A real file at the non-UTF-8 name: the import must get as far as the
+    // project save, so the refusal names UTF-8 rather than a missing file.
+    std::fs::copy(s.file("red.mp4"), s.path().join(bad)).expect("copy media to a non-UTF-8 name");
+
+    let out = s.run_os(&[OsStr::new("import"), bad]);
+    let text = merged(&out);
+    assert!(
+        !text.contains("panicked"),
+        "a non-UTF-8 import panicked:\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a non-UTF-8 import should be a clean refusal:\n{text}"
+    );
+    assert!(
+        text.contains("invalid UTF-8"),
+        "the import refusal should name UTF-8:\n{text}"
+    );
+    s.assert_loads("non-UTF-8 import", &text);
 }
 
 /// Clip ids are meant to be unique across tracks, but a hand-edited or
