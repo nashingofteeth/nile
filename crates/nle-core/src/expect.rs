@@ -12,10 +12,15 @@
 //! and `no_sliver` are report-only; the crop, word and group checks need the
 //! project's effects and probes — those are refused as unverifiable when the
 //! report was rendered from another revision.
+//!
+//! Resolving an expectation (`AnnotationStatus::Resolved`) **acknowledges** a
+//! verdict; it is not a waiver. [`evaluate`] still runs the check, still lets
+//! it fail, and copies the status into the outcome, so a reader can tell
+//! "known and accepted" from "not looked at yet".
 
 use serde::{Deserialize, Serialize};
 
-use crate::annotation::{Annotation, AnnotationKind};
+use crate::annotation::{Annotation, AnnotationKind, AnnotationStatus};
 use crate::project::{Project, Sequence};
 use crate::report::{FrameSource, FrameSpan, RenderReport, SourceSide, frame_edge};
 use crate::time::{Seconds, checked_sub, format_seconds, rational_ser, secs_f64};
@@ -257,6 +262,12 @@ pub struct CheckOutcome {
     /// enum, because [`evaluate`] also answers for a note or marker and the
     /// reply has to round-trip through both serde directions.
     pub check: String,
+    /// The annotation's review state when it was checked. Resolving
+    /// **acknowledges** a result; it is not a waiver — the check still runs
+    /// and can still fail, and this field is how a reader tells "known and
+    /// accepted" from "not yet looked at". A future `--open-only` filters on
+    /// it.
+    pub status: AnnotationStatus,
     pub result: CheckResult,
     /// The anchor's timeline span, when it still resolves.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,10 +280,11 @@ pub struct CheckOutcome {
 }
 
 impl CheckOutcome {
-    fn new(id: u32, check: &'static str) -> Self {
+    fn new(id: u32, check: &'static str, status: AnnotationStatus) -> Self {
         Self {
             id,
             check: check.to_string(),
+            status,
             result: CheckResult::Unverifiable,
             span: None,
             frames: None,
@@ -365,12 +377,12 @@ pub fn evaluate(project: &Project, report: &RenderReport, annotation: &Annotatio
     let expect = match &annotation.kind {
         AnnotationKind::Expectation { expect } => expect,
         _ => {
-            let mut out = CheckOutcome::new(annotation.id, annotation.label());
+            let mut out = CheckOutcome::new(annotation.id, annotation.label(), annotation.status);
             out.detail = Some("not an expectation".to_string());
             return out;
         }
     };
-    let mut out = CheckOutcome::new(annotation.id, expect.name());
+    let mut out = CheckOutcome::new(annotation.id, expect.name(), annotation.status);
 
     if annotation.sequence != report.sequence {
         return failed(
@@ -2264,9 +2276,12 @@ mod tests {
     fn a_check_report_summarises_its_outcomes() {
         let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
         let report = report(&[(150, shot(1, 1))]);
+        // Resolving acknowledges a verdict; it does not waive the check.
+        let mut acknowledged = range(cam(Some(2), None, 0), 0, 5);
+        acknowledged.status = AnnotationStatus::Resolved;
         let checks = vec![
             evaluate(&project, &report, &range(cam(Some(1), None, 0), 0, 5)),
-            evaluate(&project, &report, &range(cam(Some(2), None, 0), 0, 5)),
+            evaluate(&project, &report, &acknowledged),
             evaluate(
                 &project,
                 &report,
@@ -2283,15 +2298,18 @@ mod tests {
         let report = CheckReport::new(&report, checks);
         assert_eq!(report.sequence(), 1, "the report's own sequence");
         assert_eq!(report.summary().pass, 1);
-        assert_eq!(report.summary().fail, 1);
+        assert_eq!(report.summary().fail, 1, "resolved still fails");
         assert_eq!(report.summary().unverifiable, 1);
         assert_eq!(report.report().frame_count, 150);
         assert_eq!(report.report().revision, 0);
         assert_eq!(report.checks().len(), 3);
+        assert_eq!(report.checks()[1].status, AnnotationStatus::Resolved);
         let json = serde_json::to_value(&report).unwrap();
         assert!(json.get("sequence").is_none(), "no duplicate sequence");
         assert_eq!(json["summary"]["fail"], 1);
         assert_eq!(json["checks"][1]["result"], "fail");
+        assert_eq!(json["checks"][0]["status"], "open");
+        assert_eq!(json["checks"][1]["status"], "resolved");
         assert_eq!(
             json["checks"][0]["span"],
             serde_json::json!({ "start": "0/1", "end": "5/1" })

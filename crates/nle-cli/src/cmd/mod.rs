@@ -19,6 +19,7 @@ use crate::{
     say_err,
 };
 
+pub(crate) mod check;
 pub(crate) mod detect;
 pub(crate) mod export;
 pub(crate) mod import;
