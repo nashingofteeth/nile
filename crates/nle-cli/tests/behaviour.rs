@@ -2351,3 +2351,49 @@ fn a_lut_path_with_metacharacters_exports() {
         );
     }
 }
+
+// A directory symlink is a second spelling of the directory, not a canonical
+// path: an edit addressed through `alias/nile.json` must still keep its state
+// in the real tree. This says nothing about a symlinked *file* — whether that
+// is canonicalized stays a separate finding.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_project_directory_keeps_state_beside_the_real_file() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6
+    let real = s.path().join("real");
+    fs::create_dir_all(&real).expect("real/");
+    fs::copy(s.file(P), real.join("nile.json")).expect("copy the project");
+    std::os::unix::fs::symlink("real", s.path().join("alias")).expect("alias -> real");
+
+    // An edit addressed through the link …
+    s.ok_on("alias/nile.json", &["split", "--at", "1"]);
+
+    // … persisted in the file the link points at …
+    let text = fs::read_to_string(real.join("nile.json")).expect("the real project file");
+    let project: serde_json::Value = serde_json::from_str(&text).expect("the project JSON");
+    let segments = &project["sequences"][0]["timeline"]["tracks"][0]["segments"];
+    assert!(
+        segments.as_array().is_some_and(|segs| segs.len() >= 4),
+        "the split through the symlink did not land: {text}"
+    );
+
+    // `alias` is a symlink to `real`, so `alias/.nile` and `real/.nile` are
+    // the same directory: what matters is that the history lands in the real
+    // tree, and that no second `.nile` appears beside the sandbox's other
+    // entries.
+    assert!(
+        real.join(".nile")
+            .join("nile")
+            .join("history.json")
+            .is_file(),
+        "history is not under real/.nile/nile: {:?}",
+        fs::read_dir(&real)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+    assert!(
+        !s.path().join(".nile").exists(),
+        "state leaked into the sandbox root beside the alias"
+    );
+}
