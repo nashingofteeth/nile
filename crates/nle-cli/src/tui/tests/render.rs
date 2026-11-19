@@ -65,6 +65,155 @@ fn a_blend_boundary_has_no_bar() {
     );
 }
 
+// `:annotation check` verdicts share the marker row with the playhead: each
+// sits at its anchor's start, from the same quantizer, only for an annotation
+// on the active sequence, and the most severe verdict wins a shared column.
+#[test]
+fn check_verdicts_mark_the_marker_row() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut p = asset_project();
+    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    // Sequence 2 needs material for an expectation's anchor to resolve; it is
+    // only used to prove the row reads the *active* sequence's map.
+    p.sequence_mut(second).unwrap().timeline.tracks = vec![Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: vec![seg_clip(1, 2)],
+    }];
+    let anchor = |clip: u32, from: i64, to: i64| nle_core::Anchor::Timeline {
+        start: nle_core::ClipPoint {
+            clip,
+            source: Seconds::from_integer(from),
+        },
+        end: nle_core::ClipPoint {
+            clip,
+            source: Seconds::from_integer(to),
+        },
+    };
+    let provenance = || nle_core::Provenance {
+        actor: nle_core::Actor::Human,
+        at: 0,
+    };
+    let expect = || nle_core::AnnotationKind::Expectation {
+        expect: nle_core::Expectation::Cam {
+            asset: Some(1),
+            group: None,
+            tolerance_frames: 0,
+        },
+    };
+    let mut add = |sequence: u32, span: (u32, i64, i64)| {
+        p.add_annotation(
+            sequence,
+            expect(),
+            anchor(span.0, span.1, span.2),
+            provenance(),
+        )
+        .unwrap()
+    };
+    // Timeline seconds 0 and 5 (clip #2 starts at 5); 1 and 2 carry a pair of
+    // verdicts each to pin the precedence rule.
+    let pass = add(1, (1, 1, 2)); // t 0
+    let hazel = add(1, (1, 2, 3)); // t 1
+    let same_fail = add(1, (1, 2, 3)); // t 1, same column as hazel
+    let same_pass = add(1, (1, 3, 3)); // t 2 (a point)
+    let same_hazel = add(1, (1, 3, 3)); // t 2, same column as same_pass
+    let fail = add(1, (2, 0, 2)); // t 5
+    // Same expectation, another sequence: stored in its own map, never drawn
+    // on sequence #1.
+    let elsewhere = add(second, (1, 1, 2));
+
+    let mut app = App::new(p, temp_project_path("check-row"));
+    app.playhead = 4.0; // the gap, off every verdict column
+    let mark = |result, start| CheckMark { result, start };
+    app.checks.entry(1).or_default().extend([
+        (pass, mark(CheckResult::Pass, 0.0)),
+        (hazel, mark(CheckResult::Unverifiable, 1.0)),
+        (same_fail, mark(CheckResult::Fail, 1.0)),
+        (same_pass, mark(CheckResult::Pass, 2.0)),
+        (same_hazel, mark(CheckResult::Unverifiable, 2.0)),
+        (fail, mark(CheckResult::Fail, 5.0)),
+        // A stale id can satisfy the map without naming an annotation here.
+        (99, mark(CheckResult::Pass, 3.0)),
+    ]);
+    app.checks
+        .entry(second)
+        .or_default()
+        .insert(elsewhere, mark(CheckResult::Pass, 1.5));
+
+    let draw = |app: &App| {
+        let mut term = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        term.draw(|f| {
+            render_timeline(
+                f,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 60,
+                    height: 6,
+                },
+                app,
+            )
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    };
+    // One track means no label gutter: the bar starts after the border and
+    // the marker row is the second inner row. Columns come from the
+    // playhead's own quantizer, so a drift between them fails the test.
+    let x = |total: f64, t: f64| 1 + marker_col(t, total, 58);
+    let cell = |buf: &ratatui::buffer::Buffer, total: f64, t: f64| {
+        let (x, y) = (x(total, t), 2);
+        (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg)
+    };
+    let buf = draw(&app);
+    let total = app.total();
+    assert_eq!(cell(&buf, total, 0.0), ("✓".to_string(), Color::Green));
+    // Fail > Unverifiable and Unverifiable > Pass on one column.
+    assert_eq!(cell(&buf, total, 1.0), ("✗".to_string(), Color::Red));
+    assert_eq!(cell(&buf, total, 2.0), ("?".to_string(), Color::Yellow));
+    assert_eq!(cell(&buf, total, 5.0), ("✗".to_string(), Color::Red));
+    assert_eq!(
+        cell(&buf, total, 3.0).0,
+        " ",
+        "stale id: no annotation, no glyph"
+    );
+    assert_eq!(
+        cell(&buf, total, 1.5).0,
+        " ",
+        "another sequence's verdict does not mark this one"
+    );
+
+    // Scrolled past them: an off-viewport start hides like the playhead
+    // instead of piling on the left edge.
+    app.timeline_view.zoom = 4.0;
+    app.timeline_view.start = 5.0; // visible 5.0..6.93
+    let buf = draw(&app);
+    let row: String = (0..60)
+        .map(|x| buf[(x, 2)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    assert_eq!(row.matches('✗').count(), 1, "the visible verdict:\n{row}");
+    assert!(!row.contains(['✓', '?']), "the rest are off-screen:\n{row}");
+
+    // Switch to sequence #2: its own map marks its own timeline.
+    app.project.select_sequence(second).unwrap();
+    app.playhead = 0.0;
+    app.timeline_view.zoom = 1.0;
+    app.timeline_view.start = 0.0; // fit its 2 s timeline
+    let buf = draw(&app);
+    let total = app.total();
+    assert_eq!(cell(&buf, total, 1.5), ("✓".to_string(), Color::Green));
+    let row: String = (0..60)
+        .map(|x| buf[(x, 2)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    assert_eq!(
+        row.matches('✓').count(),
+        1,
+        "only sequence #2's verdict shows:\n{row}"
+    );
+    assert!(!row.contains(['✗', '?']), "{row}");
+}
+
 // The dump prints the model state and the grid — the diagnostic path.
 #[test]
 fn the_dump_prints_state_and_grid() {
