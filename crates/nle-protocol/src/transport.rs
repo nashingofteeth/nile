@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use nle_core::{Action, Project, Seconds, VideoSettings};
+use nle_core::{Action, CheckReport, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
 use crate::call::{
@@ -325,6 +325,25 @@ impl<R: BufRead, W: Write> Client<R, W> {
     pub fn annotations(&mut self, sequence: Option<u32>) -> Result<AnnotationList, ClientError> {
         match self.call(Call::AnnotationList { sequence })? {
             Reply::Annotations(list) => Ok(list),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    /// Check a render report against the sequence's expectations. `report` is
+    /// the exported video or its `.report.json` sidecar; the server requires
+    /// an absolute path.
+    pub fn checks(
+        &mut self,
+        report: PathBuf,
+        sequence: Option<u32>,
+        ids: Vec<u32>,
+    ) -> Result<CheckReport, ClientError> {
+        match self.call(Call::AnnotationCheck {
+            report,
+            sequence,
+            id: ids,
+        })? {
+            Reply::Checks(checks) => Ok(checks),
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }
