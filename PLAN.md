@@ -558,8 +558,11 @@ shared by the TUI and agents — with no clipgen code present.
   writes the typed payload, and `nile annotation check --report FILE
   [--sequence N] [--id N] [--json]` evaluates it against that export’s report
   (0 pass, 1 fail or unverifiable, 2 error). The protocol (`annotation.check`)
-  and TUI (`:annotation check`) share the same seam. Remaining: analysis-backed
-  checks (transcript store, CV).
+  and TUI (`:annotation check`) share the same seam. The transcript store
+  landed as `.nile/<stem>/analysis/transcripts/t1-…`: `nile analysis import`
+  and the protocol's `analysis.add` fill it, and `words-complete --transcript`
+  checks whole words against it. Remaining: CV-backed checks, which need the
+  §6 sampling and out-of-process analyzer contract.
 - **Gate:** ripple/split/trim/undo move timeline annotations while source
   annotations stay put; a note round-trips through the protocol and is
   visible in the TUI.

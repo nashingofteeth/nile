@@ -24,7 +24,7 @@ build — see "Learning Rust along the way".
 | transitions, blends | `docs/pitfalls/transitions.md` |
 | `nle-protocol`, `serve`, wire methods | `docs/pitfalls/protocol.md` |
 | sequences, selection, `nile sequence` | `docs/pitfalls/sequences.md` |
-| annotations, `nile annotation` | `docs/pitfalls/annotations.md` |
+| annotations, `nile annotation`, `analysis`, `nile analysis` | `docs/pitfalls/annotations.md` |
 | render reports, `nile report`, export | `docs/pitfalls/render-report.md` |
 | crop keyframes, keyed crop | `docs/pitfalls/crop-keyframes.md` |
 | worktrees, parallel agents | `docs/worktrees.md` |
@@ -175,8 +175,8 @@ plainly; never claim a pass you did not observe.
   apply"). Both stacks persist. Track add/mute/rm and multi-track sync ripples
   are whole-list changes (`Change::Tracks`), verified by exact equality.
 - **State lives with the project.** `nile.json` plus `.nile/<stem>/`
-  (`history.json`, `clipboard.json`, `cache/`); `nile default FILE` sets a
-  directory default (`.nile/config.json`), `--project` overrides. Legacy
+  (`history.json`, `clipboard.json`, `analysis/`, `cache/`); `nile default FILE`
+  sets a directory default (`.nile/config.json`), `--project` overrides. Legacy
   adjacent sidecars are copied in once — don't add scattered state files. The
   playhead stays in `Project.playhead`. The TUI adopts foreign changes and
   refuses to clobber (`persist_playhead` → `Ok(false)`).
