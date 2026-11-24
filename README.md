@@ -347,6 +347,8 @@ nile annotation add --expect crop-stable --max-move 10 --timeline --at 2 --track
 nile annotation check --report final.mp4   # video or .report.json
 nile annotation check --report final.mp4 --sequence 2 --id 3 --json
 # exit 0 pass · 1 fail or unverifiable · 2 error
+nile analysis import --asset 1 take.json    # prints the t1-… transcript hash
+nile annotation add --expect words-complete --timeline --at 2 --to 5 --transcript t1-…
 nile annotation ls                        # id, status, anchor and text
 nile annotation resolve 1                 # undoable; rm deletes instead
 nile remove 2                             # by clip id

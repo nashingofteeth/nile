@@ -100,3 +100,23 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   the report's sequence, cleared on reload and on any edit that changes that
   sequence. The marker row draws `✓`/`✗`/`?` at the span start through
   `Viewport::col`; the most severe wins (fail > unverifiable > pass).
+
+## Transcripts
+
+- **Content, not a name.** `Transcript` is one asset's word list in source
+  seconds; `Transcript::hash` canonicalises the words and hashes the JSON to
+  `t1-…`. The store is `.nile/<stem>/analysis/transcripts/<hash>`; re-importing
+  changed words makes a new address, while an old hash keeps naming exactly
+  the old words (no silent substitution).
+- **Import.** `nile analysis import --asset N FILE` reads
+  `{ "words": [ { "text", "start", "end" } ] }` (exact rational source
+  seconds), checks the asset and its probed duration, stores the canonical
+  document atomically, and prints the hash. `analysis.add { asset, words }`
+  is the protocol form and returns `{ hash }`; it writes analysis state, not
+  the project (no revision, history or event).
+- **Check.** `words-complete --transcript HASH` requires each relevant word to
+  be whole in one shown clip/transition side (trim, split or anchor-edge cuts
+  fail), with the transcript asset actually shown in the anchored span. A
+  point anchor, a missing/corrupt transcript, an absent/silent asset, or a
+  transcript asset outside the span is unverifiable. Without a hash, the same
+  check is audio coverage.
