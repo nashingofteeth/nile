@@ -395,6 +395,11 @@ enum Cmd {
         #[command(subcommand)]
         action: AnnotationCmd,
     },
+    /// Analysis products stored beside the project: transcripts
+    Analysis {
+        #[command(subcommand)]
+        action: AnalysisCmd,
+    },
     /// Print the report written beside an exported file (output-relative)
     Report {
         /// The exported video (or its .report.json)
@@ -776,6 +781,19 @@ impl ExpectCheck {
     }
 }
 
+/// Analysis-product subcommands.
+#[derive(Debug, Subcommand)]
+enum AnalysisCmd {
+    /// Store a transcript for an asset and print its content hash
+    Import {
+        /// Asset id (from `nile media ls`)
+        #[arg(long)]
+        asset: u32,
+        /// JSON file: { "words": [ { "text", "start", "end" } ] }
+        file: PathBuf,
+    },
+}
+
 /// Media-group subcommands.
 #[derive(Debug, Subcommand)]
 enum GroupCmd {
@@ -986,6 +1004,9 @@ fn main() -> Result<()> {
                     json,
                 },
         } => return cmd_annotation_check(&project, report, *sequence, id, *json),
+        Cmd::Analysis {
+            action: AnalysisCmd::Import { asset, file },
+        } => return cmd::analysis::cmd_import(&project, *asset, file),
         Cmd::Report { .. } => unreachable!("handled before project resolution"),
         Cmd::ImportEdl {
             file,

@@ -514,6 +514,73 @@ fn annotation_check_passes_a_matching_render_and_fails_a_wrong_camera() {
 }
 
 #[test]
+fn analysis_import_stores_a_transcript_and_words_complete_uses_it() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6; red's asset is #1
+    s.write(
+        "take.json",
+        r#"{"words":[{"text":"hello","start":"0/1","end":"1/1"}]}"#,
+    );
+    let hash = s
+        .ok(&["analysis", "import", "--asset", "1", "take.json"])
+        .trim()
+        .to_string();
+    assert!(hash.starts_with("t1-"), "{hash}");
+    let store = nle_core::state::state_dir(&s.file(P)).join("analysis/transcripts");
+    assert!(store.join(&hash).is_file(), "stored {hash} in {store:?}");
+
+    // A whole word in the first clip.
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "words-complete",
+        "--timeline",
+        "--at",
+        "0",
+        "--to",
+        "2",
+        "--transcript",
+        &hash,
+    ]);
+    // A word cut by the anchor's end.
+    s.write(
+        "cut.json",
+        r#"{"words":[{"text":"cut","start":"1/1","end":"3/1"}]}"#,
+    );
+    let cut = s
+        .ok(&["analysis", "import", "--asset", "1", "cut.json"])
+        .trim()
+        .to_string();
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "words-complete",
+        "--timeline",
+        "--at",
+        "0",
+        "--to",
+        "2",
+        "--transcript",
+        &cut,
+    ]);
+    // Both expectations precede the export, so the report's revision matches.
+    s.export("words.mp4");
+
+    let out = s.run(&["annotation", "check", "--report", "words.mp4", "--id", "1"]);
+    assert!(out.status.success(), "{}", merged(&out));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("1/1 words complete"), "{text}");
+
+    let out = s.run(&["annotation", "check", "--report", "words.mp4", "--id", "2"]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    let text = merged(&out);
+    assert!(text.contains("0/1 words complete"), "{text}");
+    assert!(text.contains("at source 1 s is cut"), "{text}");
+}
+
+#[test]
 fn annotation_check_counts_unverifiable_and_resolved_failures_as_failed() {
     let s = Sandbox::new();
     s.base();

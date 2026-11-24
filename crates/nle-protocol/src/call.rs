@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use nle_core::analysis::Word;
 use nle_core::{
     Action, Annotation, CheckReport, Project, ProjectDiff, Seconds, Sequence, VideoSettings,
 };
@@ -113,6 +114,12 @@ wire_catalog! {
             #[serde(default)]
             id: Vec<u32>,
         } = "annotation.check";
+        /// Store a transcript for an asset in the project's analysis state.
+        /// Not a project write: the revision and history are untouched.
+        AnalysisAdd {
+            asset: u32,
+            words: Vec<Word>,
+        } = "analysis.add";
     }
 }
 
@@ -208,6 +215,7 @@ pub enum Reply {
     Media(MediaList),
     Annotations(AnnotationList),
     Checks(CheckReport),
+    Analysis(AnalysisHash),
     Preview(Preview),
     Playhead(PlayheadReply),
 }
@@ -224,6 +232,7 @@ impl Reply {
             Reply::Media(_) => "media",
             Reply::Annotations(_) => "annotations",
             Reply::Checks(_) => "checks",
+            Reply::Analysis(_) => "analysis",
             Reply::Preview(_) => "preview",
             Reply::Playhead(_) => "playhead",
         }
@@ -256,6 +265,8 @@ impl Reply {
                 }),
             (Reply::Checks(checks), Call::AnnotationCheck { .. }) => serde_json::to_value(checks)
                 .map_err(|e| RpcError::internal(format!("check report is not serializable: {e}"))),
+            (Reply::Analysis(hash), Call::AnalysisAdd { .. }) => serde_json::to_value(hash)
+                .map_err(|e| RpcError::internal(format!("analysis hash is not serializable: {e}"))),
             (Reply::Playhead(at), Call::PlayheadSet { .. }) => {
                 serde_json::to_value(at).map_err(|e| {
                     RpcError::internal(format!("playhead reply is not serializable: {e}"))
@@ -292,6 +303,7 @@ impl Reply {
             }
             Call::AnnotationList { .. } => serde_json::from_value(result).map(Reply::Annotations),
             Call::AnnotationCheck { .. } => serde_json::from_value(result).map(Reply::Checks),
+            Call::AnalysisAdd { .. } => serde_json::from_value(result).map(Reply::Analysis),
             Call::PlayheadSet { .. } => serde_json::from_value(result).map(Reply::Playhead),
             Call::ActionPreview { .. } => serde_json::from_value(result).map(Reply::Preview),
             Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {
@@ -329,6 +341,12 @@ pub struct Outcome {
 pub struct AnnotationList {
     pub sequence: u32,
     pub annotations: Vec<Annotation>,
+}
+
+/// The content address returned by `analysis.add`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalysisHash {
+    pub hash: String,
 }
 
 impl AnnotationList {

@@ -1316,6 +1316,46 @@ fn output_plumbing() {
     );
 }
 
+#[test]
+fn analysis_import_refuses_bad_input() {
+    let s = Sandbox::new();
+    s.base();
+    s.write(
+        "take.json",
+        r#"{"words":[{"text":"take","start":"0/1","end":"1/1"}]}"#,
+    );
+    s.write("bad.json", "{");
+    s.write(
+        "late.json",
+        r#"{"words":[{"text":"late","start":"0/1","end":"99/1"}]}"#,
+    );
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "bad json",
+            &["analysis", "import", "--asset", "1", "bad.json"],
+        ),
+        (
+            "missing file",
+            &["analysis", "import", "--asset", "1", "missing.json"],
+        ),
+        (
+            "missing asset",
+            &["analysis", "import", "--asset", "99", "take.json"],
+        ),
+        (
+            "word past the asset",
+            &["analysis", "import", "--asset", "1", "late.json"],
+        ),
+    ];
+    for &(label, argv) in cases {
+        let out = s.run(argv);
+        let text = merged(&out);
+        assert_eq!(out.status.code(), Some(1), "{label}: {text}");
+        assert!(!text.contains("panicked"), "{label}: {text}");
+    }
+    s.assert_loads("analysis import garbage", "");
+}
+
 // The diagnostic path runs without a monitor, but it still creates a scratch
 // copy. A TMPDIR it cannot use must be refused cleanly (1), never panicked
 // (101). Non-unix `temp_dir()` ignores TMPDIR, so this only means something

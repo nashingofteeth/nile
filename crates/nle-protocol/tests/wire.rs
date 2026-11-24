@@ -5,17 +5,18 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
+use nle_core::analysis::Word;
 use nle_core::expect::{CheckOutcome, CheckReport, CheckSummary, ReportRef};
 use nle_core::{
     Action, AnnotationStatus, CheckResult, Project, ProjectDiff, Seconds, TransitionKind,
     TransitionLen,
 };
 use nle_protocol::{
-    AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR, INVALID_PARAMS,
-    INVALID_REQUEST, Id, METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage, Notification,
-    Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply, Preview, REVISION_CONFLICT, Reply,
-    Request, Response, RevisionConflict, RpcError, SequenceList, SequenceReply, SequenceSummary,
-    Server,
+    AnalysisHash, AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR,
+    INVALID_PARAMS, INVALID_REQUEST, Id, METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage,
+    Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply, Preview,
+    REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError, SequenceList,
+    SequenceReply, SequenceSummary, Server,
 };
 use serde_json::{Value, json};
 
@@ -197,6 +198,9 @@ impl Handler for Fake {
                     ..CheckSummary::default()
                 },
             })),
+            Call::AnalysisAdd { asset, words } => Ok(Reply::Analysis(AnalysisHash {
+                hash: format!("t1-{:016x}", u64::from(*asset) + words.len() as u64),
+            })),
         }
     }
 
@@ -299,6 +303,14 @@ fn all_calls() -> Vec<Call> {
             report: PathBuf::from("/media/out.mp4"),
             sequence: Some(1),
             id: vec![2],
+        },
+        Call::AnalysisAdd {
+            asset: 1,
+            words: vec![Word {
+                text: "take".to_string(),
+                start: Seconds::from_integer(0),
+                end: Seconds::from_integer(1),
+            }],
         },
     ]
 }
@@ -1177,6 +1189,33 @@ fn the_checks_helper_sends_and_decodes_the_report() {
     assert_eq!(request.params["report"], "/media/out.mp4");
     assert_eq!(request.params["sequence"], 1);
     assert_eq!(request.params["id"], json!([2]));
+}
+
+#[test]
+fn analysis_add_round_trips_words_and_returns_an_address() {
+    let call = Call::AnalysisAdd {
+        asset: 1,
+        words: vec![Word {
+            text: "take".to_string(),
+            start: Seconds::from_integer(0),
+            end: Seconds::from_integer(1),
+        }],
+    };
+    let params = call.params().expect("params");
+    assert_eq!(params["asset"], 1);
+    assert_eq!(params["words"][0]["text"], "take");
+    assert_eq!(params["words"][0]["start"], "0/1");
+    assert_eq!(Call::decode("analysis.add", params).expect("decode"), call);
+
+    let (reply, output) = exchange(&mut Fake::new(7), call);
+    let Reply::Analysis(hash) = reply.expect("analysis") else {
+        panic!("expected an analysis hash");
+    };
+    assert!(hash.hash.starts_with("t1-"), "{hash:?}");
+    let output = String::from_utf8(output).expect("utf-8");
+    let response: Value =
+        serde_json::from_str(output.lines().next().expect("one response")).expect("json");
+    assert_eq!(response["result"]["hash"], hash.hash);
 }
 
 #[test]

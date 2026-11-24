@@ -28,6 +28,7 @@ use anyhow::{Context, Result};
 
 use crate::{log, say_err};
 
+use nle_core::analysis::{AnalysisError, Transcript, TranscriptStore, Word};
 use nle_core::edit::Actor;
 use nle_core::{
     Action, Asset, EditError, Outcome as ActionOutcome, Project, Seconds, TrackKind, frame_of,
@@ -35,7 +36,7 @@ use nle_core::{
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
-    AnnotationList, Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage,
+    AnalysisHash, AnnotationList, Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage,
     Outcome as WireOutcome, PlayheadReply, Preview, Reply, RpcError, SequenceList, SequenceReply,
     SequenceSummary, Server,
 };
@@ -417,6 +418,7 @@ impl Handler for ServeHandler {
                 sequence,
                 id,
             } => self.annotation_check(report, *sequence, id),
+            Call::AnalysisAdd { asset, words } => self.analysis_add(*asset, words.clone()),
         }
     }
 
@@ -478,6 +480,23 @@ impl ServeHandler {
         )
         .map_err(|e| RpcError::invalid_params(e.to_string()))?;
         Ok(Reply::Checks(checks))
+    }
+
+    /// Store a transcript in the project's analysis state and return its
+    /// content address. Analysis state is beside the project, not in it: no
+    /// save, revision bump, history entry or event.
+    fn analysis_add(&self, asset: u32, words: Vec<Word>) -> Result<Reply, RpcError> {
+        let media = self.session.project().asset(asset).ok_or_else(|| {
+            RpcError::invalid_params(format!("asset #{asset} is not in the media pool"))
+        })?;
+        let transcript = Transcript::new(asset, words);
+        transcript
+            .validate(media.probe.duration())
+            .map_err(analysis_error)?;
+        let hash = TranscriptStore::at(self.session.path())
+            .import(&transcript)
+            .map_err(analysis_error)?;
+        Ok(Reply::Analysis(AnalysisHash { hash }))
     }
 
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {
@@ -855,6 +874,17 @@ fn edit_rpc(error: EditError) -> RpcError {
     }
 }
 
+/// Analysis input errors are the caller's; store failures are the server's.
+/// The split matches `media.add`: a bad word is invalid params, a read-only or
+/// corrupt analysis store is internal, not a request to rewrite the words.
+fn analysis_error(error: AnalysisError) -> RpcError {
+    let message = error.to_string();
+    match error {
+        AnalysisError::Invalid(_) => RpcError::invalid_params(message),
+        _ => RpcError::internal(message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,6 +909,16 @@ mod tests {
         let h = handler();
         let error = h.check_revision(9).expect_err("stale");
         assert_eq!(error.code, nle_protocol::REVISION_CONFLICT);
+    }
+
+    #[test]
+    fn analysis_store_failures_are_internal_not_the_callers_fault() {
+        let invalid = analysis_error(AnalysisError::Invalid("bad word".to_string()));
+        assert_eq!(invalid.code, nle_protocol::INVALID_PARAMS);
+        assert!(invalid.message.contains("bad word"));
+
+        let io = analysis_error(AnalysisError::Io(std::io::Error::other("read-only")));
+        assert_eq!(io.code, nle_protocol::INTERNAL_ERROR);
     }
 
     #[test]

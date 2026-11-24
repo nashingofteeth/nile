@@ -7,6 +7,8 @@
 mod common;
 
 use common::{P, Sandbox};
+use nle_core::Seconds;
+use nle_core::analysis::Word;
 use serde_json::{Value, json};
 
 fn active(project: &Value) -> &Value {
@@ -1107,6 +1109,91 @@ fn annotation_list_and_add_over_the_protocol() {
     let status = serve.finish();
     assert!(status.success(), "nile serve exited: {status:?}");
     assert!(sandbox.ok(&["annotation", "ls"]).contains("check the cut"));
+}
+
+#[test]
+fn analysis_add_stores_a_transcript_and_words_complete_reads_it() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    let hash = serve
+        .client()
+        .add_transcript(
+            1,
+            vec![Word {
+                text: "hello".to_string(),
+                start: Seconds::from_integer(0),
+                end: Seconds::from_integer(1),
+            }],
+        )
+        .expect("analysis.add");
+    assert!(hash.hash.starts_with("t1-"), "{hash:?}");
+
+    // Analysis state is not a project write: the revision does not move.
+    let after = call(&mut serve, 2, "hello", None);
+    assert_eq!(after["result"]["revision"], revision);
+
+    let applied = call(
+        &mut serve,
+        3,
+        "action.apply",
+        Some(json!({
+            "base_revision": revision,
+            "actions": [{
+                "action": "annotation_add_at",
+                "track": 0,
+                "at": 0.0,
+                "to": 2.0,
+                "kind": {
+                    "kind": "expectation",
+                    "expect": {
+                        "check": "words_complete",
+                        "min_coverage": 1.0,
+                        "transcript": hash.hash
+                    }
+                }
+            }]
+        })),
+    );
+    assert_eq!(applied["result"]["depth"], 1);
+    let revision = applied["result"]["revision"].as_u64().expect("revision");
+    let event = serve.read();
+    assert_eq!(event["method"], "project.changed");
+
+    // Export after the expectation so the report's revision matches.
+    sandbox.export("words.mp4");
+    let out = sandbox.file("words.mp4").display().to_string();
+    let checked = call(
+        &mut serve,
+        4,
+        "annotation.check",
+        Some(json!({"report": out})),
+    );
+    assert_eq!(
+        checked["result"]["checks"][0]["check"], "words_complete",
+        "{checked}"
+    );
+    assert_eq!(
+        checked["result"]["checks"][0]["result"], "pass",
+        "{checked}"
+    );
+    assert_eq!(checked["result"]["summary"]["pass"], 1);
+
+    // A missing asset is invalid params, not a store failure.
+    let bad = call(
+        &mut serve,
+        5,
+        "analysis.add",
+        Some(json!({"asset": 99, "words": []})),
+    );
+    assert_eq!(bad["error"]["code"], -32602);
+
+    // The check is a read: the revision is still the one after the add.
+    let final_hello = call(&mut serve, 6, "hello", None);
+    assert_eq!(final_hello["result"]["revision"], revision);
 }
 
 #[test]
