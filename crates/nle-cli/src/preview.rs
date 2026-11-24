@@ -684,10 +684,15 @@ pub fn build_composite_preview_with(
     progress: ProgressFn<'_>,
 ) -> Result<PreviewBuild, PreviewError> {
     let segs = composite_segments_with(project, project_path, progress)?;
-    let needs_audio = segs.iter().any(|s| match s {
-        Segment::Gap { .. } => true,
-        Segment::Clip { path, .. } => !project.media.iter().any(|a| &a.path == path),
-    });
+    // A gap or proxy span is a seam mpv would restart its audio chain over;
+    // audio post also needs the continuous master because its filters shape
+    // the whole programme (a clean-cut timeline otherwise plays the EDL's own
+    // audio). `ensure_audio_master` still no-ops when nothing has audio.
+    let needs_audio = project.audio.is_active()
+        || segs.iter().any(|s| match s {
+            Segment::Gap { .. } => true,
+            Segment::Clip { path, .. } => !project.media.iter().any(|a| &a.path == path),
+        });
     let url = edl_from_segments(project, project_path, &segs)?;
     let audio = if needs_audio {
         ensure_audio_master(project, project_path)
@@ -1466,6 +1471,20 @@ mod tests {
         assert!(nle_ffmpeg::probe(&audio).unwrap().has_audio());
         let again = build_composite_preview_with(&p, &project_path, &mut |_, _, _| {}).unwrap();
         assert_eq!(again.audio, Some(audio), "the master is cached");
+
+        // A clean cut has no seam to hide, so the EDL's own audio is enough —
+        // until audio post shapes the whole programme, which needs the master.
+        p.timeline.tracks[0]
+            .segments
+            .retain(|seg| !matches!(seg, TimelineSegment::Gap { .. }));
+        let clean = build_composite_preview_with(&p, &project_path, &mut |_, _, _| {}).unwrap();
+        assert!(clean.audio.is_none(), "no seam and no audio post");
+        p.audio.normalize = true;
+        let post = build_composite_preview_with(&p, &project_path, &mut |_, _, _| {}).unwrap();
+        assert!(
+            post.audio.is_some_and(|path| path.is_file()),
+            "an active audio setting needs the continuous master"
+        );
     }
 
     #[test]

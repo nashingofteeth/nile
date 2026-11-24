@@ -1223,7 +1223,8 @@ impl Project {
                         id: before.id,
                         settings_changed: before.name != after.name
                             || before.fps != after.fps
-                            || before.video != after.video,
+                            || before.video != after.video
+                            || before.audio != after.audio,
                         ..Default::default()
                     };
                     let before_tracks = &before.timeline.tracks;
@@ -1656,8 +1657,8 @@ mod tests {
 
     #[test]
     fn audio_post_defaults_when_the_field_is_absent() {
-        // v18 adds `audio`; a sequence JSON without it must read as off/zero
-        // rather than fail, so hand-written and freshly-upgraded state agree.
+        // v18 adds `audio`; a hand-written project missing the field must
+        // read as off/zero rather than fail.
         let sequence: Sequence = serde_json::from_value(serde_json::json!({
             "id": 1,
             "fps": "30/1",
@@ -2605,6 +2606,25 @@ mod tests {
         let id = with_sequence.add_sequence("Second", None, None);
         let diff = before.diff(&with_sequence);
         assert_eq!(diff.sequences_added, vec![id]);
+    }
+
+    #[test]
+    fn project_diff_reports_audio_settings() {
+        let before = sample_project();
+        let mut after = before.clone();
+        after.audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::new(1, 2),
+            fade_out: Seconds::new(1, 4),
+        };
+        let diff = before.diff(&after);
+        assert_eq!(diff.sequences.len(), 1);
+        assert!(
+            diff.sequences[0].settings_changed,
+            "audio post is a sequence setting"
+        );
+        assert!(diff.sequences[0].tracks.is_empty());
+        assert!(!diff.is_empty());
     }
 
     #[test]

@@ -228,6 +228,10 @@ fn audio_post_chain(audio: &AudioSettings, duration: Seconds, audible: bool) -> 
     if audio.normalize {
         chain.push(',');
         chain.push_str(LOUDNORM_FILTER);
+        // `loudnorm` upsamples its output to 192 kHz; pin the mix back to the
+        // graph's 48 kHz so the encoder and the monitor see one rate. A
+        // fades-only chain is already 48 kHz and needs no resample.
+        chain.push_str(",aresample=48000");
     }
     let zero = Seconds::from_integer(0);
     let total = secs_f64(&duration).max(0.0);
@@ -1686,6 +1690,10 @@ mod tests {
         assert_eq!(plan.duration, Seconds::from_integer(15));
         let g = &plan.graph;
         assert!(g.contains(LOUDNORM_FILTER), "{g}");
+        assert!(
+            g.contains(&format!("{LOUDNORM_FILTER},aresample=48000")),
+            "loudnorm's 192 kHz output is pinned back to the graph rate:\n{g}"
+        );
         assert!(g.contains("afade=t=in:st=0:d=0.5"), "{g}");
         // Fade-out starts 0.25 s before the 15 s programme end.
         assert!(g.contains("afade=t=out:st=14.75:d=0.25[aout]"), "{g}");

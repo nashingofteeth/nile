@@ -115,6 +115,11 @@ fn sequence_audio_settings_round_trip_and_undo() {
         s.ok(&["sequence", "ls"]).contains("audio normalize on"),
         "the listing exposes the setting"
     );
+    assert!(
+        s.show().contains("audio normalize on"),
+        "the show header exposes the setting:\n{}",
+        s.show()
+    );
 
     // One undo restores defaults, redo brings the setting back.
     s.ok(&["undo"]);
@@ -1603,6 +1608,11 @@ fn audio_post_exports_one_aac_stream_and_keeps_the_duration() {
         ["aac"],
         "one mixed AAC stream, encoded once"
     );
+    assert_eq!(
+        s.audio_sample_rate("post.mp4"),
+        48_000,
+        "loudnorm's 192 kHz output is resampled back to the graph rate"
+    );
 }
 
 #[test]
@@ -1629,6 +1639,11 @@ fn speech_fades_shape_the_head_and_tail() {
     s.ok(&["sequence", "audio", "--fade-in", "1", "--fade-out", "1"]);
     s.export("fade.mp4");
     s.assert_dur("fade.mp4", 4.0, "fades do not change the length");
+    assert_eq!(
+        s.audio_sample_rate("fade.mp4"),
+        48_000,
+        "a fades-only chain stays at the graph rate"
+    );
     let head = s.audio_mean_volume("fade.mp4", 0.0, 0.1);
     let middle = s.audio_mean_volume("fade.mp4", 2.0, 0.2);
     let tail = s.audio_mean_volume("fade.mp4", 3.9, 0.1);
@@ -1639,6 +1654,39 @@ fn speech_fades_shape_the_head_and_tail() {
     assert!(
         tail < middle - 8.0,
         "fade-out: tail {tail:.1} dB vs middle {middle:.1} dB"
+    );
+}
+
+#[test]
+fn normalize_and_fades_compose_in_one_chain() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["add", "green.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&[
+        "sequence",
+        "audio",
+        "--normalize",
+        "--fade-in",
+        "0.5",
+        "--fade-out",
+        "0.5",
+    ]);
+    s.export("post-fade.mp4");
+    s.assert_dur("post-fade.mp4", 4.0, "the full chain keeps the length");
+    assert_eq!(s.audio_streams("post-fade.mp4"), ["aac"]);
+    assert_eq!(s.audio_sample_rate("post-fade.mp4"), 48_000);
+    let head = s.audio_mean_volume("post-fade.mp4", 0.0, 0.1);
+    let middle = s.audio_mean_volume("post-fade.mp4", 2.0, 0.2);
+    let tail = s.audio_mean_volume("post-fade.mp4", 3.9, 0.1);
+    assert!(
+        head < middle - 4.0,
+        "normalize + fade-in: head {head:.1} dB vs middle {middle:.1} dB"
+    );
+    assert!(
+        tail < middle - 4.0,
+        "normalize + fade-out: tail {tail:.1} dB vs middle {middle:.1} dB"
     );
 }
 

@@ -422,6 +422,23 @@ impl Sandbox {
         .collect()
     }
 
+    /// The first audio stream's sample rate in Hz.
+    pub fn audio_sample_rate(&self, file: &str) -> u32 {
+        self.probe(
+            file,
+            &[
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=sample_rate",
+                "-of",
+                "csv=p=0",
+            ],
+        )
+        .parse()
+        .unwrap_or_else(|_| panic!("sample rate of {file}"))
+    }
+
     /// Mean volume (dBFS) of `[at, at + dur)` — the fade check. `volumedetect`
     /// over the decoded audio; `-ss` sits before `-i` so ffmpeg seeks and then
     /// decodes accurately (output-side trimming here measured the wrong span).

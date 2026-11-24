@@ -812,6 +812,9 @@ pub(crate) fn show_report(project: &Project) -> String {
     if let Some(v) = &project.video {
         out += &format!(" · {}×{}", v.width, v.height);
     }
+    if project.audio.is_active() {
+        out += &format!(" · audio {}", project.audio.summary());
+    }
     out += &format!(" · at {} s", format_seconds(&project.playhead));
     out.push('\n');
 
