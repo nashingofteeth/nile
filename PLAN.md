@@ -44,7 +44,7 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v16, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v17, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
@@ -553,7 +553,13 @@ shared by the TUI and agents — with no clipgen code present.
   history v23), `nile annotation add|ls|rm|resolve` (including `--timeline`),
   `:note`, and the additive `annotation.list` method. Timeline anchors follow
   trims/splits/ripples, a split re-anchors, and undo restores dropped notes.
-  Remaining: expectation payloads (after the render report).
+  Expectations landed with project v17: `nile annotation add --expect
+  cam|crop-stable|work-in-frame|words-complete|absent|no-sliver --timeline …`
+  writes the typed payload, and `nile annotation check --report FILE
+  [--sequence N] [--id N] [--json]` evaluates it against that export’s report
+  (0 pass, 1 fail or unverifiable, 2 error). The protocol (`annotation.check`)
+  and TUI (`:annotation check`) share the same seam. Remaining: analysis-backed
+  checks (transcript store, CV).
 - **Gate:** ripple/split/trim/undo move timeline annotations while source
   annotations stay put; a note round-trips through the protocol and is
   visible in the TUI.
@@ -575,9 +581,10 @@ shared by the TUI and agents — with no clipgen code present.
   retained reports; the TUI job list becomes the real queue.
 - Landed so far: `RenderReport` v1 beside each export (piecewise frame map,
   topmost video, blends both sides, chunk windows) and `nile report FILE
-  [--json]`; `Effect::Crop` is a window with keyframes (project v16, history
-  v23): x/y animate, w/h step at keys, and height rungs are authoring-only.
-  Remaining: audio post, jobs.
+  [--json]`, which `nile annotation check` also consumes (expectations
+  evaluated over the frame map); `Effect::Crop` is a window with keyframes
+  (project v16, history v23): x/y animate, w/h step at keys, and height rungs
+  are authoring-only. Remaining: audio post, jobs.
 - **Gate:** a keyframed crop export is frame-exact and its report maps a
   moved note to the right frame; a cancelled job leaves no half-written
   deliverable.
