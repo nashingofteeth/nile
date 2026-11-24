@@ -53,8 +53,8 @@ pub use group::{MediaGroup, MediaPart};
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
 pub use project::{
-    Asset, Project, ProjectDiff, ProjectError, Sequence, SequenceDiff, SequenceOrigin, TrackDiff,
-    VideoSettings,
+    Asset, AudioSettings, Project, ProjectDiff, ProjectError, Sequence, SequenceDiff,
+    SequenceOrigin, TrackDiff, VideoSettings,
 };
 pub use provenance::{Actor, Provenance};
 pub use report::{

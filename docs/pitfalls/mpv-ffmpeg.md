@@ -45,6 +45,35 @@ five-second proxy/gap/transition EDL went from
 two ~410 ms stalls to none in the same test. The video EDL still switches; it
 just no longer drags the audio clock with it.
 
+## Sequence audio post
+
+- **Settings belong to the sequence, the chain to the final mix.**
+  `AudioSettings { normalize, fade_in, fade_out }` is applied once after the
+  final `concat`/`amix`, so it shapes the programme, not each clip. The
+  default (off/zero) appends nothing and keeps the classic graph
+  byte-identical; `audio_post_chain` is the one place the filters are spelled.
+- **Target is EBU R128 speech-first:** -16 LUFS integrated, -1.5 dBTP true
+  peak, LRA 11 (`LOUDNORM_FILTER`). One-pass `loudnorm`; two-pass measurement
+  is a later optimization, not a second path.
+- Fades are clamped to the programme length when the chain is built, so
+  `afade` never gets a negative `st`. Both are ordinary `afade=t=in|out`; an
+  overlap is a product of the two envelopes (no error).
+- **No audio stream, no audio post.** A video-only programme is padded with
+  silence, and `loudnorm` maps digital silence to NaN (the AAC encoder then
+  refuses it), so `has_audio_material` gates the chain: the export still
+  carries its AAC silence track but applies no normalize/fade. A *silent*
+  audio stream is not detected (that would need decoding); it is the one case
+  `loudnorm` can still reject.
+- **Chunking steps aside.** The scheduler renders each chunk as its own
+  graph, which would repeat loudnorm/fades per chunk and at every seam.
+  `run_export` refuses the chunk path when `AudioSettings::is_active()` and
+  says `single (audio post needs one encode)`; the final mux still encodes
+  AAC exactly once. Moving the chain to the scheduler's final mux is the
+  deferred way to combine audio post with parallel chunks.
+- The monitor's continuous audio master hashes the settings
+  (`AUDIO_PREVIEW_VERSION` bumped), so changing them re-renders the preview
+  mix, and `export_audio_quiet` uses the same graph as the deliverable.
+
 ## Filter-graph gotchas
 
 - `crop`/`scale` are masks: they keep the canvas and pad `black@0` on

@@ -746,7 +746,7 @@ fn ensure_audio_master(project: &Project, project_path: &Path) -> Option<PathBuf
     Some(path)
 }
 
-const AUDIO_PREVIEW_VERSION: u64 = 2;
+const AUDIO_PREVIEW_VERSION: u64 = 3;
 
 #[derive(Hash)]
 struct AudioKeySide {
@@ -800,6 +800,9 @@ fn audio_hash(project: &Project) -> u64 {
     let mut h = DefaultHasher::new();
     AUDIO_PREVIEW_VERSION.hash(&mut h);
     project.fps.map(|f| pair(&f)).hash(&mut h);
+    project.audio.normalize.hash(&mut h);
+    pair(&project.audio.fade_in).hash(&mut h);
+    pair(&project.audio.fade_out).hash(&mut h);
     for track in &project.timeline.tracks {
         format!("{:?}", track.kind).hash(&mut h);
         track.muted.hash(&mut h);

@@ -88,6 +88,58 @@ fn sequence_add_rejects_a_non_positive_frame_rate() {
 }
 
 #[test]
+fn sequence_audio_settings_round_trip_and_undo() {
+    let s = Sandbox::new();
+    s.base();
+
+    // Defaults are off/zero, and reading them is a no-op command.
+    let shown = s.ok(&["sequence", "audio"]);
+    assert!(shown.contains("normalize off"), "{shown}");
+    assert!(shown.contains("fade-in 0 s"), "{shown}");
+
+    s.ok(&[
+        "sequence",
+        "audio",
+        "--normalize",
+        "--fade-in",
+        "0.5",
+        "--fade-out",
+        "1",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["sequences"][0]["audio"]["normalize"], true);
+    assert_eq!(project["sequences"][0]["audio"]["fade_in"], "1/2");
+    assert_eq!(project["sequences"][0]["audio"]["fade_out"], "1/1");
+    assert!(
+        s.ok(&["sequence", "ls"]).contains("audio normalize on"),
+        "the listing exposes the setting"
+    );
+
+    // One undo restores defaults, redo brings the setting back.
+    s.ok(&["undo"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["sequences"][0]["audio"]["normalize"], false);
+    assert_eq!(project["sequences"][0]["audio"]["fade_in"], "0/1");
+    s.ok(&["redo"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(project["sequences"][0]["audio"]["normalize"], true);
+
+    // A negative fade is refused by the time parser, not clamped silently.
+    let out = s.run(&["sequence", "audio", "--fade-in", "-1"]);
+    assert!(!out.status.success(), "--fade-in -1 must be refused");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("fade-in"), "{text}");
+    assert!(!text.contains("panicked"), "{text}");
+}
+
+#[test]
 fn show_json_does_not_rewrite_the_active_sequence() {
     let s = Sandbox::new();
     s.base();
@@ -834,7 +886,11 @@ fn show_json_exposes_time_maps_and_groups() {
     s.base();
     let project: serde_json::Value =
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
-    assert_eq!(project["version"], 17);
+    assert_eq!(
+        project["version"],
+        nle_core::project::PROJECT_VERSION,
+        "the JSON names the build's project version"
+    );
     assert_eq!(project["groups"], serde_json::json!([]));
     assert!(
         project.get("time_maps").is_none(),
@@ -1518,6 +1574,72 @@ fn audio_track_mixes_in() {
     s.export("a.mp4");
     s.assert_dur("a.mp4", 2.0, "2 s");
     assert!(s.has_audio("a.mp4"), "audio stream present");
+}
+
+#[test]
+fn audio_post_exports_one_aac_stream_and_keeps_the_duration() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["add", "green.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["sequence", "audio", "--normalize"]);
+
+    // Audio post is a whole-programme stage, so the chunk scheduler must step
+    // aside rather than apply loudnorm/fades once per chunk. One graph, one
+    // final AAC encode.
+    let summary = s.ok(&["export", "--parallel", "2", "-o", "post.mp4"]);
+    assert!(
+        summary.contains("single (audio post needs one encode)"),
+        "{summary}"
+    );
+    s.assert_dur(
+        "post.mp4",
+        4.0,
+        "the requested duration survives audio post",
+    );
+    assert_eq!(
+        s.audio_streams("post.mp4"),
+        ["aac"],
+        "one mixed AAC stream, encoded once"
+    );
+}
+
+#[test]
+fn normalizing_a_video_only_programme_exports_silence() {
+    // There is no audio stream to measure; emitting `loudnorm` over the
+    // padded silence makes ffmpeg fail ("Conversion failed"), so the stage is
+    // skipped and the AAC silence track still comes out.
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "video_only.mp4"]);
+    s.ok(&["add", "video_only.mp4", "--in", "0", "--out", "1"]);
+    s.ok(&["sequence", "audio", "--normalize", "--fade-in", "0.5"]);
+    s.export("silent.mp4");
+    s.assert_dur("silent.mp4", 1.0, "the video-only length");
+    assert_eq!(s.audio_streams("silent.mp4"), ["aac"]);
+}
+
+#[test]
+fn speech_fades_shape_the_head_and_tail() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "4"]);
+    s.ok(&["sequence", "audio", "--fade-in", "1", "--fade-out", "1"]);
+    s.export("fade.mp4");
+    s.assert_dur("fade.mp4", 4.0, "fades do not change the length");
+    let head = s.audio_mean_volume("fade.mp4", 0.0, 0.1);
+    let middle = s.audio_mean_volume("fade.mp4", 2.0, 0.2);
+    let tail = s.audio_mean_volume("fade.mp4", 3.9, 0.1);
+    assert!(
+        head < middle - 8.0,
+        "fade-in: head {head:.1} dB vs middle {middle:.1} dB"
+    );
+    assert!(
+        tail < middle - 8.0,
+        "fade-out: tail {tail:.1} dB vs middle {middle:.1} dB"
+    );
 }
 
 /// The project file as JSON.

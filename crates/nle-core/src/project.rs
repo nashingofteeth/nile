@@ -34,8 +34,10 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// v12 adds logical media groups; v13 adds annotations; v14 adds
 /// clip-relative timeline anchors; v15 stores crop as a window; v16 adds
 /// crop keyframes; v17 adds the `expectation` annotation payload (a typed
-/// check a render must satisfy) and the CLI that writes and runs it.
-pub const PROJECT_VERSION: u32 = 17;
+/// check a render must satisfy) and the CLI that writes and runs it;
+/// v18 adds per-sequence audio-post settings (loudness normalization and
+/// programme fades).
+pub const PROJECT_VERSION: u32 = 18;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -65,6 +67,8 @@ pub enum ProjectError {
     SequenceDuplicate(u32),
     #[error("sequence #{0} has a non-positive frame rate")]
     NonPositiveFps(u32),
+    #[error("sequence #{0}: {1}")]
+    SequenceAudio(u32, String),
     #[error("track #{0} not found")]
     TrackNotFound(usize),
     #[error("media group #{0} not found")]
@@ -96,6 +100,65 @@ pub enum ProjectError {
 pub struct VideoSettings {
     pub width: u32,
     pub height: u32,
+}
+
+/// Audio post applied to the **mixed** programme at export (and to the
+/// monitor's audio master). Defaults are off/zero, so a sequence that never
+/// opts in renders exactly as before.
+///
+/// Normalization targets EBU R128 speech-first delivery: -16 LUFS integrated,
+/// -1.5 dBTP true peak, LRA 11. Fades are clamped to the programme length at
+/// export, so a fade longer than the timeline is harmless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioSettings {
+    /// One-pass `loudnorm` on the final mix.
+    pub normalize: bool,
+    #[serde(with = "rational_ser")]
+    pub fade_in: Seconds,
+    #[serde(with = "rational_ser")]
+    pub fade_out: Seconds,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            normalize: false,
+            fade_in: Seconds::from_integer(0),
+            fade_out: Seconds::from_integer(0),
+        }
+    }
+}
+
+impl AudioSettings {
+    /// Does export need an audio-post stage? The fast path stays byte-identical
+    /// when this is false.
+    pub fn is_active(&self) -> bool {
+        self.normalize
+            || self.fade_in > Seconds::from_integer(0)
+            || self.fade_out > Seconds::from_integer(0)
+    }
+
+    /// One-line human summary (`normalize off · fade-in 0 s · fade-out 0 s`).
+    pub fn summary(&self) -> String {
+        format!(
+            "normalize {} · fade-in {} s · fade-out {} s",
+            if self.normalize { "on" } else { "off" },
+            format_seconds(&self.fade_in),
+            format_seconds(&self.fade_out)
+        )
+    }
+
+    /// Field-level validation shared by `Project::validate` and the write
+    /// path: times are non-negative. (A fade longer than the timeline is
+    /// clamped at export, not refused here — clips may arrive later.)
+    fn validate(&self) -> Result<(), String> {
+        let zero = Seconds::from_integer(0);
+        if self.fade_in < zero || self.fade_out < zero {
+            return Err("audio fades must be non-negative".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// One file in the media pool. `probe` is stored so the file never
@@ -177,6 +240,9 @@ pub struct Sequence {
     pub video: Option<VideoSettings>,
     #[serde(default)]
     pub timeline: Timeline,
+    /// Loudness/fade treatment of the mixed programme. Off/zero by default.
+    #[serde(default)]
+    pub audio: AudioSettings,
     /// The stored playhead for this sequence.
     #[serde(default, with = "rational_ser")]
     pub playhead: Seconds,
@@ -192,6 +258,7 @@ impl Sequence {
             fps: None,
             video: None,
             timeline: Timeline::new(),
+            audio: AudioSettings::default(),
             playhead: Seconds::from_integer(0),
         }
     }
@@ -639,6 +706,10 @@ impl Project {
             {
                 return Err(ProjectError::NonPositiveFps(sequence.id));
             }
+            sequence
+                .audio
+                .validate()
+                .map_err(|why| ProjectError::SequenceAudio(sequence.id, why))?;
             sequence.timeline.validate()?;
             for track in &sequence.timeline.tracks {
                 for seg in &track.segments {
@@ -1568,7 +1639,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 17);
+        assert_eq!(PROJECT_VERSION, 18);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);
@@ -1578,7 +1649,46 @@ mod tests {
         assert_eq!(p.active_sequence().manual_edits, 0);
         assert!(p.fps.is_none());
         assert!(p.video.is_none());
+        assert_eq!(p.audio, AudioSettings::default());
+        assert!(!p.audio.is_active(), "audio post is opt-in");
         assert_eq!(p.timeline.tracks.len(), 1);
+    }
+
+    #[test]
+    fn audio_post_defaults_when_the_field_is_absent() {
+        // v18 adds `audio`; a sequence JSON without it must read as off/zero
+        // rather than fail, so hand-written and freshly-upgraded state agree.
+        let sequence: Sequence = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "fps": "30/1",
+            "timeline": { "tracks": [] },
+            "playhead": "0/1"
+        }))
+        .expect("sequence without audio");
+        assert_eq!(sequence.audio, AudioSettings::default());
+
+        let json = serde_json::to_value(&sequence).unwrap();
+        assert_eq!(json["audio"]["normalize"], false);
+        assert_eq!(json["audio"]["fade_in"], "0/1");
+        assert_eq!(json["audio"]["fade_out"], "0/1");
+    }
+
+    #[test]
+    fn audio_fades_must_be_non_negative() {
+        let mut p = sample_project();
+        p.audio.fade_in = Seconds::from_integer(-1);
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::SequenceAudio(1, ref why)) if why.contains("non-negative")
+        ));
+        p.audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::new(1, 2),
+            fade_out: Seconds::new(1, 4),
+        };
+        assert!(p.validate().is_ok(), "{:?}", p.validate());
+        assert!(p.audio.is_active());
+        assert!(p.audio.summary().contains("normalize on"));
     }
 
     #[test]

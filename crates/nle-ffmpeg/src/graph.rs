@@ -20,7 +20,7 @@ use nle_core::project::Asset;
 use nle_core::timeline::{
     Clip, CropKey, Effect, Segment, TrackKind, TransitionKind, TransitionSource,
 };
-use nle_core::{Project, Seconds, format_seconds};
+use nle_core::{AudioSettings, Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
@@ -30,6 +30,10 @@ use crate::trim::{
 
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_LAYOUT: &str = "stereo";
+
+/// EBU R128 target for speech-first delivery: -16 LUFS integrated, -1.5 dBTP
+/// true peak, LRA 11 (streaming-normal, not the -23 LUFS broadcast spec).
+pub const LOUDNORM_FILTER: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
 #[derive(Debug, Error)]
 pub enum CompileError {
@@ -187,6 +191,60 @@ fn trim_f64(v: f64) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Does any unmuted track hold a source with an audio stream? A video-only
+/// programme is padded with silence, and `loudnorm` errors on a fully digital
+/// silent input, so audio post is skipped when there is nothing to shape.
+fn has_audio_material(project: &Project) -> bool {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|track| !track.muted)
+        .flat_map(|track| track.segments.iter())
+        .any(|segment| match segment {
+            Segment::Clip(clip) => project
+                .asset(clip.asset)
+                .is_some_and(|asset| asset.probe.has_audio()),
+            Segment::Transition(tr) => [&tr.a, &tr.b].iter().any(|side| {
+                side.asset()
+                    .and_then(|id| project.asset(id))
+                    .is_some_and(|asset| asset.probe.has_audio())
+            }),
+            Segment::Gap(_) => false,
+        })
+}
+
+/// The sequence's audio-post filters, appended to the final mixed chain.
+/// Empty when the sequence opts out — the classic graph stays byte-identical.
+/// Fades are clamped to the programme length, so `st` is never negative even
+/// when a setting outlives the clip it was set for.
+fn audio_post_chain(audio: &AudioSettings, duration: Seconds, audible: bool) -> String {
+    if !audible {
+        return String::new();
+    }
+    let mut chain = String::new();
+    if audio.normalize {
+        chain.push(',');
+        chain.push_str(LOUDNORM_FILTER);
+    }
+    let zero = Seconds::from_integer(0);
+    let total = secs_f64(&duration).max(0.0);
+    if audio.fade_in > zero && total > 0.0 {
+        let d = secs_f64(&audio.fade_in).min(total);
+        chain.push_str(&format!(",afade=t=in:st=0:d={}", trim_f64(d)));
+    }
+    if audio.fade_out > zero && total > 0.0 {
+        let d = secs_f64(&audio.fade_out).min(total);
+        let start = (total - d).max(0.0);
+        chain.push_str(&format!(
+            ",afade=t=out:st={}:d={}",
+            trim_f64(start),
+            trim_f64(d)
+        ));
+    }
+    chain
 }
 
 fn keyed_crop(clip: &Clip) -> Option<&Effect> {
@@ -469,6 +527,8 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
     }
 
     // Emit the graph.
+    let duration = track.end();
+    let audio_post = audio_post_chain(&project.audio, duration, has_audio_material(project));
     let mut graph = String::new();
     for (i, piece) in pieces.iter().enumerate() {
         match piece {
@@ -539,9 +599,8 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
     let v_in: String = (0..n).map(|i| format!("[v{i}]")).collect();
     let a_in: String = (0..n).map(|i| format!("[a{i}]")).collect();
     graph.push_str(&format!("{v_in}concat=n={n}:v=1:a=0[vout];\n"));
-    graph.push_str(&format!("{a_in}concat=n={n}:v=0:a=1[aout]\n"));
+    graph.push_str(&format!("{a_in}concat=n={n}:v=0:a=1{audio_post}[aout]\n"));
 
-    let duration = track.end();
     let frames = (secs_f64(&duration) * secs_f64(&fps)).round() as i64;
     Ok(ExportPlan {
         inputs,
@@ -578,6 +637,7 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
         return Err(CompileError::NoVideoTrack);
     }
 
+    let audio_post = audio_post_chain(&project.audio, total, has_audio_material(project));
     let mut graph = String::new();
     let mut input_of: HashMap<u32, usize> = HashMap::new();
     let mut inputs: Vec<PathBuf> = Vec::new();
@@ -807,11 +867,13 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
 
     // Audio: sum every track.
     if audio_labels.len() == 1 {
-        graph.push_str(&format!("{}anull[aout]\n", audio_labels[0]));
+        graph.push_str(&format!("{}anull{audio_post}[aout]\n", audio_labels[0]));
     } else {
         let ins: String = audio_labels.concat();
         let n = audio_labels.len();
-        graph.push_str(&format!("{ins}amix=inputs={n}:normalize=0[aout]\n"));
+        graph.push_str(&format!(
+            "{ins}amix=inputs={n}:normalize=0{audio_post}[aout]\n"
+        ));
     }
 
     let frames = (secs_f64(&total) * secs_f64(&fps)).round() as i64;
@@ -1120,6 +1182,7 @@ mod tests {
         let msg = explain_old_ffmpeg(e).to_string();
         assert!(msg.contains("ffmpeg 9"), "{msg}");
     }
+    use nle_core::AudioSettings;
     use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
     use nle_core::timeline::{
@@ -1609,6 +1672,67 @@ mod tests {
         assert!(g.contains("xfade=transition=fade:"), "{g}");
         assert!(g.contains("acrossfade=d="), "{g}");
         assert_eq!(plan.duration, Seconds::from_integer(5), "clip|trans|clip");
+    }
+
+    #[test]
+    fn audio_post_chains_loudnorm_and_fades_on_the_mix() {
+        let mut p = project_with_two_clips();
+        p.audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::new(1, 2),
+            fade_out: Seconds::new(1, 4),
+        };
+        let plan = compile_export(&p).unwrap();
+        assert_eq!(plan.duration, Seconds::from_integer(15));
+        let g = &plan.graph;
+        assert!(g.contains(LOUDNORM_FILTER), "{g}");
+        assert!(g.contains("afade=t=in:st=0:d=0.5"), "{g}");
+        // Fade-out starts 0.25 s before the 15 s programme end.
+        assert!(g.contains("afade=t=out:st=14.75:d=0.25[aout]"), "{g}");
+    }
+
+    #[test]
+    fn audio_post_is_skipped_without_an_audio_stream() {
+        // A video-only clip is padded with silence; `loudnorm` errors on a
+        // digital-silent input, so the chain must not be emitted at all.
+        let mut p = project_with_two_clips();
+        let silent = p.media[1].id; // b.mp4 has no audio stream
+        p.timeline.video_track_mut().unwrap().segments =
+            vec![Segment::Clip(nle_core::timeline::Clip::new(
+                1,
+                silent,
+                Seconds::from_integer(0),
+                Seconds::from_integer(3),
+            ))];
+        p.audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::from_integer(1),
+            fade_out: Seconds::from_integer(1),
+        };
+        let g = compile_export(&p).unwrap().graph;
+        assert!(!g.contains("loudnorm"), "{g}");
+        assert!(!g.contains("afade"), "{g}");
+    }
+
+    #[test]
+    fn audio_post_is_empty_by_default_and_clamps_long_fades() {
+        let zero = Seconds::from_integer(0);
+        assert_eq!(
+            audio_post_chain(&AudioSettings::default(), Seconds::from_integer(5), true),
+            ""
+        );
+        let all = AudioSettings {
+            normalize: false,
+            fade_in: Seconds::from_integer(9),
+            fade_out: Seconds::from_integer(9),
+        };
+        assert_eq!(
+            audio_post_chain(&all, Seconds::from_integer(5), true),
+            ",afade=t=in:st=0:d=5,afade=t=out:st=0:d=5"
+        );
+        // Nothing to fade on a zero-length or silent programme.
+        assert_eq!(audio_post_chain(&all, zero, true), "");
+        assert_eq!(audio_post_chain(&all, Seconds::from_integer(5), false), "");
     }
 
     #[test]

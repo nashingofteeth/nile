@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use crate::annotation::{Anchor, Annotation, AnnotationKind, reanchor_timeline};
 use crate::group::MediaGroup;
 use crate::media::RawProbe;
-use crate::project::{Asset, Project};
+use crate::project::{Asset, AudioSettings, Project};
 use crate::provenance::{Actor, Provenance};
 use crate::time::Seconds;
 use crate::timeline::{
@@ -400,6 +400,39 @@ impl History {
         Ok((desc, true))
     }
 
+    /// Set the active sequence's audio-post settings and record them. A no-op
+    /// setting records nothing (no dead undo step); a refused one (a negative
+    /// fade from a hand-edited file) leaves the sequence untouched.
+    pub fn set_audio(
+        &mut self,
+        project: &mut Project,
+        audio: AudioSettings,
+        playhead: i64,
+    ) -> Result<String, EditError> {
+        let sequence = project.active_id();
+        let before = project.audio;
+        let desc = format!("sequence audio {}", audio.summary());
+        if before == audio {
+            return Ok(desc);
+        }
+        project.audio = audio;
+        if let Err(e) = project.validate() {
+            project.audio = before;
+            return Err(e.into());
+        }
+        self.push_change(Change::Audio(AudioChange {
+            sequence,
+            before,
+            after: audio,
+            desc: desc.clone(),
+            playhead,
+            provenance: self.provenance(),
+        }));
+        project.bump_revision();
+        project.bump_manual_edits();
+        Ok(desc)
+    }
+
     /// Set the actor recorded on subsequent changes.
     pub fn set_actor(&mut self, actor: Actor) {
         self.actor = actor;
@@ -762,6 +795,7 @@ pub enum Change {
     Group(GroupChange),
     MediaGroups(MediaGroupsChange),
     Annotations(AnnotationsChange),
+    Audio(AudioChange),
 }
 
 impl Change {
@@ -773,6 +807,7 @@ impl Change {
             Change::Group(c) => &c.desc,
             Change::MediaGroups(c) => &c.desc,
             Change::Annotations(c) => &c.desc,
+            Change::Audio(c) => &c.desc,
         }
     }
 
@@ -784,6 +819,7 @@ impl Change {
             Change::Group(c) => c.playhead,
             Change::MediaGroups(c) => c.playhead,
             Change::Annotations(c) => c.playhead,
+            Change::Audio(c) => c.playhead,
         }
     }
 
@@ -795,6 +831,7 @@ impl Change {
             Change::Group(c) => &c.provenance,
             Change::MediaGroups(c) => &c.provenance,
             Change::Annotations(c) => &c.provenance,
+            Change::Audio(c) => &c.provenance,
         }
     }
 }
@@ -877,6 +914,19 @@ pub struct AnnotationsChange {
     pub sequence: u32,
     pub before: Vec<Annotation>,
     pub after: Vec<Annotation>,
+    pub desc: String,
+    pub playhead: i64,
+    pub provenance: Provenance,
+}
+
+/// A sequence-level settings edit (audio post). Exact equality is the
+/// verification, like the track list: a settings change outside the undo
+/// stack refuses loudly rather than overwriting it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioChange {
+    pub sequence: u32,
+    pub before: AudioSettings,
+    pub after: AudioSettings,
     pub desc: String,
     pub playhead: i64,
     pub provenance: Provenance,
@@ -1010,6 +1060,7 @@ fn substitute(project: &mut Project, change: &Change, forward: bool) -> Result<(
         Change::Assets(c) => substitute_assets(project, c, forward)?,
         Change::MediaGroups(c) => substitute_groups(project, c, forward)?,
         Change::Annotations(c) => substitute_annotations(project, c, forward)?,
+        Change::Audio(c) => substitute_audio(project, c, forward)?,
         Change::Group(c) => {
             if forward {
                 for change in &c.changes {
@@ -1084,6 +1135,30 @@ fn substitute_topology(
     }
     track.segments = write.iter().map(segment_from_atom).collect();
     project.replace_annotations(change.sequence, write_annotations.clone());
+    Ok(())
+}
+
+/// Verify the live sequence's audio settings match one side of `change`
+/// (exact equality) and substitute the other.
+fn substitute_audio(
+    project: &mut Project,
+    change: &AudioChange,
+    forward: bool,
+) -> Result<(), EditError> {
+    let (expected, write) = if forward {
+        (&change.before, &change.after)
+    } else {
+        (&change.after, &change.before)
+    };
+    let sequence = project
+        .sequence_mut(change.sequence)
+        .ok_or_else(|| EditError::History(format!("sequence #{} is missing", change.sequence)))?;
+    if sequence.audio != *expected {
+        return Err(EditError::History(
+            "sequence audio changed outside the undo stack".to_string(),
+        ));
+    }
+    sequence.audio = *write;
     Ok(())
 }
 

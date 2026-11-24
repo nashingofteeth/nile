@@ -20,7 +20,7 @@ use std::path::Path;
 use crate::action::{self, Action, Outcome, Register};
 use crate::annotation::{Anchor, AnnotationKind};
 use crate::edit::{self, Actor, Batch, EditError, Histories, History, UndoOutcome};
-use crate::project::{Project, ProjectDiff, ProjectError, VideoSettings};
+use crate::project::{AudioSettings, Project, ProjectDiff, ProjectError, VideoSettings};
 use crate::time::{Seconds, frame_of};
 
 /// A project plus one undo stack per sequence. Undo acts on the active
@@ -484,6 +484,14 @@ impl Document {
         self.histories
             .get_mut(active)
             .edit_tracks(&mut self.project, playhead, edit)
+    }
+
+    /// Set the active sequence's audio-post settings, recording one undo step.
+    pub fn set_audio(&mut self, audio: AudioSettings, playhead: i64) -> Result<String, EditError> {
+        let active = self.project.active_id();
+        self.histories
+            .get_mut(active)
+            .set_audio(&mut self.project, audio, playhead)
     }
 
     /// Clamp, validate, then save. The only persisted write path: a model that

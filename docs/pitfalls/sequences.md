@@ -1,11 +1,11 @@
 # Sequences
 
 `Project { media, sequences, active }` holds one or more editable timelines.
-The media pool is shared; `fps`, `video`, `timeline` and `playhead` belong to a
-`Sequence`. Project files are v17 (v11 added sequences, v12 media groups,
-v13 annotations, v14 clip-relative timeline anchors, v15 crop windows,
-v16 crop keyframes, v17 render expectations); older files are rejected, never
-migrated.
+The media pool is shared; `fps`, `video`, `timeline`, `playhead` and `audio`
+belong to a `Sequence`. Project files are v18 (v11 added sequences, v12 media
+groups, v13 annotations, v14 clip-relative timeline anchors, v15 crop windows,
+v16 crop keyframes, v17 render expectations, v18 audio post); older files are
+rejected, never migrated.
 
 ## One active sequence, one undo stack
 
@@ -16,8 +16,9 @@ migrated.
 - `Document` owns `Histories` keyed by sequence id and routes every edit,
   asset change, undo and redo through `project.active_id()`. Switching
   sequences switches undo; never share one stack across timelines.
-- History sidecars are v23 (`stacks` keyed by id, plus grouped changes,
-  media groups, annotations, timeline anchors and crop keyframes).
+- History sidecars are v24 (`stacks` keyed by id, plus grouped changes,
+  media groups, annotations, timeline anchors, crop keyframes and sequence
+  audio settings).
   Pool edits are recorded in the sequence active at the time; undoing one
   still validates against every sequence, so an asset used elsewhere refuses
   loudly.
@@ -47,10 +48,20 @@ migrated.
   [--width W --height H --fps RATE]`. Switching resets the active track (tracks
   are per sequence), adopts the target's stored playhead, saves the project,
   and rebuilds the monitor.
-- CLI: `nile sequence ls|add|use`; `--sequence N` on `show`, `edl` and
+- CLI: `nile sequence ls|add|use|audio`; `--sequence N` on `show`, `edl` and
   `export` reads/renders that timeline without changing the stored active one.
   `show --json` always prints the whole project, so it refuses `--sequence`
   rather than rewriting `active` in the machine-readable output.
+- `sequence audio [--normalize [BOOL]] [--fade-in S] [--fade-out S]` changes
+  the active sequence's `AudioSettings` and records a `Change::Audio` (undoable
+  like an edit). No flags prints the current setting. A settings change is a
+  manual edit (`manual_edits` bumps) and a no-op records nothing. Fades are
+  parsed with the ordinary time grammar (`0.5`, `1:02.5`), so a negative value
+  is refused before the model sees it.
+- `AudioSettings` is a typed struct with `#[serde(default)]`: a missing `audio`
+  object reads as normalize off / fades zero. `Project::validate` refuses
+  negative fades (`SequenceAudio`), but a fade longer than the timeline is
+  allowed and clamped at export — clips may arrive after the setting.
 - The status row names the active sequence only when there is more than one,
   so single-sequence output is unchanged.
 
