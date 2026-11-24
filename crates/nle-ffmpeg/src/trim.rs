@@ -341,7 +341,7 @@ fn parse_progress_seconds(line: &str) -> Option<f64> {
 /// The reason a failed run failed, out of the last lines of its stderr:
 /// ffmpeg buries the cause among progress and stream metadata, so prefer
 /// the lines that actually name a problem.
-fn error_lines(lines: &[String]) -> String {
+pub(crate) fn error_lines(lines: &[String]) -> String {
     const KEYS: &[&str] = &["error", "invalid", "no such", "not found", "failed"];
     let hits: Vec<&String> = lines
         .iter()

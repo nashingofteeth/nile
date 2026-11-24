@@ -7,6 +7,7 @@
 pub mod detect;
 pub mod graph;
 pub mod probe;
+pub mod sampling;
 pub mod trim;
 
 pub use detect::{DetectError, DetectOptions, Detection, detect};
@@ -18,4 +19,5 @@ pub use graph::{
 // this crate as the media facade.
 pub use nle_core::media::{RawFormat, RawProbe, RawStream};
 pub use probe::{ProbeError, frame_count, keyframes, probe};
+pub use sampling::{AudioSample, AudioSpec, FrameSample, FrameSpec, SampleCache, SampleError};
 pub use trim::{Encoder, FfmpegError, TrimError, TrimSpec, hardware_encoder, trim};
