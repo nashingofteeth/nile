@@ -696,12 +696,14 @@ enum AnnotationCmd {
         /// work-in-frame: percent of the picture kept on every side (default 5)
         #[arg(long, value_name = "P")]
         margin: Option<f64>,
-        /// words-complete: fraction of checked frames that must carry audio
-        /// (default 1.0)
+        /// words-complete: with a transcript, the fraction of relevant words
+        /// that must be whole; without one, the fraction of checked frames
+        /// that must carry audio (default 1.0)
         #[arg(long, value_name = "F")]
         min_coverage: Option<f64>,
-        /// words-complete: named transcript (no store yet: unverifiable)
-        #[arg(long, value_name = "NAME")]
+        /// words-complete: transcript hash (`t1-…`) from the project's
+        /// transcript store
+        #[arg(long, value_name = "HASH")]
         transcript: Option<String>,
         /// absent: also refuse black frames (and a blend's black side)
         #[arg(long)]

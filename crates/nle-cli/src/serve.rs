@@ -469,8 +469,14 @@ impl ServeHandler {
                 "report path must be absolute (the server's cwd may differ from the client's)",
             ));
         }
-        let checks = crate::cmd::check::check_with(self.session.project(), &report, sequence, ids)
-            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let checks = crate::cmd::check::check_with(
+            self.session.project(),
+            self.session.path(),
+            &report,
+            sequence,
+            ids,
+        )
+        .map_err(|e| RpcError::invalid_params(e.to_string()))?;
         Ok(Reply::Checks(checks))
     }
 

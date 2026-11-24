@@ -6,12 +6,14 @@
 //! the "illegal state" is unrepresentable, not guarded against at run time.
 //!
 //! Results are **computed**, never stored: [`evaluate`] is a pure function of
-//! `(project, report, annotation)`, so a pass cannot outlive the render it
-//! describes. It reads a [`RenderReport`] and the project; it never spawns a
-//! process, touches a socket or decodes a frame. Asset-only `cam`/`absent`
-//! and `no_sliver` are report-only; the crop, word and group checks need the
-//! project's effects and probes — those are refused as unverifiable when the
-//! report was rendered from another revision.
+//! `(project, report, annotation)`, and [`evaluate_with`] only adds the
+//! project's transcript store for the checks that read a stored analysis
+//! product. A pass cannot outlive the render it describes. Either reads a
+//! [`RenderReport`] and the project; neither spawns a process, touches a
+//! socket or decodes a frame. Asset-only `cam`/`absent` and `no_sliver` are
+//! report-only; the crop, word and group checks need the project's effects and
+//! probes — those are refused as unverifiable when the report was rendered
+//! from another revision.
 //!
 //! Resolving an expectation (`AnnotationStatus::Resolved`) **acknowledges** a
 //! verdict; it is not a waiver. [`evaluate`] still runs the check, still lets
@@ -20,6 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::TranscriptStore;
 use crate::annotation::{Annotation, AnnotationKind, AnnotationStatus};
 use crate::project::{Project, Sequence};
 use crate::report::{FrameSource, FrameSpan, RenderReport, SourceSide, frame_edge};
@@ -85,11 +88,16 @@ pub enum Expectation {
         #[serde(default = "default_margin_pct")]
         margin_pct: f64,
     },
-    /// At least `min_coverage` of the checked frames carry unmuted audio.
+    /// At least `min_coverage` of the checked frames carry unmuted audio, or
+    /// with a transcript hash, of the relevant words are whole.
     ///
-    /// v1 is a coverage test: it proves audio is not cut short, not that the
-    /// words are there. `transcript` is accepted so a future store can check
-    /// it; until then a payload that names one is unverifiable.
+    /// Without `transcript` this is an audio-coverage test: it proves audio is
+    /// not cut short, not that the words are there. With a transcript hash it
+    /// checks whole words instead: every word the span shows must be complete
+    /// in one shown clip or transition side (see [`evaluate_with`]). The
+    /// transcript's asset must be shown in the anchored span, or the check is
+    /// unverifiable; a missing/corrupt transcript, an absent asset or a silent
+    /// asset is unverifiable too, never a panic.
     WordsComplete {
         #[serde(default = "one")]
         min_coverage: f64,
@@ -187,9 +195,17 @@ impl Expectation {
                 }
                 None
             }
-            Expectation::WordsComplete { min_coverage, .. } => {
+            Expectation::WordsComplete {
+                min_coverage,
+                transcript,
+            } => {
                 if !min_coverage.is_finite() || !(0.0..=1.0).contains(min_coverage) {
                     return Some("min_coverage must be between 0 and 1");
+                }
+                if let Some(hash) = transcript
+                    && !crate::analysis::is_transcript_hash(hash)
+                {
+                    return Some("transcript must be a t1-… content hash");
                 }
                 None
             }
@@ -374,6 +390,23 @@ impl CheckReport {
 /// A note or marker has no expectation to check and comes back unverifiable;
 /// front-ends should filter by [`AnnotationKind`] first.
 pub fn evaluate(project: &Project, report: &RenderReport, annotation: &Annotation) -> CheckOutcome {
+    evaluate_with(project, report, annotation, &TranscriptStore::empty())
+}
+
+/// [`evaluate`] with the project's transcript store, for the checks that read
+/// a stored analysis product.
+///
+/// The store is a parameter, not a path: [`evaluate`] stays a pure function of
+/// its three arguments (report-only callers use an empty store and a transcript
+/// hash comes back unverifiable), while the CLI/TUI/protocol seam passes
+/// `TranscriptStore::at(project_path)`. A missing or corrupt transcript is a
+/// detail on an unverifiable outcome, never an error that aborts the report.
+pub fn evaluate_with(
+    project: &Project,
+    report: &RenderReport,
+    annotation: &Annotation,
+    analysis: &TranscriptStore,
+) -> CheckOutcome {
     let expect = match &annotation.kind {
         AnnotationKind::Expectation { expect } => expect,
         _ => {
@@ -450,6 +483,7 @@ pub fn evaluate(project: &Project, report: &RenderReport, annotation: &Annotatio
         f0: start,
         f1: end,
         sections,
+        analysis,
     };
 
     match expect {
@@ -490,6 +524,8 @@ struct Ctx<'a> {
     f0: i64,
     f1: i64,
     sections: Vec<Section<'a>>,
+    /// The project's transcript store (empty for a report-only [`evaluate`]).
+    analysis: &'a TranscriptStore,
 }
 
 /// One slice of the checked frame range inside one report span:
@@ -1160,16 +1196,17 @@ fn asset_has_audio(project: &Project, asset: u32) -> bool {
 
 fn check_words_complete(
     ctx: &Ctx<'_>,
-    mut out: CheckOutcome,
+    out: CheckOutcome,
     min_coverage: f64,
     transcript: &Option<String>,
 ) -> CheckOutcome {
-    if transcript.is_some() {
-        out.detail = Some(
-            "transcripts are not stored yet, so a word-coverage check is unverifiable".to_string(),
-        );
-        return out;
+    match transcript {
+        None => check_audio_coverage(ctx, out, min_coverage),
+        Some(hash) => check_transcript_words(ctx, out, min_coverage, hash),
     }
+}
+
+fn check_audio_coverage(ctx: &Ctx<'_>, mut out: CheckOutcome, min_coverage: f64) -> CheckOutcome {
     let audible = audible_spans(ctx.project, ctx.sequence);
     let mut covered = 0;
     for &(from, to, span) in &ctx.sections {
@@ -1206,10 +1243,220 @@ fn check_words_complete(
     )
 }
 
+/// One place the transcript's asset is shown in the checked sequence, as a
+/// linear map from asset source time to timeline time.
+///
+/// A clip is `(asset_in, asset_out)` over `speed`; a transition side is its
+/// `(src_in, src_out)` over the blend's `dur` — the exporter renders the side
+/// into `dur` at `(src_out - src_in) / dur`, so the same endpoints give the
+/// mapping the picture actually has. Keeping the map as `(start, speed)`
+/// rather than a closure means it is `Copy`, comparable in tests, and reads
+/// like the model it mirrors.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Shown {
+    src_start: Seconds,
+    src_end: Seconds,
+    tl_start: Seconds,
+    speed: Seconds,
+}
+
+impl Shown {
+    fn timeline_of(&self, source: Seconds) -> Seconds {
+        self.tl_start + (source - self.src_start) / self.speed
+    }
+}
+
+/// Every shown span of `asset` on the sequence's **unmuted** tracks. Muted
+/// tracks are skipped entirely: their material is not in the mix and the
+/// monitor/export never show it.
+fn shown_ranges(project: &Project, sequence: u32, asset: u32) -> Vec<Shown> {
+    let Some(sequence) = project.sequence(sequence) else {
+        return Vec::new();
+    };
+    let zero = Seconds::from_integer(0);
+    let mut shown = Vec::new();
+    for track in &sequence.timeline.tracks {
+        if track.muted {
+            continue;
+        }
+        let mut at = Seconds::from_integer(0);
+        for segment in &track.segments {
+            match segment {
+                Segment::Clip(clip) if clip.asset == asset => shown.push(Shown {
+                    src_start: clip.asset_in,
+                    src_end: clip.asset_out,
+                    tl_start: at,
+                    speed: clip.speed,
+                }),
+                Segment::Transition(transition) => {
+                    for side in [&transition.a, &transition.b] {
+                        let TransitionSource::Clip {
+                            asset: side_asset,
+                            src_in,
+                            src_out,
+                            ..
+                        } = side
+                        else {
+                            continue;
+                        };
+                        // A degenerate side has no rate to map with; the
+                        // model refuses it, and skipping keeps a hand-edited
+                        // project from dividing by zero here.
+                        if *side_asset != asset || transition.dur <= zero || *src_out <= *src_in {
+                            continue;
+                        }
+                        shown.push(Shown {
+                            src_start: *src_in,
+                            src_end: *src_out,
+                            tl_start: at,
+                            speed: (*src_out - *src_in) / transition.dur,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            // Every segment advances the timeline, muted material included:
+            // the skip above is the track, not the position.
+            at += segment.duration();
+        }
+    }
+    shown
+}
+
+/// Whole-word coverage for a stored transcript.
+///
+/// A word is **relevant** when the part of it inside a shown source range maps
+/// into the anchor span; it is **complete** only when one shown range holds the
+/// whole word *and* its mapped span lies inside the anchor. So a trim, a split
+/// or the span's own edges cut a word into an incomplete one, which is the
+/// point: a viewer hears a fragment.
+///
+/// The anchor's exact span (`ctx.span`), not its frame-trimmed range, is the
+/// boundary — `WordsComplete` has no tolerance, so a word half a frame outside
+/// the anchor is cut.
+fn check_transcript_words(
+    ctx: &Ctx<'_>,
+    mut out: CheckOutcome,
+    min_coverage: f64,
+    hash: &str,
+) -> CheckOutcome {
+    // A point has no span a whole word could occupy, so "no words" would be a
+    // vacuous pass. Refuse the shape instead of pretending the word check ran.
+    if ctx.span.0 == ctx.span.1 {
+        out.detail =
+            Some("a transcript words check needs a timeline range, not a point".to_string());
+        return out;
+    }
+    let transcript = match ctx.analysis.load(hash) {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            out.detail = Some(error.to_string());
+            return out;
+        }
+    };
+    let Some(asset) = ctx.project.asset(transcript.asset) else {
+        out.detail = Some(format!(
+            "transcript asset #{} is not in the project",
+            transcript.asset
+        ));
+        return out;
+    };
+    if !asset.probe.has_audio() {
+        out.detail = Some(format!(
+            "transcript asset #{} has no audio",
+            transcript.asset
+        ));
+        return out;
+    }
+    let shown = shown_ranges(ctx.project, ctx.sequence, transcript.asset);
+    if shown.is_empty() {
+        out.detail = Some(format!(
+            "transcript asset #{} is not on the checked sequence",
+            transcript.asset
+        ));
+        return out;
+    }
+    // On the sequence is not enough: the anchored span has to show it. A words
+    // check over a span that shows another asset cannot describe this span, so
+    // refuse the shape instead of passing "no words".
+    let in_span = shown.iter().any(|range| {
+        let end = range.tl_start + (range.src_end - range.src_start) / range.speed;
+        range.tl_start < ctx.span.1 && end > ctx.span.0
+    });
+    if !in_span {
+        out.detail = Some(format!(
+            "transcript asset #{} is not in the anchored span",
+            transcript.asset
+        ));
+        return out;
+    }
+
+    let mut relevant = 0usize;
+    let mut complete = 0usize;
+    let mut first_incomplete = None;
+    for word in &transcript.words {
+        let mut is_relevant = false;
+        let mut is_complete = false;
+        for range in &shown {
+            let overlap_start = word.start.max(range.src_start);
+            let overlap_end = word.end.min(range.src_end);
+            if overlap_end > overlap_start {
+                // The overlap, not the whole word: a word half outside the
+                // clip still shows its inside half.
+                let from = range.timeline_of(overlap_start);
+                let to = range.timeline_of(overlap_end);
+                if from < ctx.span.1 && to > ctx.span.0 {
+                    is_relevant = true;
+                }
+            }
+            // One range must hold the word whole: a split cuts it even when
+            // the two halves together cover the span.
+            if word.start >= range.src_start && word.end <= range.src_end {
+                let from = range.timeline_of(word.start);
+                let to = range.timeline_of(word.end);
+                if from >= ctx.span.0 && to <= ctx.span.1 {
+                    is_complete = true;
+                }
+            }
+        }
+        if is_relevant {
+            relevant += 1;
+            if is_complete {
+                complete += 1;
+            } else if first_incomplete.is_none() {
+                first_incomplete = Some(word);
+            }
+        }
+    }
+
+    if relevant == 0 {
+        out.detail = Some("no transcript words in the anchored span".to_string());
+        return passed(out);
+    }
+    let coverage = complete as f64 / relevant as f64;
+    if coverage + 1e-9 >= min_coverage {
+        out.detail = Some(format!("{complete}/{relevant} words complete"));
+        return passed(out);
+    }
+    // A shortfall always has an incomplete word when `min_coverage` is in
+    // [0, 1]; a payload from outside `add_annotation` may not, so the fallback
+    // reports the count instead of panicking.
+    let detail = match first_incomplete {
+        Some(word) => format!(
+            "{complete}/{relevant} words complete; \"{}\" at source {} s is cut",
+            word.text,
+            format_seconds(&word.start)
+        ),
+        None => format!("{complete}/{relevant} words complete"),
+    };
+    failed(out, detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::VideoSettings;
+    use crate::analysis::{Transcript, Word};
     use crate::annotation::{Anchor, AnnotationStatus, ClipPoint};
     use crate::group::MediaPart;
     use crate::media::{RawFormat, RawProbe, RawStream};
@@ -1417,6 +1664,41 @@ mod tests {
             min_coverage: min,
             transcript: None,
         }
+    }
+
+    /// A temp transcript store beside a (not necessarily existing) project
+    /// file, plus the tempdir that owns it.
+    fn temp_store() -> (tempfile::TempDir, TranscriptStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::at(&dir.path().join("nile.json"));
+        (dir, store)
+    }
+
+    fn word(text: &str, start: i64, end: i64) -> Word {
+        Word {
+            text: text.to_string(),
+            start: s(start),
+            end: s(end),
+        }
+    }
+
+    fn transcript(asset: u32, words: Vec<Word>) -> Transcript {
+        Transcript::new(asset, words)
+    }
+
+    fn with_transcript(hash: &str, min: f64) -> Expectation {
+        Expectation::WordsComplete {
+            min_coverage: min,
+            transcript: Some(hash.to_string()),
+        }
+    }
+
+    /// Clip #1 reading `asset_in..asset_out` at `speed`.
+    fn spanned_clip(asset: u32, asset_in: i64, asset_out: i64, speed: i64) -> Segment {
+        Segment::Clip(Clip {
+            speed: s(speed),
+            ..Clip::new(1, asset, s(asset_in), s(asset_out))
+        })
     }
 
     fn dissolve(a: u32, b: Option<u32>, dur: i64) -> Segment {
@@ -1709,14 +1991,344 @@ mod tests {
             &range(
                 Expectation::WordsComplete {
                     min_coverage: 1.0,
-                    transcript: Some("script.txt".into()),
+                    transcript: Some("t1-0000000000000000".into()),
                 },
                 0,
                 5,
             ),
         );
         assert_eq!(outcome.result, CheckResult::Unverifiable);
-        assert!(outcome.detail.unwrap().contains("transcript"));
+        assert!(outcome.detail.unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn a_stored_word_inside_one_clip_passes() {
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 1)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("hello", 1, 2)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 0, 5),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+        assert_eq!(outcome.detail.as_deref(), Some("1/1 words complete"));
+    }
+
+    #[test]
+    fn a_word_cut_by_a_trim_is_incomplete() {
+        // The clip starts at source 2, so the word's first second is gone.
+        let project = project_with(vec![track(vec![spanned_clip(1, 2, 12, 1)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("hello", 1, 3)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            // source 2..7 is timeline 0..5
+            &range(with_transcript(&hash, 1.0), 2, 7),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        let detail = outcome.detail.unwrap();
+        assert!(detail.contains("0/1 words complete"), "{detail}");
+        assert!(
+            detail.contains("\"hello\" at source 1 s is cut"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_word_cut_by_either_span_edge_is_incomplete() {
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 1)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(
+                1,
+                vec![word("early", 1, 3), word("late", 6, 8)],
+            ))
+            .unwrap();
+        // The anchor is timeline 2..7: both words straddle an edge.
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 2, 7),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        let detail = outcome.detail.unwrap();
+        assert!(detail.contains("0/2 words complete"), "{detail}");
+        assert!(
+            detail.contains("\"early\" at source 1 s is cut"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_transcript_words_check_refuses_a_point_anchor() {
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 1)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("hello", 1, 2)]))
+            .unwrap();
+        // A point has no interval a whole word could occupy; a vacuous pass
+        // would claim more than the check can prove.
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 2, 2),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        let detail = outcome.detail.unwrap_or_default();
+        assert!(detail.contains("timeline range"), "{detail}");
+    }
+
+    #[test]
+    fn a_speed_change_maps_words_through_the_rate() {
+        // A 2x clip reads source 0..10 over timeline 0..5, so the anchor's
+        // source 4..8 is timeline 2..4.
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 2)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("inside", 4, 6)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 4, 8),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+        // "no words" would also pass; the count proves the word mapped in.
+        assert_eq!(outcome.detail.as_deref(), Some("1/1 words complete"));
+
+        // The same rate makes source 3..6 time out to timeline 1.5..3, which
+        // starts before the anchor at 2.
+        let hash = store
+            .import(&transcript(
+                1,
+                vec![word("straddle", 3, 6), word("inside", 4, 6)],
+            ))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 4, 8),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(
+            outcome
+                .detail
+                .unwrap()
+                .contains("1/2 words complete; \"straddle\" at source 3 s is cut")
+        );
+    }
+
+    #[test]
+    fn a_split_inside_a_word_is_incomplete() {
+        let project = project_with(vec![track(vec![
+            spanned_clip(1, 0, 5, 1),
+            Segment::Clip(Clip::new(2, 1, s(5), s(10))),
+        ])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("split", 4, 6)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 0, 5),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(
+            outcome
+                .detail
+                .unwrap()
+                .contains("0/1 words complete; \"split\" at source 4 s is cut")
+        );
+    }
+
+    #[test]
+    fn a_word_outside_the_span_is_a_vacuous_pass() {
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 1)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("later", 8, 9)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 0, 5),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+        assert_eq!(
+            outcome.detail.as_deref(),
+            Some("no transcript words in the anchored span")
+        );
+    }
+
+    #[test]
+    fn a_transcript_asset_outside_the_anchor_is_unverifiable() {
+        // Asset #1 is on the sequence at timeline 10..15; the anchor is on
+        // clip #2 at 0..5, where the transcript cannot describe the picture.
+        let project = project_with(vec![track(vec![
+            clip(2, 2, 5),
+            Segment::Gap(Gap { duration: s(5) }),
+            clip(1, 1, 5),
+        ])]);
+        let report = report(&[(150, shot(2, 2)), (150, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("hello", 1, 2)]))
+            .unwrap();
+        let annotation = expectation(with_transcript(&hash, 1.0), 2, s(0), s(5));
+        let outcome = evaluate_with(&project, &report, &annotation, &store);
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        let detail = outcome.detail.unwrap_or_default();
+        assert!(detail.contains("not in the anchored span"), "{detail}");
+    }
+
+    #[test]
+    fn partial_word_coverage_honours_min_coverage() {
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 1)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("whole", 1, 2), word("cut", 4, 7)]))
+            .unwrap();
+        let annotation = range(with_transcript(&hash, 0.5), 0, 5);
+        let outcome = evaluate_with(&project, &report, &annotation, &store);
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+        assert_eq!(outcome.detail.as_deref(), Some("1/2 words complete"));
+
+        let strict = range(with_transcript(&hash, 0.75), 0, 5);
+        let outcome = evaluate_with(&project, &report, &strict, &store);
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("1/2 words complete"));
+    }
+
+    #[test]
+    fn a_missing_or_misspelled_transcript_is_unverifiable() {
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 1)])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+
+        let missing = range(with_transcript("t1-0000000000000000", 1.0), 0, 5);
+        let outcome = evaluate_with(&project, &report, &missing, &store);
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        let detail = outcome.detail.unwrap();
+        assert!(detail.contains("not found"), "{detail}");
+        assert!(detail.contains("t1-0000000000000000"), "{detail}");
+
+        let misspelled = range(with_transcript("../take", 1.0), 0, 5);
+        let outcome = evaluate_with(&project, &report, &misspelled, &store);
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("not a transcript hash"));
+    }
+
+    #[test]
+    fn a_transcript_asset_must_exist_sound_and_be_shown() {
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+
+        // The transcript names an asset the project does not have.
+        let project = project_with(vec![track(vec![spanned_clip(1, 0, 10, 1)])]);
+        let hash = store
+            .import(&transcript(9, vec![word("ghost", 1, 2)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 0, 5),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("not in the project"));
+
+        // Asset #3 probes without an audio stream.
+        let silent = project_with(vec![track(vec![Segment::Clip(Clip::new(
+            1,
+            3,
+            s(0),
+            s(10),
+        ))])]);
+        let hash = store
+            .import(&transcript(3, vec![word("mute", 1, 2)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &silent,
+            &report,
+            &range(with_transcript(&hash, 1.0), 0, 5),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("has no audio"));
+
+        // Asset #4 exists with audio but is on nobody's track here.
+        let hash = store
+            .import(&transcript(4, vec![word("away", 1, 2)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(with_transcript(&hash, 1.0), 0, 5),
+            &store,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(
+            outcome
+                .detail
+                .unwrap()
+                .contains("not on the checked sequence")
+        );
+    }
+
+    #[test]
+    fn a_transition_side_shows_words_and_a_muted_track_does_not() {
+        let report = report(&[(150, shot(1, 3))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("blend", 1, 2)]))
+            .unwrap();
+        let expect = range(with_transcript(&hash, 1.0), 0, 5);
+
+        // Track 1's dissolve side is asset #1's material; the anchor resolves
+        // on the silent clip below it.
+        let crossfade = project_with(vec![
+            track(vec![clip(1, 3, 5)]),
+            track(vec![dissolve(1, Some(2), 5)]),
+        ]);
+        let outcome = evaluate_with(&crossfade, &report, &expect, &store);
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+        assert_eq!(outcome.detail.as_deref(), Some("1/1 words complete"));
+
+        // The same clip on a muted track is not in the mix.
+        let mut muted = track(vec![Segment::Clip(Clip::new(2, 1, s(0), s(5)))]);
+        muted.muted = true;
+        let hidden = project_with(vec![track(vec![clip(1, 3, 5)]), muted]);
+        let outcome = evaluate_with(&hidden, &report, &expect, &store);
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(
+            outcome
+                .detail
+                .unwrap()
+                .contains("not on the checked sequence")
+        );
     }
 
     #[test]
@@ -2115,6 +2727,13 @@ mod tests {
                 "min_coverage",
             ),
             (
+                Expectation::WordsComplete {
+                    min_coverage: 1.0,
+                    transcript: Some("take".into()),
+                },
+                "content hash",
+            ),
+            (
                 Expectation::NoSliver {
                     min_frames: 0,
                     asset: None,
@@ -2141,6 +2760,10 @@ mod tests {
             Expectation::WordsComplete {
                 min_coverage: 0.0,
                 transcript: None,
+            },
+            Expectation::WordsComplete {
+                min_coverage: 1.0,
+                transcript: Some("t1-0000000000000000".into()),
             },
             Expectation::NoSliver {
                 min_frames: 1,
@@ -2288,7 +2911,7 @@ mod tests {
                 &range(
                     Expectation::WordsComplete {
                         min_coverage: 1.0,
-                        transcript: Some("script.txt".into()),
+                        transcript: Some("t1-0000000000000000".into()),
                     },
                     0,
                     5,

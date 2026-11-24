@@ -503,6 +503,8 @@ video/
         ├── serve.lock     # startup single-writer lock
         ├── clipboard.json
         ├── view.json      # zoom, scroll, active track, pool source marks
+        ├── analysis/
+        │   └── transcripts/  # content-addressed transcript words (t1-…)
         └── cache/
             ├── proxy/         # rendered video proxies
             ├── audio/         # continuous preview audio masters

@@ -6,6 +6,7 @@
 //! Keeping it pure means it can be unit-tested exhaustively and instantly.
 
 pub mod action;
+pub mod analysis;
 pub mod annotation;
 pub mod detect;
 pub mod document;
@@ -29,6 +30,7 @@ pub use action::{
     RegisterEntry, Target, TransitionLen, load_register, load_register_without_migration,
     register_path, run_action, save_register, track_label,
 };
+pub use analysis::{AnalysisError, Transcript, TranscriptInput, TranscriptStore, Word};
 pub use annotation::{Anchor, Annotation, AnnotationKind, AnnotationStatus, ClipPoint, SourceRef};
 pub use detect::{Span, reconstruct};
 pub use document::{BatchOutcome, Document, PreviewOutcome};
@@ -42,7 +44,7 @@ pub use edit::{
 pub use edl::{EdlDoc, EdlError, EdlEvent};
 pub use expect::{
     CheckOutcome, CheckReport, CheckResult, CheckSummary, Expectation, ReportRef, TimeRange,
-    evaluate,
+    evaluate, evaluate_with,
 };
 pub use extend::{
     Armed, CommitKind, armed_edge, clip_span, commit_batch, gap_span, plan_commit, resolve_armed,
