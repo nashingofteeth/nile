@@ -213,7 +213,7 @@ impl TranscriptStore {
         // same transcript (the writer here is canonical, a hand-edited file
         // may be pretty-printed). `load` also re-checks version/hash.
         match self.load(&hash) {
-            Ok(existing) if existing == *transcript => return Ok(hash),
+            Ok(existing) if existing.canonical_bytes() == bytes => return Ok(hash),
             Ok(_) => {
                 return Err(AnalysisError::Corrupt(
                     hash,
@@ -402,6 +402,24 @@ mod tests {
         // `load` re-serialises before hashing; `import` must agree instead of
         // calling equivalent JSON a collision.
         assert_eq!(store.load(&hash).unwrap(), transcript);
+        assert_eq!(store.import(&transcript).unwrap(), hash);
+    }
+
+    #[test]
+    fn a_reordered_file_at_the_address_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::at(&dir.path().join("nile.json"));
+        let transcript = sample();
+        let hash = store.import(&transcript).unwrap();
+        let path = store.dir().unwrap().join(&hash);
+
+        let mut reordered = transcript.clone();
+        reordered.words.reverse();
+        std::fs::write(&path, serde_json::to_vec(&reordered).unwrap()).unwrap();
+
+        // The address is canonical content, not field order: `load` accepts
+        // the reordered file and `import` must see the same transcript.
+        assert_eq!(store.load(&hash).unwrap(), reordered);
         assert_eq!(store.import(&transcript).unwrap(), hash);
     }
 
