@@ -36,6 +36,11 @@ pub(crate) fn cmd_import(
     if files.is_empty() && !errors.is_empty() {
         bail!("{}", errors.join("; "));
     }
+    // `Path` is arbitrary bytes on Unix, but `nile.json` stores asset paths
+    // as UTF-8 strings: refuse the batch here, before probing, so a valid
+    // sibling is not half-imported and no `✓` can precede a save that is
+    // guaranteed to fail.
+    validate_import_paths(&files)?;
 
     let mut fresh: Vec<(PathBuf, nle_core::media::RawProbe)> = Vec::new();
     for file in &files {
@@ -236,6 +241,36 @@ pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Reject a path the project could never store. `Path` is an `OsStr`
+/// (arbitrary bytes on Unix); the model serializes an asset path as a UTF-8
+/// `String`, so a non-UTF-8 path only fails at save — after probing, adding
+/// and printing the asset. Validate first instead: the error names the lossy
+/// display (`Path::display`) so the user can find the file.
+pub(crate) fn validate_import_path(path: &Path) -> Result<()> {
+    if path.to_str().is_some() {
+        return Ok(());
+    }
+    bail!(
+        "{}: path is not valid UTF-8 — nile.json stores paths as UTF-8, so rename it and import again",
+        path.display()
+    )
+}
+
+/// The batch form of [`validate_import_path`]: refuse every non-UTF-8 member
+/// before probing, adding or printing anything, so a valid sibling is not
+/// half-imported.
+pub(crate) fn validate_import_paths(paths: &[PathBuf]) -> Result<()> {
+    let bad: Vec<String> = paths
+        .iter()
+        .filter_map(|path| validate_import_path(path).err().map(|e| e.to_string()))
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", bad.join("; "))
+    }
+}
+
 /// Expand import arguments into canonical files. A directory contributes its
 /// immediate media files, matching the EDL `--media` scan; nested directories
 /// are left to the picker. Missing paths and empty directories are returned as
@@ -433,7 +468,9 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
         .with_context(|| format!("reading {}", edl_path.display()))?;
     let doc = edl::parse(&text).with_context(|| format!("parsing {}", edl_path.display()))?;
 
-    // Probe + pool every media file, deduped by path.
+    // Probe + pool every media file, deduped by path. `pool_media_dir`
+    // validates the whole scan first (the pool is stored as UTF-8), so a bad
+    // name refuses the import before any file is probed.
     let mut project = Project::new();
     let add = |project: &mut Project, p: &Path| -> Result<PathBuf> {
         let canonical = p
@@ -446,25 +483,7 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
         Ok(canonical)
     };
 
-    let mut notes: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(media_dir)
-        .with_context(|| format!("reading media dir {}", media_dir.display()))?
-    {
-        let path = entry?.path();
-        let is_media = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| MEDIA_EXTS.contains(&e.to_lowercase().as_str()))
-            .unwrap_or(false);
-        if path.is_file() && is_media {
-            // A directory scan is a *candidate* list: one unreadable file
-            // (a partial copy, a stray text file with a media extension)
-            // must not sink the whole import — warn and keep looking.
-            if let Err(e) = add(&mut project, &path) {
-                notes.push(format!("warning: skipping {} — {e}", path.display()));
-            }
-        }
-    }
+    let (_, mut notes) = pool_media_dir(&mut project, media_dir)?;
     let mut map: HashMap<String, PathBuf> = HashMap::new();
     for m in maps {
         let (reel, path) = m
@@ -547,8 +566,8 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
 /// Probe every media file in `dir` into the pool; returns how many files were
 /// seen (whether or not they were already pooled).
 pub(crate) fn pool_media_dir(project: &mut Project, dir: &Path) -> Result<(usize, Vec<String>)> {
-    let mut seen = 0usize;
     let mut notes = Vec::new();
+    let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading media dir {}", dir.display()))?
     {
@@ -562,10 +581,20 @@ pub(crate) fn pool_media_dir(project: &mut Project, dir: &Path) -> Result<(usize
             continue;
         }
         // A candidate list, not a promise: skip what can't be read.
-        let Ok(canonical) = path.canonicalize() else {
-            notes.push(format!("warning: skipping {} — not found", path.display()));
-            continue;
-        };
+        match path.canonicalize() {
+            Ok(canonical) => candidates.push((path, canonical)),
+            Err(_) => notes.push(format!("warning: skipping {} — not found", path.display())),
+        }
+    }
+    // The pool is serialized into `nile.json` as UTF-8 paths: refuse the whole
+    // scan before probing, so a valid neighbour is not half-pooled and the
+    // eventual save cannot fail after the assets were already added. The
+    // canonical spelling is what the project stores; the original spelling is
+    // what the user sees in a skip note.
+    let canonical_paths: Vec<PathBuf> = candidates.iter().map(|(_, p)| p.clone()).collect();
+    validate_import_paths(&canonical_paths)?;
+    let mut seen = 0usize;
+    for (path, canonical) in candidates {
         if project.asset_by_path(&canonical).is_none() {
             match probe(&canonical) {
                 Ok(report) => {
@@ -895,6 +924,28 @@ mod tests {
             return;
         };
         assert_eq!(expand_tilde(Path::new("~/a.mp4")), home.join("a.mp4"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_import_paths_refuses_only_the_non_utf8_member() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let good = PathBuf::from("/media/good.mp4");
+        assert!(validate_import_path(&good).is_ok());
+        assert!(validate_import_paths(std::slice::from_ref(&good)).is_ok());
+
+        let bad = PathBuf::from(OsStr::from_bytes(b"/media/bad-\xff.mp4"));
+        let err = validate_import_path(&bad).unwrap_err().to_string();
+        assert!(err.contains("UTF-8"), "{err}");
+        assert!(err.contains(bad.to_string_lossy().as_ref()), "{err}");
+
+        let err = validate_import_paths(&[good, bad.clone()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("UTF-8"), "{err}");
+        assert!(err.contains(bad.to_string_lossy().as_ref()), "{err}");
     }
 
     #[cfg(feature = "tui")]

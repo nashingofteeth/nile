@@ -19,6 +19,7 @@ use nle_core::{
 use nle_ffmpeg::probe;
 
 use super::asset_summary;
+use super::import::validate_import_path;
 use super::{cli_index, run_cli_action};
 #[cfg(feature = "tui")]
 use crate::mpv;
@@ -248,9 +249,16 @@ pub(crate) fn stage_clip(
     playhead: i64,
     kind: TrackKind,
 ) -> Result<(Segment, bool)> {
+    // `add` auto-imports into the pool, which is stored as UTF-8: refuse a
+    // non-UTF-8 path before canonicalize/probe so no clip or success line can
+    // precede the save failure.
+    validate_import_path(file)?;
     let canonical = file
         .canonicalize()
         .with_context(|| format!("{} not found", file.display()))?;
+    // The canonical path is what the pool stores: a valid argument can still
+    // resolve through a symlink to a non-UTF-8 target.
+    validate_import_path(&canonical)?;
 
     let existing = doc.asset_by_path(&canonical).map(|a| a.id);
     let (asset_id, imported) = match existing {
