@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use nle_core::analysis::Word;
 use nle_core::{
-    Action, Annotation, CheckReport, Project, ProjectDiff, Seconds, Sequence, VideoSettings,
+    Action, Annotation, AudioSettings, CheckReport, Project, ProjectDiff, Seconds, Sequence,
+    VideoSettings,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -86,6 +87,12 @@ wire_catalog! {
             #[serde(default, skip_serializing_if = "Option::is_none")]
             video: Option<VideoSettings>,
         } = "sequence.add";
+        /// Set the active sequence's audio-post settings; a model write
+        /// guarded by CAS.
+        SequenceAudio {
+            base_revision: u64,
+            audio: AudioSettings,
+        } = "sequence.audio";
         /// The media pool, summarized for a client.
         MediaList = "media.list";
         /// Probe and add files to the shared media pool as one undo step.
@@ -249,11 +256,12 @@ impl Reply {
             (Reply::Edl(text), Call::TimelineEdl { .. }) => Ok(Value::String(text)),
             (Reply::Sequences(list), Call::SequenceList) => serde_json::to_value(list)
                 .map_err(|e| RpcError::internal(format!("sequence list is not serializable: {e}"))),
-            (Reply::Sequence(sequence), Call::SequenceUse { .. } | Call::SequenceAdd { .. }) => {
-                serde_json::to_value(sequence).map_err(|e| {
-                    RpcError::internal(format!("sequence reply is not serializable: {e}"))
-                })
-            }
+            (
+                Reply::Sequence(sequence),
+                Call::SequenceUse { .. } | Call::SequenceAdd { .. } | Call::SequenceAudio { .. },
+            ) => serde_json::to_value(sequence).map_err(|e| {
+                RpcError::internal(format!("sequence reply is not serializable: {e}"))
+            }),
             (Reply::Media(media), Call::MediaList | Call::MediaAdd { .. }) => {
                 serde_json::to_value(media).map_err(|e| {
                     RpcError::internal(format!("media reply is not serializable: {e}"))
@@ -295,7 +303,7 @@ impl Reply {
             Call::Hello => serde_json::from_value(result).map(Reply::Hello),
             Call::TimelineEdl { .. } => serde_json::from_value(result).map(Reply::Edl),
             Call::SequenceList => serde_json::from_value(result).map(Reply::Sequences),
-            Call::SequenceUse { .. } | Call::SequenceAdd { .. } => {
+            Call::SequenceUse { .. } | Call::SequenceAdd { .. } | Call::SequenceAudio { .. } => {
                 serde_json::from_value(result).map(Reply::Sequence)
             }
             Call::MediaList | Call::MediaAdd { .. } => {
@@ -377,6 +385,9 @@ pub struct SequenceSummary {
     pub fps: Option<Seconds>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoSettings>,
+    /// Loudness/fade treatment of the mixed programme.
+    #[serde(default)]
+    pub audio: AudioSettings,
     #[serde(with = "nle_core::time::rational_ser")]
     pub playhead: Seconds,
     /// Clips across every track, not gaps or transitions.
@@ -397,6 +408,7 @@ impl SequenceSummary {
             name: sequence.name.clone(),
             fps: sequence.fps,
             video: sequence.video.clone(),
+            audio: sequence.audio,
             playhead: sequence.playhead,
             clips,
         }

@@ -31,8 +31,8 @@ use crate::{log, say_err};
 use nle_core::analysis::{AnalysisError, Transcript, TranscriptStore, Word};
 use nle_core::edit::Actor;
 use nle_core::{
-    Action, Asset, EditError, Outcome as ActionOutcome, Project, Seconds, TrackKind, frame_of,
-    frames_to_seconds, secs_f64,
+    Action, Asset, AudioSettings, EditError, Outcome as ActionOutcome, Project, Seconds, TrackKind,
+    frame_of, frames_to_seconds, secs_f64,
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
@@ -406,6 +406,10 @@ impl Handler for ServeHandler {
                 fps,
                 video,
             } => self.sequence_add(*base_revision, name, *fps, video.clone()),
+            Call::SequenceAudio {
+                base_revision,
+                audio,
+            } => self.sequence_audio(*base_revision, *audio),
             Call::MediaList => Ok(Reply::Media(self.media_list())),
             Call::MediaAdd {
                 base_revision,
@@ -646,6 +650,32 @@ impl ServeHandler {
                 .sequence(id)
                 .expect("the sequence was just added"),
         );
+        self.events.push(Event::ProjectChanged { revision });
+        self.events
+            .push(Event::SequenceChanged { active, revision });
+        Ok(Reply::Sequence(SequenceReply {
+            revision,
+            active,
+            sequence,
+        }))
+    }
+
+    /// Set the active sequence's audio post. A model write: CAS, revision
+    /// bump, save, and the same `sequence.changed` event as use/add.
+    fn sequence_audio(
+        &mut self,
+        base_revision: u64,
+        audio: AudioSettings,
+    ) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
+        self.check_revision(base_revision)?;
+        self.session
+            .set_audio(audio)
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        self.save_or_poison(true, false)?;
+        let revision = self.session.revision();
+        let active = self.session.project().active_id();
+        let sequence = SequenceSummary::of(self.session.project().active_sequence());
         self.events.push(Event::ProjectChanged { revision });
         self.events
             .push(Event::SequenceChanged { active, revision });

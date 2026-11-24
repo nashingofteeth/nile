@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use nle_core::analysis::Word;
 use nle_core::expect::{CheckOutcome, CheckReport, CheckSummary, ReportRef};
 use nle_core::{
-    Action, AnnotationStatus, CheckResult, Project, ProjectDiff, Seconds, TransitionKind,
-    TransitionLen,
+    Action, AnnotationStatus, AudioSettings, CheckResult, Project, ProjectDiff, Seconds,
+    TransitionKind, TransitionLen,
 };
 use nle_protocol::{
     AnalysisHash, AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR,
@@ -142,6 +142,24 @@ impl Handler for Fake {
                     sequence: summary(2, name),
                 }))
             }
+            Call::SequenceAudio {
+                base_revision,
+                audio,
+            } => {
+                self.check(*base_revision)?;
+                self.revision += 1;
+                let mut sequence = summary(1, "Sequence 1");
+                sequence.audio = *audio;
+                self.events.push(Event::SequenceChanged {
+                    active: 1,
+                    revision: self.revision,
+                });
+                Ok(Reply::Sequence(SequenceReply {
+                    revision: self.revision,
+                    active: 1,
+                    sequence,
+                }))
+            }
             Call::MediaList => Ok(Reply::Media(MediaList {
                 revision: self.revision,
                 assets: vec![media(1, "/media/red.mp4")],
@@ -259,6 +277,7 @@ fn summary(id: u32, name: &str) -> SequenceSummary {
         name: name.to_string(),
         fps: Some(Seconds::from_integer(30)),
         video: None,
+        audio: AudioSettings::default(),
         playhead: Seconds::new(3, 2),
         clips: 2,
     }
@@ -289,6 +308,14 @@ fn all_calls() -> Vec<Call> {
             name: "Vertical".into(),
             fps: Some(Seconds::from_integer(30)),
             video: None,
+        },
+        Call::SequenceAudio {
+            base_revision: 0,
+            audio: AudioSettings {
+                normalize: true,
+                fade_in: Seconds::new(1, 2),
+                fade_out: Seconds::from_integer(1),
+            },
         },
         Call::MediaList,
         Call::MediaAdd {
@@ -525,6 +552,28 @@ fn golden_sequence_calls_and_events() {
         call
     );
 
+    let call = Call::SequenceAudio {
+        base_revision: 7,
+        audio: AudioSettings {
+            normalize: true,
+            fade_in: Seconds::new(1, 2),
+            fade_out: Seconds::from_integer(1),
+        },
+    };
+    let request = Request::new(
+        Id::from(2u64),
+        call.method(),
+        call.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":2,"method":"sequence.audio","params":{"audio":{"fade_in":"1/2","fade_out":"1/1","normalize":true},"base_revision":7}}"#
+    );
+    assert_eq!(
+        Call::decode(call.method(), call.params().expect("params")).expect("decode"),
+        call
+    );
+
     let event = Event::SequenceChanged {
         active: 2,
         revision: 4,
@@ -542,6 +591,7 @@ fn typed_sequence_helpers_match_their_calls() {
     let list = client.sequences().expect("sequence list");
     assert_eq!(list.active, 1);
     assert_eq!(list.sequences.len(), 1);
+    assert_eq!(list.sequences[0].audio, AudioSettings::default());
 
     let (_, output) = exchange(&mut Fake::new(7), Call::SequenceUse { id: 2 });
     let mut client = Client::new(Cursor::new(output), Vec::new());
@@ -569,6 +619,24 @@ fn typed_sequence_helpers_match_their_calls() {
     let mut client = Client::new(Cursor::new(output), Vec::new());
     let list = client.media_list().expect("media list");
     assert_eq!(list.assets[0].id, 1);
+
+    let audio = AudioSettings {
+        normalize: true,
+        fade_in: Seconds::new(1, 2),
+        fade_out: Seconds::from_integer(1),
+    };
+    let (_, output) = exchange(
+        &mut Fake::new(7),
+        Call::SequenceAudio {
+            base_revision: 7,
+            audio,
+        },
+    );
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let post = client.set_audio(7, audio).expect("sequence audio");
+    assert_eq!(post.revision, 8);
+    assert_eq!(post.sequence.audio, audio);
+    assert_eq!(post.sequence.audio.fade_in, Seconds::new(1, 2));
 
     let (_, output) = exchange(
         &mut Fake::new(7),

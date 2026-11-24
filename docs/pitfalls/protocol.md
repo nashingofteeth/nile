@@ -7,9 +7,9 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 ## Catalog
 
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
-`undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`, `media.list`,
-`media.add`, `playhead.set`, `annotation.list`, `annotation.check`,
-`analysis.add`. The internal `wire_catalog!` macro
+`undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`,
+`sequence.audio`, `media.list`, `media.add`, `playhead.set`,
+`annotation.list`, `annotation.check`, `analysis.add`. The internal `wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a
 method to the invocation, then a sample to `all_calls()`; the `METHODS.len()`
@@ -35,6 +35,7 @@ is `batch: <child> · <child>…`, so clients can identify it without parsing
 each child.
 
 `action.preview` returns the outcome fields plus `diff` and `warnings`.
+`settings_changed` covers the sequence's name, fps, video and audio post.
 The diff shape is:
 
 ```text
@@ -86,6 +87,14 @@ but does not bump the revision (session state, like the playhead), then emits
 `sequence.add` is a model write: it takes `base_revision`, bumps the revision,
 persists, and emits `project.changed` then `sequence.changed`. It does not
 switch.
+`sequence.audio {base_revision, audio}` sets the active sequence's
+loudness/fade settings. `audio` is the model's `AudioSettings` serde form
+(`{"normalize":bool,"fade_in":"1/2","fade_out":"1/1"}`; missing fields default
+to off/zero). It is a model write recorded on the active sequence's undo
+stack: CAS, revision bump, save, then `project.changed` + `sequence.changed`.
+Every `SequenceSummary` carries the current `audio`, so `sequence.list` and
+the reply show the setting without a `project.show`. Additive, so
+`PROTOCOL_VERSION` stays at 5.
 
 Actions apply to the active sequence. A client that wants another timeline
 calls `sequence.use` first; there is deliberately no per-call sequence field,

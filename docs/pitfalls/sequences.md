@@ -57,7 +57,10 @@ rejected, never migrated.
   like an edit). No flags prints the current setting. A settings change is a
   manual edit (`manual_edits` bumps) and a no-op records nothing. Fades are
   parsed with the ordinary time grammar (`0.5`, `1:02.5`), so a negative value
-  is refused before the model sees it.
+  is refused before the model sees it. The TUI spells it `:sequence audio …`
+  through `Session::set_audio` (direct: Document/History + save; remote: the
+  typed `sequence.audio` call); the protocol mirrors it as a CAS model write
+  and every `SequenceSummary` carries `audio`.
 - `AudioSettings` is a typed struct with `#[serde(default)]`: a missing `audio`
   object reads as normalize off / fades zero. `Project::validate` refuses
   negative fades (`SequenceAudio`), but a fade longer than the timeline is

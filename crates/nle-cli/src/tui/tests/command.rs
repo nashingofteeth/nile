@@ -94,6 +94,43 @@ fn sequence_command_switches_undo_and_adds() {
 }
 
 #[test]
+fn sequence_audio_command_sets_prints_and_undoes() {
+    let path = temp_project_path("sequence-audio");
+    let p = asset_project();
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+
+    let shown = cmd(&mut app, "sequence audio");
+    assert!(shown.contains("normalize off"), "{shown}");
+    assert!(shown.contains("fade-in 0 s"), "{shown}");
+
+    let set = cmd(
+        &mut app,
+        "sequence audio --normalize --fade-in 0.5 --fade-out 1",
+    );
+    assert!(set.contains("normalize on"), "{set}");
+    let audio = app.project.active_sequence().audio;
+    assert!(audio.normalize);
+    assert_eq!(audio.fade_in, Seconds::new(1, 2));
+    assert_eq!(audio.fade_out, Seconds::from_integer(1));
+
+    let undone = cmd(&mut app, "undo");
+    assert!(undone.contains("sequence audio"), "{undone}");
+    assert_eq!(
+        app.project.active_sequence().audio,
+        nle_core::AudioSettings::default()
+    );
+
+    let refused = cmd(&mut app, "sequence audio --fade-in -1");
+    assert!(refused.contains("invalid --fade-in"), "{refused}");
+    let bad = cmd(&mut app, "sequence audio --normalize maybe");
+    assert!(bad.contains("expects true|false"), "{bad}");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
 fn switching_flushes_the_outgoing_playhead_and_follows_the_new_one() {
     let path = temp_project_path("sequence-switch-cursor");
     let mut p = asset_project();

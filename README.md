@@ -135,9 +135,10 @@ replays on another.
 Audio post is per sequence and off by default: `nile sequence audio
 [--normalize [BOOL]] [--fade-in S] [--fade-out S]` normalizes the mixed
 programme to -16 LUFS / -1.5 dBTP (EBU R128, speech-first) and adds
-programme-head/tail fades. It is undoable like an edit; with no flags the
-command prints the current setting. Fades longer than the timeline are
-clamped at export.
+programme-head/tail fades. The same line works in the TUI without `nile`
+(`:sequence audio …`), and the protocol exposes it as `sequence.audio`. It is
+undoable like an edit; with no flags the command prints the current setting.
+Fades longer than the timeline are clamped at export.
 
 ### Transport and motion
 
@@ -254,6 +255,7 @@ The `:` line is the CLI grammar, flag for flag:
 :undo / :redo                 :purge
 :track add video|audio        :track mute [N] / :track rm N
 :sequence [ls|N|use N]         :sequence add NAME [--width W --height H --fps RATE]
+:sequence audio [--normalize [BOOL]] [--fade-in S --fade-out S]
 :media ls|rm                  :cache prune [--days N] [--dry-run]
 :filmstrip [on|off]           # timeline strips (session-only)
 :import PATH|DIR …            :add FILE
@@ -476,8 +478,8 @@ line, on the project's Unix socket (or stdin/stdout with `--stdio`). One
 server per project owns the socket; a second `nile serve` refuses. Multiple
 connections serialize their calls through one handler. Call `hello` first,
 then `project.show`, `timeline.edl`,
-`sequence.list|use|add`, `media.list|add`, `action.preview`, `action.apply`,
-`undo`, or `redo`.
+`sequence.list|use|add|audio`, `media.list|add`, `action.preview`,
+`action.apply`, `undo`, or `redo`.
 Actions apply to the active sequence; add media and a second sequence first,
 then switch to it:
 

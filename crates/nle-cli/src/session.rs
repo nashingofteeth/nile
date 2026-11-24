@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use nle_core::edit::{Actor, EditError, Histories, History, UndoOutcome};
 use nle_core::{
-    Action, Batch, BatchOutcome, Document, Outcome as ActionOutcome, PreviewOutcome, Project,
-    ProjectError, Register, VideoSettings, frame_of, grid_time, load_register, save_register,
-    secs_f64,
+    Action, AudioSettings, Batch, BatchOutcome, Document, Outcome as ActionOutcome, PreviewOutcome,
+    Project, ProjectError, Register, VideoSettings, frame_of, grid_time, load_register,
+    save_register, secs_f64,
 };
 use nle_protocol::{Client, ClientError, Outcome as WireOutcome, Preview as WirePreview};
 
@@ -31,6 +31,8 @@ use nle_protocol::{Client, ClientError, Outcome as WireOutcome, Preview as WireP
 pub enum SessionError {
     #[error(transparent)]
     Project(#[from] ProjectError),
+    #[error(transparent)]
+    Edit(#[from] EditError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("protocol: {0}")]
@@ -409,6 +411,32 @@ impl Session {
         }
     }
 
+    /// Set the active sequence's audio-post settings. Direct sessions record
+    /// the change in the document/history and save both sidecars; remote
+    /// sessions send the typed call and re-fetch the server's state. The
+    /// shared playhead is the undo anchor, so undo/redo land where they were.
+    pub fn set_audio(&mut self, audio: AudioSettings) -> Result<String, SessionError> {
+        match &mut self.backend {
+            Backend::Direct { document, .. } => {
+                let playhead = frame_of(document.fps.as_ref(), secs_f64(&document.playhead));
+                let desc = document.set_audio(audio, playhead)?;
+                document.save(&self.path)?;
+                document.save_history(&Histories::sidecar_path(&self.path))?;
+                Ok(desc)
+            }
+            Backend::Remote(remote) => {
+                let revision = remote.revision;
+                let reply = remote
+                    .call(|client| client.set_audio(revision, audio))
+                    .map_err(|e| SessionError::Remote(e.to_string()))?;
+                remote
+                    .refresh()
+                    .map_err(|e| SessionError::Remote(e.to_string()))?;
+                Ok(format!("sequence audio {}", reply.sequence.audio.summary()))
+            }
+        }
+    }
+
     pub fn select_sequence(&mut self, id: u32) -> Result<(), SessionError> {
         match &mut self.backend {
             Backend::Direct { document, .. } => document.select_sequence(id).map_err(Into::into),
@@ -653,6 +681,7 @@ fn remote_action_outcome(
 #[cfg(test)]
 mod remote_tests {
     use super::*;
+    use nle_core::Seconds;
     use nle_core::timeline::{Clip, Gap, Segment};
     use nle_protocol::Server;
     use std::io::BufReader;
@@ -774,6 +803,26 @@ mod remote_tests {
         assert_eq!(session.project().active_id(), second);
         session.select_sequence(1).unwrap();
         assert_eq!(session.project().active_id(), 1);
+
+        // Audio post goes over `sequence.audio`, then refreshes the cache so
+        // the client sees the server's canonical settings and undo depth.
+        let audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::new(1, 2),
+            fade_out: Seconds::from_integer(1),
+        };
+        let desc = session.set_audio(audio).unwrap();
+        assert!(desc.contains("normalize on"), "{desc}");
+        assert_eq!(session.project().active_sequence().audio, audio);
+        assert_eq!(session.depth(), 2);
+
+        session.apply_action(&Action::Undo, 0.0).unwrap();
+        assert_eq!(
+            session.project().active_sequence().audio,
+            AudioSettings::default(),
+            "the audio setting is one undo step"
+        );
+        assert_eq!(session.depth(), 1);
 
         session.apply_action(&Action::Undo, 0.0).unwrap();
         assert_eq!(session.depth(), 0);

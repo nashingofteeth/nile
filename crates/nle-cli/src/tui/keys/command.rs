@@ -789,7 +789,9 @@ pub(crate) fn sequence_command(
     player: &dyn Mpv,
     f: &mut action::Flags,
 ) -> Option<String> {
-    const USAGE: &str = "usage: :sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]]";
+    const USAGE: &str = "usage: :sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]|audio [--normalize [BOOL] --fade-in S --fade-out S]]";
+    const AUDIO_USAGE: &str =
+        "usage: :sequence audio [--normalize [BOOL]] [--fade-in S] [--fade-out S]";
     let verb = f.positional();
     match verb.as_deref() {
         None | Some("ls") => {
@@ -827,6 +829,68 @@ pub(crate) fn sequence_command(
                 return Some(e.to_string());
             }
             select_sequence(app, player, id)
+        }
+        Some("audio") => {
+            let normalize = match f.take_opt("normalize") {
+                None => None,
+                Some(None) => Some(true),
+                Some(Some(value)) => match value.as_str() {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => {
+                        return Some(format!("--normalize expects true|false, got {value:?}"));
+                    }
+                },
+            };
+            let parse_fade = |name: &str, f: &mut action::Flags| match f.take(name) {
+                Some(value) => nle_core::parse_time(&value)
+                    .map(Some)
+                    .map_err(|e| format!("invalid --{name} {value:?} ({e})")),
+                None => Ok(None),
+            };
+            let fade_in = match parse_fade("fade-in", f) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let fade_out = match parse_fade("fade-out", f) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            if let Err(e) = f.finish(AUDIO_USAGE) {
+                return Some(e.to_string());
+            }
+            if normalize.is_none() && fade_in.is_none() && fade_out.is_none() {
+                let sequence = app.project.active_sequence();
+                return Some(format!(
+                    "#{} {} · audio {}",
+                    sequence.id,
+                    sequence.name,
+                    sequence.audio.summary()
+                ));
+            }
+            let mut audio = app.project.audio;
+            if let Some(normalize) = normalize {
+                audio.normalize = normalize;
+            }
+            if let Some(fade_in) = fade_in {
+                audio.fade_in = fade_in;
+            }
+            if let Some(fade_out) = fade_out {
+                audio.fade_out = fade_out;
+            }
+            match app.project.set_audio(audio) {
+                Ok(desc) => {
+                    // `set_audio` already wrote both sidecars; mark them seen
+                    // before the standard refresh so it does not read our own
+                    // write as a foreign change and refuse to save.
+                    app.note_seen();
+                    if !persist_and_refresh(app, player) {
+                        return None;
+                    }
+                    Some(desc)
+                }
+                Err(e) => Some(format!("audio failed: {e}")),
+            }
         }
         Some("add") => {
             let Some(name) = f.positional() else {

@@ -54,7 +54,9 @@ just no longer drags the audio clock with it.
   byte-identical; `audio_post_chain` is the one place the filters are spelled.
 - **Target is EBU R128 speech-first:** -16 LUFS integrated, -1.5 dBTP true
   peak, LRA 11 (`LOUDNORM_FILTER`). One-pass `loudnorm`; two-pass measurement
-  is a later optimization, not a second path.
+  is a later optimization, not a second path. `loudnorm` outputs 192 kHz, so
+  the chain pins it back with `aresample=48000` (a fades-only chain never
+  changes rate and needs no resample).
 - Fades are clamped to the programme length when the chain is built, so
   `afade` never gets a negative `st`. Both are ordinary `afade=t=in|out`; an
   overlap is a product of the two envelopes (no error).
@@ -73,6 +75,9 @@ just no longer drags the audio clock with it.
 - The monitor's continuous audio master hashes the settings
   (`AUDIO_PREVIEW_VERSION` bumped), so changing them re-renders the preview
   mix, and `export_audio_quiet` uses the same graph as the deliverable.
+  An active setting forces the master even on a clean-cut timeline (no
+  seam to hide); `ensure_audio_master` still returns `None` when no source
+  has an audio stream.
 
 ## Filter-graph gotchas
 
