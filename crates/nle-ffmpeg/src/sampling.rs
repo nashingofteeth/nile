@@ -20,17 +20,21 @@
 //! When the source has been removed, the key can no longer be recomputed (its
 //! mtime/size are part of it). The cache then falls back to scanning entry
 //! metadata for the newest generation matching the source + spec and serves it
-//! — which is what makes an offline analysis pass possible.
+//! — which is what makes an offline analysis pass possible. Metadata spells
+//! the source with `to_string_lossy()`, so a non-UTF-8 path can only be found
+//! offline through the lossy form; the key itself hashes the exact `Path`.
 //!
 //! Sampling buffers the whole result in memory (`width × height × 3` bytes per
 //! frame; `samples × channels × 2` bytes of audio). Callers pick a range and a
 //! geometry small enough for the analysis they are doing.
 
 use std::collections::hash_map::DefaultHasher;
+use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nle_core::Seconds;
 use nle_core::time::format_seconds;
@@ -153,19 +157,25 @@ impl FrameSample {
 
     /// One frame's RGB24 bytes; `None` past the last frame.
     pub fn frame(&self, index: usize) -> Option<&[u8]> {
-        let start = index.checked_mul(self.stride())?;
-        self.rgb.get(start..start + self.stride())
+        let stride = self.stride();
+        let start = index.checked_mul(stride)?;
+        let end = start.checked_add(stride)?;
+        self.rgb.get(start..end)
     }
 
-    /// One pixel's RGB triple; `None` outside the sample.
+    /// One pixel's RGB triple; `None` outside the sample (including an index
+    /// too large to address).
     pub fn pixel(&self, frame: usize, x: u32, y: u32) -> Option<[u8; 3]> {
         if x >= self.width || y >= self.height {
             return None;
         }
-        let offset = frame
-            .checked_mul(self.stride())?
-            .checked_add((y as usize * self.width as usize + x as usize) * 3)?;
-        let px = self.rgb.get(offset..offset + 3)?;
+        let row = (y as usize)
+            .checked_mul(self.width as usize)?
+            .checked_add(x as usize)?
+            .checked_mul(3)?;
+        let offset = frame.checked_mul(self.stride())?.checked_add(row)?;
+        let end = offset.checked_add(3)?;
+        let px = self.rgb.get(offset..end)?;
         Some([px[0], px[1], px[2]])
     }
 }
@@ -259,8 +269,9 @@ impl AudioSample {
 }
 
 /// A content-addressed store for packed samples. The caller picks the root;
-/// `nile-cli` will point it at `.nile/<stem>/analysis` once the sidecar
-/// contract lands.
+/// `nile-cli` will point it at `.nile/<stem>/cache/analysis` (disposable
+/// recomputable data), not `.nile/<stem>/analysis` (analysis state), once the
+/// sidecar contract lands.
 #[derive(Debug, Clone)]
 pub struct SampleCache {
     root: PathBuf,
@@ -336,8 +347,10 @@ impl SampleCache {
         if width != spec.width || height != spec.height || frames == 0 {
             return None;
         }
-        let stride = width as usize * height as usize * 3;
-        if frames as usize * stride != raw.len() || meta.bytes != raw.len() as u64 {
+        // A corrupt/huge metadata count must be a miss, not an overflow.
+        let stride = (width as u64).checked_mul(height as u64)?.checked_mul(3)?;
+        let expected = frames.checked_mul(stride)?;
+        if expected != raw.len() as u64 || meta.bytes != expected {
             return None;
         }
         Some(FrameSample::new(width, height, raw))
@@ -362,7 +375,9 @@ impl SampleCache {
         if sample_rate != spec.sample_rate || channels != spec.channels || samples == 0 {
             return None;
         }
-        if samples as usize * channels as usize * 2 != raw.len() || meta.bytes != raw.len() as u64 {
+        let unit = (channels as u64).checked_mul(2)?;
+        let expected = samples.checked_mul(unit)?;
+        if expected != raw.len() as u64 || meta.bytes != expected {
             return None;
         }
         Some(AudioSample::new(sample_rate, channels, raw))
@@ -451,7 +466,9 @@ impl SampleCache {
             }
             found.push((entry, meta.source_mtime_secs, meta.source_mtime_nanos));
         }
-        // Newest source first, then a stable key order for equal timestamps.
+        // Newest source mtime first. Entries with the same mtime have no
+        // defined winner (the hash order is arbitrary): an offline lookup
+        // cannot reconstruct which write came last when the source is gone.
         found.sort_by_key(|(entry, secs, nanos)| std::cmp::Reverse((*secs, *nanos, *entry)));
         found.into_iter().map(|(entry, _, _)| entry).collect()
     }
@@ -507,44 +524,45 @@ impl SampleCache {
     /// Raw first, metadata last: metadata is the commit marker, so a crash
     /// between the writes leaves an entry that simply misses.
     fn store_entry(&self, entry: u64, meta: &EntryMeta, raw: &[u8]) -> Result<(), SampleError> {
-        let (raw_path, meta_path) = entry_paths(&self.root, entry);
-        write_atomic(&raw_path, raw)?;
+        let stem = hex(entry);
+        write_atomic(&self.root, &format!("{stem}.raw"), raw)?;
         let json = serde_json::to_vec(meta).map_err(|e| SampleError::CacheEncode(e.to_string()))?;
-        write_atomic(&meta_path, &json)
+        write_atomic(&self.root, &format!("{stem}.json"), &json)
     }
 }
 
 /// The cache key components of a source path. `component` is the canonical
 /// spelling when the file exists (stable across symlinks) and `arg` is the
 /// lexical absolute path as handed in; an offline lookup matches either.
+///
+/// The key hashes these `Path`s directly (`Path: Hash`), so a non-UTF-8 name
+/// keys exactly. Metadata must be JSON, so it stores the `to_string_lossy()`
+/// spelling; only the offline scan loses information for such paths.
 struct SourceKey {
-    component: String,
-    arg: String,
+    component: PathBuf,
+    arg: PathBuf,
 }
 
 impl SourceKey {
     fn matches(&self, meta: &EntryMeta) -> bool {
-        meta.source == self.component || meta.source_arg == self.arg
+        meta.source == self.component.to_string_lossy().as_ref()
+            || meta.source_arg == self.arg.to_string_lossy().as_ref()
     }
 }
 
 fn source_key(path: &Path) -> SourceKey {
     let arg = absolute_lexical(path);
-    let component = std::fs::canonicalize(path)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| arg.clone());
+    let component = std::fs::canonicalize(path).unwrap_or_else(|_| arg.clone());
     SourceKey { component, arg }
 }
 
-fn absolute_lexical(path: &Path) -> String {
+fn absolute_lexical(path: &Path) -> PathBuf {
     if path.is_absolute() {
-        return path.display().to_string();
+        return path.to_path_buf();
     }
     std::env::current_dir()
         .map(|dir| dir.join(path))
         .unwrap_or_else(|_| path.to_path_buf())
-        .display()
-        .to_string()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -573,7 +591,7 @@ fn source_identity(path: &Path) -> Option<SourceId> {
 }
 
 /// The full cache key: spec + version + canonical source + source identity.
-fn entry_key(params: u64, source: &str, id: &SourceId) -> u64 {
+fn entry_key(params: u64, source: &Path, id: &SourceId) -> u64 {
     let mut hasher = DefaultHasher::new();
     params.hash(&mut hasher);
     source.hash(&mut hasher);
@@ -637,33 +655,67 @@ fn entry_paths(root: &Path, entry: u64) -> (PathBuf, PathBuf) {
     )
 }
 
-/// Write `bytes` to `path` through a temp file in the same directory, so a
-/// reader never sees a partial file and a crash cannot leave one in place.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), SampleError> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+/// A process-local uniquifier for temp names. The pid separates processes;
+/// the sequence separates threads and successive writes in this one.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// `<key>.tmp-<pid>-<seq>.<ext>` — the spelling `proxy::is_entry_name` knows,
+/// so a crashed write is swept with the other cache entries.
+fn tmp_name(name: &str) -> String {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "tmp"));
+    format!("{stem}.tmp-{}-{seq}.{ext}", std::process::id())
+}
+
+/// Write `name` under `dir` through a sibling temp file, fsync it, rename it
+/// into place, then fsync the directory (best effort on Unix).
+///
+/// The rename is atomic, so a reader sees the old entry or the complete new
+/// one — never a short file under the final name. A crash before the rename
+/// leaves a `<key>.tmp-…` file that prune can identify and remove; the
+/// metadata file is written after the raw one and acts as the commit marker.
+fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), SampleError> {
     std::fs::create_dir_all(dir).map_err(|e| SampleError::CacheIo {
         path: dir.to_path_buf(),
         error: e,
     })?;
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".sample-tmp-")
-        .tempfile_in(dir)
-        .map_err(|e| SampleError::CacheIo {
-            path: dir.to_path_buf(),
-            error: e,
-        })?;
-    tmp.write_all(bytes).map_err(|e| SampleError::CacheIo {
-        path: tmp.path().to_path_buf(),
-        error: e,
-    })?;
-    tmp.flush().map_err(|e| SampleError::CacheIo {
-        path: tmp.path().to_path_buf(),
-        error: e,
-    })?;
-    tmp.persist(path).map_err(|e| SampleError::CacheIo {
-        path: path.to_path_buf(),
-        error: e.error,
-    })?;
+    let target = dir.join(name);
+    let mut attempts = 0;
+    let (tmp, mut file) = loop {
+        let path = dir.join(tmp_name(name));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => break (path, file),
+            // A stale temp from an earlier process with the same pid: next seq.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 16 => {
+                attempts += 1;
+            }
+            Err(error) => {
+                return Err(SampleError::CacheIo { path, error });
+            }
+        }
+    };
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(SampleError::CacheIo { path: tmp, error });
+    }
+    drop(file);
+    if let Err(error) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(SampleError::CacheIo {
+            path: target,
+            error,
+        });
+    }
+    // The rename is only durable once the directory is synced; on platforms
+    // where a directory can't be opened this is skipped (the file is synced).
+    #[cfg(unix)]
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
     Ok(())
 }
 
@@ -712,8 +764,8 @@ impl EntryMeta {
         Self {
             version: SAMPLE_VERSION,
             params: hex(params),
-            source: key.component.clone(),
-            source_arg: key.arg.clone(),
+            source: key.component.to_string_lossy().into_owned(),
+            source_arg: key.arg.to_string_lossy().into_owned(),
             source_size: id.size,
             source_mtime_secs: id.mtime_secs,
             source_mtime_nanos: id.mtime_nanos,
@@ -726,7 +778,7 @@ impl EntryMeta {
 
 /// ffmpeg's output argument is positional (`-` for the pipe), so it follows
 /// `--`: a source path can never be mistaken for an option.
-fn run_ffmpeg(args: &[String]) -> Result<Vec<u8>, SampleError> {
+fn run_ffmpeg(args: &[OsString]) -> Result<Vec<u8>, SampleError> {
     let out = Command::new("ffmpeg")
         .args(args)
         .stdin(Stdio::null())
@@ -745,8 +797,12 @@ fn run_ffmpeg(args: &[String]) -> Result<Vec<u8>, SampleError> {
 }
 
 fn sample_frames(spec: &FrameSpec) -> Result<FrameSample, SampleError> {
-    let raw = run_ffmpeg(&frame_args(spec))?;
-    let stride = spec.width as usize * spec.height as usize * 3;
+    let stride = (spec.width as usize)
+        .checked_mul(spec.height as usize)
+        .and_then(|n| n.checked_mul(3))
+        .filter(|n| *n > 0)
+        .ok_or_else(|| SampleError::InvalidSpec("frame size overflows".into()))?;
+    let mut raw = run_ffmpeg(&frame_args(spec))?;
     if raw.len() % stride != 0 {
         return Err(SampleError::Ragged {
             bytes: raw.len(),
@@ -763,13 +819,14 @@ fn sample_frames(spec: &FrameSpec) -> Result<FrameSample, SampleError> {
     // a filter rounding up must not hand the caller more than it asked for.
     let wanted = spec.frame_count() as usize;
     let frames = (raw.len() / stride).min(wanted);
-    let rgb = raw[..frames * stride].to_vec();
-    Ok(FrameSample::new(spec.width, spec.height, rgb))
+    // `truncate` is the no-copy path when the count is already exact.
+    raw.truncate(frames * stride);
+    Ok(FrameSample::new(spec.width, spec.height, raw))
 }
 
 fn sample_audio(spec: &AudioSpec) -> Result<AudioSample, SampleError> {
-    let raw = run_ffmpeg(&audio_args(spec))?;
     let unit = spec.bytes_per_sample();
+    let mut raw = run_ffmpeg(&audio_args(spec))?;
     if raw.len() % unit != 0 {
         return Err(SampleError::Ragged {
             bytes: raw.len(),
@@ -784,11 +841,8 @@ fn sample_audio(spec: &AudioSpec) -> Result<AudioSample, SampleError> {
     }
     let wanted = spec.sample_count() as usize;
     let samples = (raw.len() / unit).min(wanted);
-    Ok(AudioSample::new(
-        spec.sample_rate,
-        spec.channels,
-        raw[..samples * unit].to_vec(),
-    ))
+    raw.truncate(samples * unit);
+    Ok(AudioSample::new(spec.sample_rate, spec.channels, raw))
 }
 
 /// ffmpeg's rational spelling: `30` for a whole rate, `30000/1001` otherwise.
@@ -802,7 +856,7 @@ fn rate_arg(fps: &Seconds) -> String {
 
 /// The exact argv for a frame sample, so the command can be inspected without
 /// running it.
-fn frame_args(spec: &FrameSpec) -> Vec<String> {
+fn frame_args(spec: &FrameSpec) -> Vec<OsString> {
     let filter = format!(
         "fps={},scale={}:{}:flags=area,setsar=1",
         rate_arg(&spec.fps),
@@ -817,9 +871,9 @@ fn frame_args(spec: &FrameSpec) -> Vec<String> {
         "-sn".into(),
         "-dn".into(),
         "-vf".into(),
-        filter,
+        filter.into(),
         "-frames:v".into(),
-        spec.frame_count().to_string(),
+        spec.frame_count().to_string().into(),
         "-f".into(),
         "rawvideo".into(),
         "-pix_fmt".into(),
@@ -832,7 +886,7 @@ fn frame_args(spec: &FrameSpec) -> Vec<String> {
 
 /// The exact argv for an audio sample. `atrim=end_sample` makes the sample
 /// count exact even when the source's rate differs from the requested one.
-fn audio_args(spec: &AudioSpec) -> Vec<String> {
+fn audio_args(spec: &AudioSpec) -> Vec<OsString> {
     let mut args = common_args(spec.source.as_path(), spec.start, spec.duration);
     args.extend([
         "-map".into(),
@@ -845,11 +899,12 @@ fn audio_args(spec: &AudioSpec) -> Vec<String> {
             "aresample={},atrim=end_sample={}",
             spec.sample_rate,
             spec.sample_count()
-        ),
+        )
+        .into(),
         "-ac".into(),
-        spec.channels.to_string(),
+        spec.channels.to_string().into(),
         "-ar".into(),
-        spec.sample_rate.to_string(),
+        spec.sample_rate.to_string().into(),
         "-f".into(),
         "s16le".into(),
         "-acodec".into(),
@@ -860,7 +915,7 @@ fn audio_args(spec: &AudioSpec) -> Vec<String> {
     args
 }
 
-fn common_args(source: &Path, start: Seconds, duration: Seconds) -> Vec<String> {
+fn common_args(source: &Path, start: Seconds, duration: Seconds) -> Vec<OsString> {
     vec![
         "-nostdin".into(),
         "-hide_banner".into(),
@@ -869,11 +924,13 @@ fn common_args(source: &Path, start: Seconds, duration: Seconds) -> Vec<String> 
         // Seek before `-i`: fast demuxer seek, then decode forward to the
         // exact frame. Duration after `-i` bounds what is decoded.
         "-ss".into(),
-        format_seconds(&start),
+        format_seconds(&start).into(),
         "-i".into(),
-        source.display().to_string(),
+        // `-i` consumes its value literally, so a path starting with `-` is
+        // safe here; the `--` below guards the positional output.
+        source.as_os_str().to_os_string(),
         "-t".into(),
-        format_seconds(&duration),
+        format_seconds(&duration).into(),
     ]
 }
 
@@ -953,6 +1010,13 @@ mod tests {
         }
     }
 
+    fn args_line(args: &[OsString]) -> String {
+        args.iter()
+            .map(|a| a.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Force a visible source change: same second, new mtime, so a filesystem
     /// with coarse timestamps can't hide the edit.
     fn touch_forward(path: &Path) {
@@ -973,7 +1037,10 @@ mod tests {
         assert_eq!(sample.frame_count(), 5);
         assert_eq!(sample.rgb().len(), 5 * 32 * 24 * 3);
         assert_eq!(sample.frame(5), None, "no sixth frame");
+        assert_eq!(sample.frame(usize::MAX), None, "an absurd index is None");
         assert_eq!(sample.pixel(0, 32, 0), None, "x is out of bounds");
+        assert_eq!(sample.pixel(usize::MAX, 0, 0), None, "frame overflow");
+        assert_eq!(sample.pixel(0, u32::MAX, u32::MAX), None, "pixel overflow");
         // A solid-color clip decodes to that color (yuv420p round-trip is
         // lossy by a couple of levels, hence the tolerance).
         let [r, g, b] = sample.pixel(0, 16, 12).unwrap();
@@ -1092,18 +1159,78 @@ mod tests {
         let cache = SampleCache::new(dir.path().join("cache"));
         let spec = frame_spec(&source);
         let first = cache.frames(&spec).unwrap();
-        let raw = std::fs::read_dir(cache.root())
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|e| e == "raw"))
-            .unwrap();
+        let raw = cache_file(&cache, "raw");
         let file = std::fs::File::options().write(true).open(&raw).unwrap();
         file.set_len(first.rgb().len() as u64 / 2).unwrap();
         drop(file);
 
         let second = cache.frames(&spec).unwrap();
         assert_eq!(second, first, "the truncated entry was re-sampled");
+    }
+
+    /// A metadata count that would overflow the length arithmetic is a miss
+    /// (and is re-sampled), never a debug panic or a release wrap.
+    #[test]
+    fn a_huge_metadata_count_is_a_miss_not_an_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = video(dir.path(), "red");
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let spec = frame_spec(&source);
+        let first = cache.frames(&spec).unwrap();
+
+        let meta_path = cache_file(&cache, "json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        meta["frames"] = serde_json::Value::from(u64::MAX);
+        std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+        let again = cache.frames(&spec).unwrap();
+        assert_eq!(again, first, "the corrupt count was re-sampled");
+    }
+
+    /// With the source gone, a corrupt newest metadata file is skipped and the
+    /// older generation is served.
+    #[test]
+    fn an_offline_lookup_skips_corrupt_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = video(dir.path(), "red");
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let spec = frame_spec(&source);
+        let red = cache.frames(&spec).unwrap();
+
+        video(dir.path(), "blue");
+        touch_forward(&source);
+        let blue = cache.frames(&spec).unwrap();
+        assert_ne!(red, blue, "two generations exist");
+        let blue_meta = std::fs::read_dir(cache.root())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .find(|p| std::fs::read(p.with_extension("raw")).is_ok_and(|raw| raw == blue.rgb()))
+            .expect("the blue generation's metadata");
+        std::fs::write(&blue_meta, b"{ not json").unwrap();
+
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(
+            cache.frames(&spec).unwrap(),
+            red,
+            "fell back to the older intact generation"
+        );
+    }
+
+    #[test]
+    fn temp_names_are_prune_candidates() {
+        let raw = tmp_name("0123456789abcdef.raw");
+        let meta = tmp_name("0123456789abcdef.json");
+        assert!(raw.starts_with("0123456789abcdef.tmp-"), "{raw}");
+        assert!(raw.ends_with(".raw"), "{raw}");
+        assert!(meta.ends_with(".json"), "{meta}");
+        assert!(
+            raw.contains(&format!(".tmp-{}-", std::process::id())),
+            "{raw}"
+        );
+        assert_ne!(raw, tmp_name("0123456789abcdef.raw"), "seq uniquifies");
     }
 
     #[test]
@@ -1170,20 +1297,23 @@ mod tests {
         let source = dir.path().join("a b.mp4");
         let spec = frame_spec(&source);
         let args = frame_args(&spec);
-        let line = args.join(" ");
+        let line = args_line(&args);
         assert!(line.contains("-ss 0 -i "), "{line}");
         assert!(line.contains("fps=5"), "{line}");
         assert!(line.contains("scale=32:24"), "{line}");
         assert!(line.contains("rawvideo"), "{line}");
         assert!(line.contains("rgb24"), "{line}");
         assert!(
-            args.contains(&source.display().to_string()),
+            args.iter().any(|a| a.as_os_str() == source.as_os_str()),
             "a path with a space stays one argument: {args:?}"
         );
         assert_eq!(args[args.len() - 2], "--");
-        assert_eq!(args.last().map(String::as_str), Some("-"));
+        assert_eq!(args.last().map(|a| a.to_str()), Some(Some("-")));
         assert!(
-            args.iter().all(|a| !a.contains(';') && !a.contains("&&")),
+            args.iter().all(|a| {
+                let s = a.to_string_lossy();
+                !s.contains(';') && !s.contains("&&")
+            }),
             "never a shell string: {args:?}"
         );
     }
@@ -1194,7 +1324,7 @@ mod tests {
         assert_eq!(rate_arg(&Seconds::new(30_000, 1001)), "30000/1001");
         let mut spec = frame_spec(Path::new("in.mp4"));
         spec.fps = Seconds::new(30_000, 1001);
-        assert!(frame_args(&spec).join(" ").contains("fps=30000/1001"));
+        assert!(args_line(&frame_args(&spec)).contains("fps=30000/1001"));
         assert_eq!(spec.frame_count(), 29);
     }
 
@@ -1203,7 +1333,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let spec = audio_spec(&dir.path().join("tone.wav"));
         let args = audio_args(&spec);
-        let line = args.join(" ");
+        let line = args_line(&args);
         assert!(
             line.contains("aresample=48000,atrim=end_sample=48000"),
             "{line}"
@@ -1211,7 +1341,7 @@ mod tests {
         assert!(line.contains("-ac 2 -ar 48000"), "{line}");
         assert!(line.contains("s16le"), "{line}");
         assert_eq!(args[args.len() - 2], "--");
-        assert_eq!(args.last().map(String::as_str), Some("-"));
+        assert_eq!(args.last().map(|a| a.to_str()), Some(Some("-")));
     }
 
     #[test]
@@ -1244,5 +1374,14 @@ mod tests {
         std::fs::read_dir(cache.root())
             .map(|it| it.flatten().count())
             .unwrap_or(0)
+    }
+
+    fn cache_file(cache: &SampleCache, ext: &str) -> PathBuf {
+        std::fs::read_dir(cache.root())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == ext))
+            .unwrap_or_else(|| panic!("no .{ext} entry"))
     }
 }
