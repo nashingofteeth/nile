@@ -54,9 +54,13 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
     `--no-hold-size`, keeps its size.
   - `work-in-frame [--margin P]`: every crop keeps P% of the picture on all
     four sides (default 5).
-  - `words-complete [--min-coverage F] [--transcript NAME]`: F of the checked
-    frames carry audio (default 1.0); a transcript payload has no store yet
-    and is unverifiable.
+  - `words-complete [--min-coverage F] [--transcript HASH]`: without a
+    transcript, F of the checked frames carry audio (default 1.0). With a
+    `t1-…` hash, F of the relevant words must be whole: a trim, split or span
+    edge that cuts a word fails it, and the transcript's asset must be shown
+    in the anchored span (otherwise unverifiable). The words live in
+    `.nile/<stem>/analysis/transcripts/`; a missing or corrupt transcript is
+    unverifiable.
   - `absent [--asset N | --group N] [--black] [--tolerance-frames N]`: none of
     that material appears; `--black` also refuses black frames and may stand
     alone ("nothing black"), otherwise one selector is required.
@@ -75,11 +79,12 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   names them (`AssetInAnnotation`/`GroupInAnnotation`) instead of leaving a
   dangling id.
 - **A check is computed, never stored.** `evaluate` is a pure function of
-  `(project, report, annotation)`; `check_with` only loads the sidecar and
-  picks the annotations, and the CLI, protocol and TUI share that seam
-  (`cmd/check.rs`). `CheckOutcome` copies the annotation's `status`, so a
-  `Resolved` expectation still runs, still fails, and prints `[resolved]`:
-  resolving acknowledges a verdict, it does not waive it.
+  `(project, report, annotation)`; `check_with` loads the sidecar and the
+  project's transcript store, then picks the annotations; the CLI, protocol
+  and TUI share that seam (`cmd/check.rs`). `CheckOutcome` copies the
+  annotation's `status`, so a `Resolved` expectation still runs, still fails,
+  and prints `[resolved]`: resolving acknowledges a verdict, it does not waive
+  it.
 - **The sequence defaults to the report's.** An explicit `--sequence` that
   names another sequence is exit 2; an `--id` that selects no expectation is
   also 2 (a stale filter must not pass a gate silently). A crop,

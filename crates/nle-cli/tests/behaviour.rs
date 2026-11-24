@@ -517,7 +517,7 @@ fn annotation_check_passes_a_matching_render_and_fails_a_wrong_camera() {
 fn annotation_check_counts_unverifiable_and_resolved_failures_as_failed() {
     let s = Sandbox::new();
     s.base();
-    // A transcript has no store yet, so the check cannot answer.
+    // A transcript hash missing from the store cannot answer.
     s.ok(&[
         "annotation",
         "add",
@@ -527,7 +527,7 @@ fn annotation_check_counts_unverifiable_and_resolved_failures_as_failed() {
         "--at",
         "0.5",
         "--transcript",
-        "take",
+        "t1-0000000000000000",
     ]);
     s.export("out.mp4");
     let out = s.run(&["annotation", "check", "--report", "out.mp4"]);

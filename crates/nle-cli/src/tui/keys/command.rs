@@ -720,7 +720,13 @@ fn annotation_check_command(app: &mut App, f: &mut action::Flags) -> String {
     }
     // A missing/corrupt report or a mismatched sequence is a message, never a
     // panic: the previous verdicts stay, so a typo does not wipe the marks.
-    let report = match crate::cmd::check::check_with(&app.project, &report, sequence, &ids) {
+    let report = match crate::cmd::check::check_with(
+        &app.project,
+        app.project.path(),
+        &report,
+        sequence,
+        &ids,
+    ) {
         Ok(report) => report,
         Err(e) => return format!("check failed: {e}"),
     };

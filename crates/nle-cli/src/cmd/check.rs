@@ -8,19 +8,19 @@
 //! the caller decide, exactly like `plan_for_armed`/`apply_extend_plan` in the
 //! edit path.
 //!
-//! [`evaluate`] stays the pure verdict; this seam adds only the I/O-shaped
-//! parts (find the sidecar, load it, pick the annotations). The rules a check
-//! follows — tolerances, blend sides, revision staleness, what counts as
-//! unverifiable — live in `nle-core/src/expect.rs`; the report it reads is
-//! described in `docs/pitfalls/render-report.md`.
+//! [`evaluate_with`] stays the pure verdict; this seam adds only the I/O-shaped
+//! parts (find the sidecar, locate the transcript store, pick the annotations).
+//! The rules a check follows — tolerances, blend sides, revision staleness,
+//! what counts as unverifiable — live in `nle-core/src/expect.rs`; the report
+//! it reads is described in `docs/pitfalls/render-report.md`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use nle_core::expect::{CheckReport, CheckResult, evaluate};
+use nle_core::expect::{CheckReport, CheckResult, evaluate_with};
 use nle_core::report::RenderReport;
-use nle_core::{AnnotationKind, AnnotationStatus, Project, ProjectError};
+use nle_core::{AnnotationKind, AnnotationStatus, Project, ProjectError, TranscriptStore};
 
 use crate::{say, say_err};
 
@@ -55,8 +55,14 @@ pub(crate) fn report_sidecar(path: &Path) -> PathBuf {
 /// expectation on the sequence". An id that names nothing is not an error — a
 /// caller may filter with a stale selection and deserves an empty report
 /// rather than a crash.
+///
+/// `project_path` locates the project's transcript store
+/// (`.nile/<stem>/analysis/transcripts`); a check that names no transcript
+/// never touches it, and a missing one is an unverifiable detail rather than
+/// a seam error.
 pub(crate) fn check_with(
     project: &Project,
+    project_path: &Path,
     report: &Path,
     sequence: Option<u32>,
     ids: &[u32],
@@ -73,14 +79,15 @@ pub(crate) fn check_with(
     if project.sequence(sequence).is_none() {
         return Err(ProjectError::SequenceNotFound(sequence).into());
     }
-    // `annotations_for` already scopes by sequence; `evaluate` still compares
-    // the annotation's sequence with the report's, so a render of another
-    // sequence fails there instead of being quietly excluded.
+    let analysis = TranscriptStore::at(project_path);
+    // `annotations_for` already scopes by sequence; `evaluate_with` still
+    // compares the annotation's sequence with the report's, so a render of
+    // another sequence fails there instead of being quietly excluded.
     let checks = project
         .annotations_for(sequence)
         .filter(|annotation| matches!(&annotation.kind, AnnotationKind::Expectation { .. }))
         .filter(|annotation| ids.is_empty() || ids.contains(&annotation.id))
-        .map(|annotation| evaluate(project, &report, annotation))
+        .map(|annotation| evaluate_with(project, &report, annotation, &analysis))
         .collect();
     Ok(CheckReport::new(&report, checks))
 }
@@ -155,7 +162,7 @@ pub(crate) fn cmd_annotation_check(
     json: bool,
 ) -> Result<()> {
     let project = Project::load(project_path)?;
-    let check = match check_with(&project, report, sequence, ids) {
+    let check = match check_with(&project, project_path, report, sequence, ids) {
         Ok(check) => check,
         Err(e) => {
             say_err!("Error: {e}");
@@ -204,7 +211,8 @@ mod tests {
     use nle_core::time::Seconds;
     use nle_core::timeline::{Clip, Segment, Track, TrackKind};
     use nle_core::{
-        Actor, Anchor, AnnotationKind, ClipPoint, Expectation, Provenance, VideoSettings,
+        Actor, Anchor, AnnotationKind, ClipPoint, Expectation, Provenance, Transcript,
+        TranscriptStore, VideoSettings, Word,
     };
 
     fn s(n: i64) -> Seconds {
@@ -323,6 +331,12 @@ mod tests {
         out
     }
 
+    /// The project file path the seam reads its state directories from. It
+    /// need not exist: `state_dir` keys on the literal path until it does.
+    fn project_path(dir: &Path) -> PathBuf {
+        dir.join("nile.json")
+    }
+
     #[test]
     fn a_matching_cam_passes_and_renders_a_tick() {
         let dir = tempfile::tempdir().unwrap();
@@ -330,7 +344,8 @@ mod tests {
         let id = add(&mut project, cam(1));
         let out = write_report(&project, dir.path());
 
-        let report = check_with(&project, &out, None, &[]).expect("check");
+        let report =
+            check_with(&project, &project_path(dir.path()), &out, None, &[]).expect("check");
         assert_eq!(report.sequence(), 1);
         assert_eq!(report.checks().len(), 1);
         assert_eq!(report.checks()[0].id, id);
@@ -355,7 +370,8 @@ mod tests {
         add(&mut expected, cam(1));
         let out = write_report(&rendered, dir.path());
 
-        let report = check_with(&expected, &out, None, &[]).expect("check");
+        let report =
+            check_with(&expected, &project_path(dir.path()), &out, None, &[]).expect("check");
         let check = &report.checks()[0];
         assert_eq!(check.result, CheckResult::Fail);
         let detail = check.detail.as_deref().expect("detail");
@@ -377,7 +393,8 @@ mod tests {
         expected.resolve_annotation(id).expect("resolve");
         let out = write_report(&rendered, dir.path());
 
-        let report = check_with(&expected, &out, None, &[]).expect("check");
+        let report =
+            check_with(&expected, &project_path(dir.path()), &out, None, &[]).expect("check");
         let check = &report.checks()[0];
         assert_eq!(check.status, AnnotationStatus::Resolved);
         assert_eq!(check.result, CheckResult::Fail);
@@ -396,23 +413,80 @@ mod tests {
             &mut project,
             Expectation::WordsComplete {
                 min_coverage: 1.0,
-                transcript: Some("hello".to_string()),
+                transcript: Some("t1-0000000000000000".to_string()),
             },
         );
         let out = write_report(&project, dir.path());
 
-        let report = check_with(&project, &out, None, &[]).expect("check");
+        let report =
+            check_with(&project, &project_path(dir.path()), &out, None, &[]).expect("check");
         let check = &report.checks()[0];
         assert_eq!(check.result, CheckResult::Unverifiable);
         assert!(
             check
                 .detail
                 .as_deref()
-                .is_some_and(|detail| detail.contains("transcript")),
+                .is_some_and(|detail| detail.contains("not found")),
             "{check:?}"
         );
         assert_eq!(report.summary().unverifiable, 1);
         assert!(format_human(&report)[0].starts_with('?'));
+    }
+
+    #[test]
+    fn a_stored_transcript_reports_word_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut project = project_with(1, true);
+        // The transcript lives under the project path the seam is given; the
+        // annotation names only its content address.
+        let hash = TranscriptStore::at(&project_path(dir.path()))
+            .import(&Transcript::new(
+                1,
+                vec![Word {
+                    text: "take".to_string(),
+                    start: s(1),
+                    end: s(2),
+                }],
+            ))
+            .expect("import");
+        add(
+            &mut project,
+            Expectation::WordsComplete {
+                min_coverage: 1.0,
+                transcript: Some(hash),
+            },
+        );
+        let out = write_report(&project, dir.path());
+
+        let report =
+            check_with(&project, &project_path(dir.path()), &out, None, &[]).expect("check");
+        assert_eq!(report.checks()[0].result, CheckResult::Pass, "{report:?}");
+        assert_eq!(
+            report.checks()[0].detail.as_deref(),
+            Some("1/1 words complete")
+        );
+    }
+
+    #[test]
+    fn a_transcript_hash_with_no_store_entry_is_unverifiable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut project = project_with(1, true);
+        add(
+            &mut project,
+            Expectation::WordsComplete {
+                min_coverage: 1.0,
+                transcript: Some("t1-0000000000000000".to_string()),
+            },
+        );
+        let out = write_report(&project, dir.path());
+
+        let report =
+            check_with(&project, &project_path(dir.path()), &out, None, &[]).expect("check");
+        let check = &report.checks()[0];
+        assert_eq!(check.result, CheckResult::Unverifiable);
+        let detail = check.detail.as_deref().expect("detail");
+        assert!(detail.contains("t1-0000000000000000"), "{detail}");
+        assert!(detail.contains("not found"), "{detail}");
     }
 
     #[test]
@@ -428,7 +502,8 @@ mod tests {
         );
         let out = write_report(&project, dir.path());
 
-        let report = check_with(&project, &out, None, &[]).expect("check");
+        let report =
+            check_with(&project, &project_path(dir.path()), &out, None, &[]).expect("check");
         assert_eq!(report.checks()[0].result, CheckResult::Pass);
         // A bare ✓ would claim more than the check proves: coverage is there,
         // the words are not.
@@ -459,18 +534,20 @@ mod tests {
         add_note(&mut project);
         let out = write_report(&project, dir.path());
 
-        let all = check_with(&project, &out, None, &[]).expect("check");
+        let all = check_with(&project, &project_path(dir.path()), &out, None, &[]).expect("check");
         assert_eq!(all.checks().len(), 2);
         assert_eq!(all.checks()[0].id, first);
         assert_eq!(all.checks()[1].id, second);
 
-        let one = check_with(&project, &out, None, &[second]).expect("check");
+        let one =
+            check_with(&project, &project_path(dir.path()), &out, None, &[second]).expect("check");
         assert_eq!(one.checks().len(), 1);
         assert_eq!(one.checks()[0].id, second);
         assert_eq!(one.summary().pass, 1);
 
         // A stale id filters everything out rather than erroring.
-        let none = check_with(&project, &out, None, &[99]).expect("check");
+        let none =
+            check_with(&project, &project_path(dir.path()), &out, None, &[99]).expect("check");
         assert!(none.checks().is_empty());
         assert_eq!(none.summary().pass, 0);
     }
@@ -484,7 +561,8 @@ mod tests {
 
         // The report is of #1; checking #2 would pair #2's annotations with
         // #1's frame map, so it is refused rather than answered differently.
-        let error = check_with(&project, &out, Some(2), &[]).unwrap_err();
+        let error =
+            check_with(&project, &project_path(dir.path()), &out, Some(2), &[]).unwrap_err();
         let text = error.to_string();
         assert!(text.contains("#2"), "{text}");
         assert!(text.contains("#1"), "{text}");
@@ -505,7 +583,8 @@ mod tests {
 
         // `None` follows the report: #1's annotation is checked (and fails on
         // asset #2), not #2's empty set.
-        let report = check_with(&expected, &out, None, &[]).expect("check");
+        let report =
+            check_with(&expected, &project_path(dir.path()), &out, None, &[]).expect("check");
         assert_eq!(report.sequence(), 1, "the report's sequence, not active");
         assert_eq!(report.checks().len(), 1);
         assert_eq!(report.checks()[0].id, id);
@@ -526,9 +605,10 @@ mod tests {
             .save(&RenderReport::sidecar_path(&out))
             .expect("rewrite");
 
-        let error = check_with(&project, &out, None, &[]).unwrap_err();
+        let error = check_with(&project, &project_path(dir.path()), &out, None, &[]).unwrap_err();
         assert!(error.to_string().contains("sequence #9"), "{error}");
-        let error = check_with(&project, &out, Some(9), &[]).unwrap_err();
+        let error =
+            check_with(&project, &project_path(dir.path()), &out, Some(9), &[]).unwrap_err();
         assert!(error.to_string().contains("sequence #9"), "{error}");
     }
 
@@ -538,11 +618,11 @@ mod tests {
         let project = project(1);
 
         let missing = dir.path().join("missing.mp4");
-        assert!(check_with(&project, &missing, None, &[]).is_err());
+        assert!(check_with(&project, &project_path(dir.path()), &missing, None, &[]).is_err());
 
         let out = dir.path().join("bad.mp4");
         std::fs::write(RenderReport::sidecar_path(&out), b"{ not json").unwrap();
-        assert!(check_with(&project, &out, None, &[]).is_err());
+        assert!(check_with(&project, &project_path(dir.path()), &out, None, &[]).is_err());
     }
 
     #[test]
@@ -556,8 +636,10 @@ mod tests {
         assert_eq!(report_sidecar(&out), sidecar);
         assert_eq!(report_sidecar(&sidecar), sidecar);
 
-        let from_video = check_with(&project, &out, None, &[]).expect("from the video");
-        let from_sidecar = check_with(&project, &sidecar, None, &[]).expect("from the sidecar");
+        let from_video = check_with(&project, &project_path(dir.path()), &out, None, &[])
+            .expect("from the video");
+        let from_sidecar = check_with(&project, &project_path(dir.path()), &sidecar, None, &[])
+            .expect("from the sidecar");
         assert_eq!(from_video, from_sidecar);
         assert_eq!(from_video.summary().pass, 1);
     }
@@ -568,12 +650,13 @@ mod tests {
         let mut passing = project(1);
         add(&mut passing, cam(1));
         let out = write_report(&passing, dir.path());
-        let report = check_with(&passing, &out, None, &[]).expect("check");
+        let report =
+            check_with(&passing, &project_path(dir.path()), &out, None, &[]).expect("check");
         assert_eq!(check_exit_code(&report), 0, "{report:?}");
 
         // A sequence with nothing to check is a vacuous pass.
         let empty = project(1);
-        let none = check_with(&empty, &out, None, &[]).expect("check");
+        let none = check_with(&empty, &project_path(dir.path()), &out, None, &[]).expect("check");
         assert!(none.checks().is_empty());
         assert_eq!(check_exit_code(&none), 0);
 
@@ -585,12 +668,13 @@ mod tests {
             &mut failing,
             Expectation::WordsComplete {
                 min_coverage: 1.0,
-                transcript: Some("take".to_string()),
+                transcript: Some("t1-0000000000000000".to_string()),
             },
         );
         let rendered_dir = tempfile::tempdir().unwrap();
         let out = write_report(&rendered, rendered_dir.path());
-        let report = check_with(&failing, &out, None, &[]).expect("check");
+        let report =
+            check_with(&failing, &project_path(dir.path()), &out, None, &[]).expect("check");
         assert_eq!(report.summary().fail, 1);
         assert_eq!(report.summary().unverifiable, 1);
         assert_eq!(check_exit_code(&report), 1);

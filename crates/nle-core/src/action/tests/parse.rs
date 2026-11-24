@@ -583,11 +583,11 @@ fn annotation_expectations_mirror_the_cli_flags() {
     );
     assert_eq!(
         expect(
-            "annotation add --expect words-complete --timeline --at 1 --min-coverage 0.5 --transcript take"
+            "annotation add --expect words-complete --timeline --at 1 --min-coverage 0.5 --transcript t1-0000000000000000"
         ),
         Expectation::WordsComplete {
             min_coverage: 0.5,
-            transcript: Some("take".into()),
+            transcript: Some("t1-0000000000000000".into()),
         }
     );
     assert_eq!(
