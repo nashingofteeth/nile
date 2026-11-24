@@ -16,12 +16,13 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+use nle_core::analysis::Word;
 use nle_core::{Action, CheckReport, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
 use crate::call::{
-    AnnotationList, Call, Hello, MediaList, Outcome, PlayheadReply, Preview, Reply, SequenceList,
-    SequenceReply,
+    AnalysisHash, AnnotationList, Call, Hello, MediaList, Outcome, PlayheadReply, Preview, Reply,
+    SequenceList, SequenceReply,
 };
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
@@ -351,6 +352,18 @@ impl<R: BufRead, W: Write> Client<R, W> {
     pub fn set_playhead(&mut self, at: Seconds) -> Result<PlayheadReply, ClientError> {
         match self.call(Call::PlayheadSet { at })? {
             Reply::Playhead(reply) => Ok(reply),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    /// Store a transcript for `asset` and return its content address.
+    pub fn add_transcript(
+        &mut self,
+        asset: u32,
+        words: Vec<Word>,
+    ) -> Result<AnalysisHash, ClientError> {
+        match self.call(Call::AnalysisAdd { asset, words })? {
+            Reply::Analysis(hash) => Ok(hash),
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }

@@ -8,9 +8,10 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
 `undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`, `media.list`,
-`media.add`, `playhead.set`, `annotation.list`, `annotation.check`. The
-internal `wire_catalog!` macro (`crates/nle-protocol/src/catalog.rs`) is the
-single source: it generates the enum, `method()`, and `METHODS`/`EVENTS`. Add a
+`media.add`, `playhead.set`, `annotation.list`, `annotation.check`,
+`analysis.add`. The internal `wire_catalog!` macro
+(`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
+enum, `method()`, and `METHODS`/`EVENTS`. Add a
 method to the invocation, then a sample to `all_calls()`; the `METHODS.len()`
 assertion fails until the sample exists. `hello` reports `PROTOCOL_VERSION`
 (bump only for a breaking method, field or unit change; additive methods stay
@@ -128,6 +129,15 @@ empty pass, while an unknown `id` filters the set to nothing. `report` must be
 an absolute path (after `~` expansion): the server's cwd is its own, so a
 relative path would name a different file than the client meant. Additive, so
 `PROTOCOL_VERSION` stays at 5.
+
+## Analysis
+
+`analysis.add {asset, words}` stores a transcript in the project's analysis
+state (`.nile/<stem>/analysis/transcripts/t1-…`) and returns `{hash}`. Words
+are source seconds; the server checks the asset and its probed duration. It
+writes analysis state only: no project save, revision bump, history entry or
+event. Malformed words are `-32602`; a read-only, corrupt or otherwise failing
+store is `-32603` (internal). Additive, so `PROTOCOL_VERSION` stays at 5.
 
 ## Time
 
