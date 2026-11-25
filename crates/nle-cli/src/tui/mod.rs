@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use nle_core::action;
 use nle_core::expect::CheckResult;
+use nle_core::jobs::JobRecord;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
 use nle_core::{
     Armed, Clip, Histories, History, Project, frame_of, load_register_without_migration,
@@ -45,8 +46,8 @@ mod jobs;
 use croc::{CrocAct, CrocState};
 use jobs::{
     FilmstripJob, ImportJob, Job, KeyframeJob, PreviewJob, PreviewProgress, ThumbnailJob, WaveJob,
-    poll_filmstrips, poll_import, poll_job, poll_keyframes, poll_preview, poll_thumbnails,
-    poll_waveforms, start_filmstrips, start_import, start_preview,
+    poll_filmstrips, poll_import, poll_job, poll_jobs, poll_keyframes, poll_preview,
+    poll_thumbnails, poll_waveforms, start_filmstrips, start_import, start_preview,
 };
 
 // ------------------------------------------------------------ app state
@@ -60,6 +61,14 @@ pub enum Mode {
     Pool(PoolState),
     Fx(FxState),
     Transition(TransitionForm),
+    Jobs(JobsState),
+}
+
+/// Job-queue panel state: the selected row. "Panel open" and the cursor
+/// travel together, like the other panels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JobsState {
+    pub sel: usize,
 }
 
 /// Visual segment selection on one track. `anchor` and `cursor` are segment
@@ -349,6 +358,11 @@ pub struct App {
     /// A foreign change arrived while a mode held state; reload when back
     /// in Normal.
     reload_pending: bool,
+    /// The server's durable job queue, as last polled by the jobs panel.
+    pub(crate) jobs: Vec<JobRecord>,
+    pub(crate) jobs_error: Option<String>,
+    /// Throttles `job.list` while the panel is open.
+    pub(crate) jobs_polled: Option<Instant>,
 }
 
 impl App {
@@ -409,6 +423,9 @@ impl App {
             croc: CrocState::new(),
             seen: Seen::default(),
             reload_pending: false,
+            jobs: Vec::new(),
+            jobs_error: None,
+            jobs_polled: None,
         };
         // The disk state we start from: anything later is foreign.
         app.note_seen();
@@ -1059,6 +1076,7 @@ pub fn run<P: Mpv>(session: Session, player: P) -> anyhow::Result<()> {
         poll_thumbnails(&mut app);
         poll_filmstrips(&mut app);
         start_filmstrips(&mut app);
+        poll_jobs(&mut app);
 
         // The stored playhead follows the transport: after a moment of
         // stillness, write where the cursor landed (`nile seek` reads it).
@@ -1377,6 +1395,11 @@ fn pool_resume(app: &App) -> f64 {
 
 fn is_fx(app: &App) -> bool {
     matches!(app.mode, Mode::Fx(_))
+}
+
+/// Whether the server-owned job queue panel owns the info area.
+fn is_jobs(app: &App) -> bool {
+    matches!(app.mode, Mode::Jobs(_))
 }
 
 /// A copy of the panel state: the handlers mutate `app` (and call

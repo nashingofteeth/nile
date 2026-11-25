@@ -14,14 +14,14 @@ use nle_core::{frame_of, track_label};
 use crate::mpv::Mpv;
 
 use super::super::actions::{clip_under, persist_and_refresh, run_action, select_sequence};
-use super::super::jobs::{start_import, start_job};
+use super::super::jobs::{open_jobs, start_import, start_job};
 use super::super::keys::pool::leave_pool_command;
 use super::super::motion::fmt_timecode;
 use super::super::{App, CheckMark, Mode, persist_playhead, secs};
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :sequence · :media · :cache · :filmstrip · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :annotation · :note · :export · :w · :q";
+pub(crate) const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :sequence · :media · :cache · :filmstrip · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :annotation · :note · :export · :jobs · :w · :q";
 
 /// Split a `:import` argument string into paths. Quoted paths keep their
 /// spaces; a backslash escapes the next character, so `a\ b.mp4` works too.
@@ -128,6 +128,11 @@ pub(crate) fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<S
             None
         }
         "add" => add_command(app, player, &mut f),
+        "jobs" => {
+            // The panel owns its notice; returning None keeps it.
+            open_jobs(app);
+            None
+        }
         "seek" => seek_command(app, player, &mut f),
         "export" => export_command(app, &mut f),
         "detect" => detect_command(app, &mut f),
@@ -530,7 +535,7 @@ pub(crate) fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: Key
             if let Some(msg) = run_command(app, player, &cmd) {
                 app.set_message(&msg);
             }
-            if !quitting {
+            if !quitting && !matches!(app.mode, Mode::Jobs(_)) {
                 app.mode = Mode::Normal;
                 leave_pool_command(app, player);
             }

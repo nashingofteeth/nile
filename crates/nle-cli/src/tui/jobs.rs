@@ -16,8 +16,9 @@ use crate::thumbnails::{self, Thumbnail};
 use crate::waveform::{self, Waveform};
 
 use super::keys::extend::extend_state;
+use super::keys::jobs::jobs_sel;
 use super::keys::pool::pool_select;
-use super::{App, is_pool, pool_sel, reload_project};
+use super::{App, Mode, is_pool, pool_sel, reload_project};
 /// A background job (an ffmpeg render, a heavy import): its label for
 /// notices, whether the project file changed underneath us (reload after),
 /// and the channel its worker reports on. One at a time — the monitor
@@ -692,4 +693,77 @@ pub(crate) fn preview_failed(app: &mut App, why: &str) {
         format!("{} — preview failed: {why}", app.message)
     };
     app.fail(&msg);
+}
+
+// ------------------------------------------------------- server job queue
+//
+// These are the durable jobs owned by `nile serve` — not `Job` above, which is
+// a local import/export worker inside this process.
+
+/// Re-read the server queue now and clamp the panel cursor. Opening `:jobs`
+/// calls this once so the panel never shows a stale empty list.
+pub(crate) fn refresh_jobs(app: &mut App) -> Result<(), String> {
+    match app.project.jobs() {
+        Ok(jobs) => {
+            app.jobs = jobs;
+            app.jobs_error = None;
+            app.jobs_polled = Some(Instant::now());
+            if let Mode::Jobs(state) = &mut app.mode {
+                state.sel = state.sel.min(app.jobs.len().saturating_sub(1));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let message = e.to_string();
+            app.jobs_error = Some(message.clone());
+            Err(message)
+        }
+    }
+}
+
+/// Poll while the panel is open; 500 ms is enough for a progress row and
+/// keeps `job.list` off the protocol hot path.
+pub(crate) fn poll_jobs(app: &mut App) {
+    if !matches!(app.mode, Mode::Jobs(_)) {
+        return;
+    }
+    if app
+        .jobs_polled
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(500))
+    {
+        return;
+    }
+    let _ = refresh_jobs(app);
+}
+
+/// Cancel the row under the cursor. A queued job is dropped immediately; a
+/// running one is killed by the server's worker (the panel shows `running`
+/// until the child has been reaped).
+pub(crate) fn cancel_selected(app: &mut App) {
+    let Some(sel) = jobs_sel(app) else { return };
+    let Some(job) = app.jobs.get(sel).cloned() else {
+        app.set_message("no jobs");
+        return;
+    };
+    match app.project.cancel_job(job.id) {
+        Ok(job) => {
+            app.set_message(&format!("cancelled {}", job.summary()));
+            let _ = refresh_jobs(app);
+        }
+        Err(e) => app.fail(&format!("cancel job #{}: {e}", job.id)),
+    }
+}
+
+/// Open the panel and load it once. `:jobs` is an IO command, so it sets the
+/// mode itself; `command_key` preserves it.
+pub(crate) fn open_jobs(app: &mut App) {
+    app.mode = Mode::Jobs(super::JobsState { sel: 0 });
+    app.jobs_polled = None;
+    match refresh_jobs(app) {
+        Ok(()) => {
+            let n = app.jobs.len();
+            app.set_message(&format!("jobs: {n} (x cancel · o report · q close)"));
+        }
+        Err(e) => app.fail(&e),
+    }
 }

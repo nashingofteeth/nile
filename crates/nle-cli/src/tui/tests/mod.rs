@@ -19,6 +19,7 @@ mod extend_sides;
 mod filmstrip;
 mod fx;
 mod import;
+mod jobs_panel;
 mod keys;
 mod motion;
 mod playhead;
