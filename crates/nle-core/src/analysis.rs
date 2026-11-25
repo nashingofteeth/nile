@@ -1,22 +1,32 @@
-//! Analysis products that live beside the project: transcripts today.
+//! Analysis products that live beside the project: transcripts and analyzer
+//! products.
 //!
-//! A transcript is **content-addressed**, not named: the words are serialised
-//! in a canonical order, hashed with FNV-1a 64, and stored under
-//! `.nile/<stem>/analysis/transcripts/t1-<16 hex>`. The `Expectation::WordsComplete`
-//! payload names that hash, so a transcript can be re-imported, edited and
-//! re-imported without an expectation silently describing different words: a
-//! changed transcript gets a new address, while the old address keeps naming
+//! Both are **content-addressed**, not named: the payload is serialised in a
+//! canonical form, hashed with FNV-1a 64, and stored under
+//! `.nile/<stem>/analysis/` — `transcripts/t1-<16 hex>` for words,
+//! `products/a1-<16 hex>` for an analyzer's output. The `Expectation::WordsComplete`
+//! payload names a transcript hash, so a transcript can be re-imported, edited
+//! and re-imported without an expectation silently describing different words:
+//! a changed transcript gets a new address, while the old address keeps naming
 //! exactly the old words. The store never deletes an address; the guarantee is
 //! "the hash always means the same words", not "the old words disappear".
 //!
-//! The store is deliberately outside `nile.json`: words change on their own
-//! schedule and a project file is a hand-editable document. [`TranscriptStore`]
-//! keeps the root as `Option<PathBuf>`, so a report-only caller (a unit test,
-//! a check with no project file) says "no store" with [`TranscriptStore::empty`]
-//! instead of an empty string path that would accidentally resolve to
-//! `.nile/...` in the working directory.
+//! A product additionally records the sample and source signature it was
+//! computed from. That signature is what freshness is judged against, not a
+//! live cache key: a removed source or a pruned sample leaves the product
+//! readable (an offline analysis pass), while a source whose size or mtime
+//! moved makes it stale. A sample- or product-schema bump is *incompatible*
+//! instead.
 //!
-//! No dependency buys the hash: FNV-1a 64 is a dozen lines, and the store's
+//! The stores are deliberately outside `nile.json`: words and analysis change
+//! on their own schedule and a project file is a hand-editable document.
+//! [`TranscriptStore`] and [`ProductStore`] keep the root as
+//! `Option<PathBuf>`, so a report-only caller (a unit test, a check with no
+//! project file) says "no store" with [`TranscriptStore::empty`] instead of an
+//! empty string path that would accidentally resolve to `.nile/...` in the
+//! working directory.
+//!
+//! No dependency buys the hash: FNV-1a 64 is a dozen lines, and the stores'
 //! contract (stable spelling, strict validation, atomic writes) is ours to
 //! keep, not a crate's to change.
 
@@ -272,13 +282,370 @@ impl TranscriptStore {
 /// `t1-` + 16 lowercase hex digits. Lowercase only: that is the one spelling
 /// [`Transcript::hash`] writes, so any other case is a typo, not an address.
 pub fn is_transcript_hash(hash: &str) -> bool {
-    let Some(digits) = hash.strip_prefix("t1-") else {
+    is_hash("t1-", hash)
+}
+
+/// `a1-` + 16 lowercase hex digits, the spelling [`AnalysisProduct::hash`]
+/// writes.
+pub fn is_product_hash(hash: &str) -> bool {
+    is_hash("a1-", hash)
+}
+
+fn is_hash(prefix: &str, hash: &str) -> bool {
+    let Some(digits) = hash.strip_prefix(prefix) else {
         return false;
     };
     digits.len() == 16
         && digits
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+// ---------------------------------------------------------------- products
+
+/// Version of the on-disk analyzer-product shape. A product from another
+/// schema is refused with a clear error; there is no migration code.
+pub const PRODUCT_VERSION: u32 = 1;
+
+/// A product's analyzer identity: `mean-luma` v1 today, anything a future
+/// out-of-process tool reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyzerInfo {
+    pub name: String,
+    pub version: u32,
+}
+
+/// The source file a sample was taken from, as recorded at sampling time.
+///
+/// This is a **snapshot**, not a live key: when the source is gone the sample
+/// key can no longer be recomputed, so a product stays readable and a later
+/// re-sample compares its new signature against this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSignature {
+    pub source: String,
+    pub source_arg: String,
+    pub source_size: u64,
+    pub source_mtime_secs: u64,
+    pub source_mtime_nanos: u32,
+}
+
+/// The sample a product was computed from. `key`/`params` are the sampler's
+/// opaque 16-hex fingerprints; `version` is the sampler's `SAMPLE_VERSION`, so
+/// a bump can be told apart from a moved source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductSample {
+    pub version: u32,
+    pub key: String,
+    pub params: String,
+    #[serde(flatten)]
+    pub source: SourceSignature,
+}
+
+/// What an analyzer produced. Tagged so a second analyzer cannot be mistaken
+/// for the first; `luma_milli` is per-frame mean Rec. 709 luma × 1000, in
+/// presentation order (integer units keep the canonical bytes float-free).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProductResult {
+    MeanLuma { luma_milli: Vec<u32> },
+}
+
+/// A content-addressed analyzer product.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisProduct {
+    pub version: u32,
+    pub analyzer: AnalyzerInfo,
+    pub sample: ProductSample,
+    pub result: ProductResult,
+}
+
+/// How a stored product relates to the source it recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// The live source's size and mtime still match the recorded signature.
+    Fresh,
+    /// The live source exists but its size or mtime moved.
+    Stale,
+    /// The source is gone (or is not a file): the product stays readable.
+    Offline,
+}
+
+impl AnalysisProduct {
+    /// Whether this product can be compared with a sampler version at all.
+    ///
+    /// A schema or sampler bump is incompatible, not stale-by-mtime: the
+    /// result means something else even if the source file is unchanged.
+    pub fn is_compatible(&self, sample_version: u32) -> bool {
+        self.version == PRODUCT_VERSION && self.sample.version == sample_version
+    }
+
+    /// Judge freshness against the recorded signature. A missing source is
+    /// [`Freshness::Offline`] — readable, not an error.
+    pub fn freshness(&self) -> Freshness {
+        let primary = Path::new(&self.sample.source.source);
+        let path = if primary.is_file() {
+            primary
+        } else {
+            Path::new(&self.sample.source.source_arg)
+        };
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Freshness::Offline;
+        };
+        if !meta.is_file() {
+            return Freshness::Offline;
+        }
+        let (secs, nanos) = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs(), d.subsec_nanos()))
+            .unwrap_or((0, 0));
+        let recorded = &self.sample.source;
+        if meta.len() == recorded.source_size
+            && secs == recorded.source_mtime_secs
+            && nanos == recorded.source_mtime_nanos
+        {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    }
+
+    /// Refuse a product that cannot be true of the schema: an unknown version,
+    /// empty analyzer name, a malformed sample fingerprint, a non-absolute
+    /// source, or a per-frame luma outside 0..=255 000.
+    pub fn validate(&self) -> Result<(), ProductError> {
+        if self.version != PRODUCT_VERSION {
+            return Err(ProductError::Invalid(format!(
+                "unsupported product version {} (expected {PRODUCT_VERSION})",
+                self.version
+            )));
+        }
+        if self.analyzer.name.is_empty() {
+            return Err(ProductError::Invalid("empty analyzer name".into()));
+        }
+        if self.sample.version == 0 {
+            return Err(ProductError::Invalid(
+                "sample version must be positive".into(),
+            ));
+        }
+        if !is_hex16(&self.sample.key) || !is_hex16(&self.sample.params) {
+            return Err(ProductError::Invalid(
+                "sample key and params must be 16 hex digits".into(),
+            ));
+        }
+        if self.sample.source.source_arg.is_empty()
+            || !Path::new(&self.sample.source.source_arg).is_absolute()
+        {
+            return Err(ProductError::Invalid(
+                "the recorded source must be an absolute path".into(),
+            ));
+        }
+        match &self.result {
+            ProductResult::MeanLuma { luma_milli } => {
+                if luma_milli.is_empty() {
+                    return Err(ProductError::Invalid("the product has no frames".into()));
+                }
+                if let Some(value) = luma_milli.iter().find(|v| **v > 255_000) {
+                    return Err(ProductError::Invalid(format!(
+                        "luma {value} is outside 0..=255000"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The exact bytes the hash is taken over: canonical JSON, no whitespace.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        // A struct of strings, integers and a tagged enum cannot fail to
+        // serialise; the `expect` documents that rather than hiding a broken
+        // store behind an empty file.
+        serde_json::to_vec(self).expect("a product serialises")
+    }
+
+    /// Content address of this product: `a1-` plus 16 lowercase hex digits.
+    pub fn hash(&self) -> String {
+        format!("a1-{:016x}", fnv1a64(&self.canonical_bytes()))
+    }
+}
+
+fn is_hex16(value: &str) -> bool {
+    value.len() == 16
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A product-store failure. Like [`AnalysisError`], every variant is a message
+/// for a consumer's "unverifiable" detail: a missing or corrupt product must
+/// never become a panic in the middle of a render review.
+#[derive(Debug, thiserror::Error)]
+pub enum ProductError {
+    #[error("product io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("product json: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("invalid product: {0}")]
+    Invalid(String),
+    #[error("product {0} not found")]
+    NotFound(String),
+    #[error("product {0} is corrupt: {1}")]
+    Corrupt(String, String),
+    #[error("no product store")]
+    NoStore,
+}
+
+/// Where analyzer products live for one project: `.nile/<stem>/analysis/products`.
+///
+/// `root: None` is the report-only store: reads answer "not found" and writes
+/// are refused, mirroring [`TranscriptStore`].
+#[derive(Debug, Clone, Default)]
+pub struct ProductStore {
+    root: Option<PathBuf>,
+}
+
+impl ProductStore {
+    /// A store that holds nothing (report-only consumers).
+    pub fn empty() -> Self {
+        Self { root: None }
+    }
+
+    /// The store beside `project_path`.
+    pub fn at(project_path: &Path) -> Self {
+        Self {
+            root: Some(state_dir(project_path).join("analysis").join("products")),
+        }
+    }
+
+    /// The directory this store reads and writes, if it has one.
+    pub fn dir(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// Store `product` under its own address and return that address.
+    ///
+    /// Idempotent: importing identical content twice returns the same
+    /// address. The write is atomic (a temp file in the same directory, then a
+    /// rename), so an interrupted import cannot leave a half-written product.
+    pub fn import(&self, product: &AnalysisProduct) -> Result<String, ProductError> {
+        let root = self.root.as_deref().ok_or(ProductError::NoStore)?;
+        product.validate()?;
+        let bytes = product.canonical_bytes();
+        let hash = product.hash();
+        std::fs::create_dir_all(root)?;
+        let path = root.join(&hash);
+        match self.load(&hash) {
+            Ok(existing) if existing.canonical_bytes() == bytes => return Ok(hash),
+            Ok(_) => {
+                return Err(ProductError::Corrupt(
+                    hash,
+                    "a different product already has this address".to_string(),
+                ));
+            }
+            Err(ProductError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let mut tmp = tempfile::NamedTempFile::new_in(root)?;
+        tmp.write_all(&bytes)?;
+        tmp.write_all(b"\n")?;
+        tmp.persist(&path).map_err(|error| error.error)?;
+        Ok(hash)
+    }
+
+    /// Adopt a staged, already-canonical product file: verify `address` names
+    /// its content, then rename it into the store.
+    ///
+    /// This is the host's path for an out-of-process analyzer: the child can
+    /// only write inside its staging directory, and nothing lands in
+    /// `analysis/products/` until this validates the bytes. Identical bytes at
+    /// an existing address are idempotent; a different file under that address
+    /// is a refusal, never an overwrite.
+    pub fn adopt(
+        &self,
+        product: &AnalysisProduct,
+        staged: &Path,
+        address: &str,
+    ) -> Result<String, ProductError> {
+        let root = self.root.as_deref().ok_or(ProductError::NoStore)?;
+        product.validate()?;
+        if !is_product_hash(address) {
+            return Err(ProductError::Invalid(format!(
+                "not a product hash: {address:?}"
+            )));
+        }
+        let canonical = product.canonical_bytes();
+        let expected = product.hash();
+        if address != expected {
+            return Err(ProductError::Corrupt(
+                address.to_string(),
+                format!("its content hashes to {expected}"),
+            ));
+        }
+        let staged_meta = std::fs::symlink_metadata(staged)?;
+        if !staged_meta.file_type().is_file() {
+            return Err(ProductError::Invalid(
+                "the staged product is not a regular file".to_string(),
+            ));
+        }
+        let raw = std::fs::read(staged)?;
+        let content = raw.strip_suffix(b"\n").unwrap_or(&raw);
+        if content != canonical.as_slice() {
+            return Err(ProductError::Corrupt(
+                address.to_string(),
+                "the staged bytes are not the canonical product".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(root)?;
+        let target = root.join(&expected);
+        match self.load(&expected) {
+            Ok(existing) => {
+                if existing.canonical_bytes() == canonical {
+                    // The content is already there; the staged copy is done.
+                    let _ = std::fs::remove_file(staged);
+                    return Ok(expected);
+                }
+                return Err(ProductError::Corrupt(
+                    expected,
+                    "a different product already has this address".to_string(),
+                ));
+            }
+            Err(ProductError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::rename(staged, &target)?;
+        Ok(expected)
+    }
+
+    /// Read the product at `address`, verifying that the address still
+    /// describes its content.
+    pub fn load(&self, address: &str) -> Result<AnalysisProduct, ProductError> {
+        if !is_product_hash(address) {
+            return Err(ProductError::Invalid(format!(
+                "not a product hash: {address:?}"
+            )));
+        }
+        let Some(root) = self.root.as_deref() else {
+            return Err(ProductError::NotFound(address.to_string()));
+        };
+        let bytes = match std::fs::read(root.join(address)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ProductError::NotFound(address.to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let product: AnalysisProduct = serde_json::from_slice(&bytes)?;
+        product.validate()?;
+        let actual = product.hash();
+        if actual != address {
+            return Err(ProductError::Corrupt(
+                address.to_string(),
+                format!("its content hashes to {actual}"),
+            ));
+        }
+        Ok(product)
+    }
 }
 
 /// FNV-1a 64. Stable spelling matters more than collision resistance here:
@@ -310,6 +677,35 @@ mod tests {
 
     fn sample() -> Transcript {
         Transcript::new(1, vec![word("two", 1, 2), word("take", 0, 1)])
+    }
+
+    fn product(source: &Path, size: u64, mtime_secs: u64, mtime_nanos: u32) -> AnalysisProduct {
+        AnalysisProduct {
+            version: PRODUCT_VERSION,
+            analyzer: AnalyzerInfo {
+                name: "mean-luma".to_string(),
+                version: 1,
+            },
+            sample: ProductSample {
+                version: 1,
+                key: "0123456789abcdef".to_string(),
+                params: "fedcba9876543210".to_string(),
+                source: SourceSignature {
+                    source: source.display().to_string(),
+                    source_arg: source.display().to_string(),
+                    source_size: size,
+                    source_mtime_secs: mtime_secs,
+                    source_mtime_nanos: mtime_nanos,
+                },
+            },
+            result: ProductResult::MeanLuma {
+                luma_milli: vec![53_000, 52_750],
+            },
+        }
+    }
+
+    fn product_in(dir: &Path) -> AnalysisProduct {
+        product(&dir.join("red.mp4"), 1234, 1_700_000_000, 42)
     }
 
     #[test]
@@ -551,5 +947,196 @@ mod tests {
         assert!(sample().validate(Some(s(2))).is_ok(), "end == duration");
         let error = sample().validate(Some(s(1))).unwrap_err().to_string();
         assert!(error.contains("past the asset"), "{error}");
+    }
+
+    #[test]
+    fn a_product_store_round_trips_and_import_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProductStore::at(&dir.path().join("nile.json"));
+        let product = product_in(dir.path());
+        let hash = store.import(&product).unwrap();
+        assert_eq!(hash, product.hash());
+        assert!(is_product_hash(&hash), "{hash}");
+        assert_eq!(store.load(&hash).unwrap(), product);
+        assert_eq!(store.import(&product).unwrap(), hash, "same content");
+        assert!(
+            store
+                .dir()
+                .unwrap()
+                .ends_with(".nile/nile/analysis/products"),
+            "{:?}",
+            store.dir()
+        );
+        // The file is human-readable and newline-terminated.
+        let text = std::fs::read_to_string(store.dir().unwrap().join(&hash)).unwrap();
+        assert!(text.ends_with('\n'));
+        assert!(text.contains("\"mean_luma\""));
+    }
+
+    #[test]
+    fn the_product_hash_spelling_is_stable() {
+        // Hard-coded so a field rename, a serialiser change or a hash tweak
+        // cannot silently re-address every stored product.
+        let product = product(Path::new("/media/red.mp4"), 1234, 1_700_000_000, 42);
+        assert_eq!(product.hash(), "a1-f51a8f2781c8363e");
+        assert_eq!(
+            product.canonical_bytes(),
+            serde_json::to_vec(&product).unwrap()
+        );
+        assert!(
+            std::str::from_utf8(&product.canonical_bytes())
+                .unwrap()
+                .contains("\"kind\":\"mean_luma\"")
+        );
+    }
+
+    #[test]
+    fn adopting_a_staged_product_validates_its_address_and_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProductStore::at(&dir.path().join("nile.json"));
+        let product = product_in(dir.path());
+        let hash = product.hash();
+        let stage = dir.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let staged = stage.join("product.json");
+        let mut bytes = product.canonical_bytes();
+        bytes.push(b'\n');
+        std::fs::write(&staged, &bytes).unwrap();
+
+        assert_eq!(store.adopt(&product, &staged, &hash).unwrap(), hash);
+        assert!(!staged.exists(), "the staged copy moved into the store");
+        assert_eq!(store.load(&hash).unwrap(), product);
+
+        // Same bytes at the same address are idempotent, including from a
+        // second staging directory.
+        std::fs::write(&staged, &bytes).unwrap();
+        assert_eq!(store.adopt(&product, &staged, &hash).unwrap(), hash);
+        assert!(!staged.exists());
+
+        // A wrong address is refused even when the bytes are fine.
+        std::fs::write(&staged, &bytes).unwrap();
+        let error = store
+            .adopt(&product, &staged, "a1-0000000000000000")
+            .unwrap_err();
+        assert!(matches!(error, ProductError::Corrupt(..)), "{error}");
+        assert!(staged.exists(), "a refusal leaves the staged file alone");
+
+        // A valid address with non-canonical bytes is refused too.
+        std::fs::write(&staged, serde_json::to_vec_pretty(&product).unwrap()).unwrap();
+        let error = store.adopt(&product, &staged, &hash).unwrap_err();
+        assert!(matches!(error, ProductError::Corrupt(..)), "{error}");
+    }
+
+    #[test]
+    fn product_staleness_follows_the_recorded_source_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"first").unwrap();
+        let meta = std::fs::metadata(&source).unwrap();
+        let (secs, nanos) = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs(), d.subsec_nanos()))
+            .unwrap();
+        let mut product = product_in(dir.path());
+        product.sample.source = SourceSignature {
+            source: source.display().to_string(),
+            source_arg: source.display().to_string(),
+            source_size: meta.len(),
+            source_mtime_secs: secs,
+            source_mtime_nanos: nanos,
+        };
+        assert_eq!(product.freshness(), Freshness::Fresh);
+
+        // Same size, moved mtime: the signature no longer matches.
+        let file = std::fs::File::options().write(true).open(&source).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(file);
+        assert_eq!(product.freshness(), Freshness::Stale);
+
+        // Gone: still readable, judged offline rather than stale.
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(product.freshness(), Freshness::Offline);
+    }
+
+    #[test]
+    fn a_product_schema_or_sampler_bump_is_incompatible_not_stale() {
+        let product = product(Path::new("/media/red.mp4"), 1, 2, 3);
+        assert!(product.is_compatible(1));
+        assert!(!product.is_compatible(2), "SAMPLE_VERSION moved");
+
+        let mut future = product.clone();
+        future.version = PRODUCT_VERSION + 1;
+        assert!(!future.is_compatible(1));
+        let error = future.validate().unwrap_err().to_string();
+        assert!(error.contains("unsupported product version"), "{error}");
+    }
+
+    #[test]
+    fn a_bad_product_address_is_refused_before_it_touches_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProductStore::at(&dir.path().join("nile.json"));
+        for bad in [
+            "",
+            "product",
+            "a1-",
+            "a1-xyz",
+            "a1-000000000000000",
+            "a1-00000000000000000",
+            "a1-000000000000000G",
+            "a1-0000000000000000/../nile.json",
+            "../a1-0000000000000000",
+            "A1-0000000000000000",
+        ] {
+            let error = store.load(bad).unwrap_err();
+            assert!(
+                matches!(error, ProductError::Invalid(_)),
+                "{bad:?}: {error}"
+            );
+        }
+        assert!(
+            store.load("a1-0000000000000000").is_err(),
+            "a valid but absent address"
+        );
+    }
+
+    #[test]
+    fn product_validation_refuses_impossible_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = product_in(dir.path());
+        bad.analyzer.name.clear();
+        assert!(bad.validate().is_err());
+
+        let mut bad = product_in(dir.path());
+        bad.sample.key = "not-hex".to_string();
+        assert!(bad.validate().is_err());
+
+        let mut bad = product_in(dir.path());
+        bad.sample.source.source_arg = "relative.mp4".to_string();
+        assert!(bad.validate().is_err());
+
+        let mut bad = product_in(dir.path());
+        let ProductResult::MeanLuma { luma_milli } = &mut bad.result;
+        luma_milli.clear();
+        assert!(bad.validate().is_err());
+
+        let mut bad = product_in(dir.path());
+        let ProductResult::MeanLuma { luma_milli } = &mut bad.result;
+        luma_milli[0] = 255_001;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn an_empty_product_store_loads_nothing_and_refuses_writes() {
+        let store = ProductStore::empty();
+        assert_eq!(store.dir(), None);
+        assert!(matches!(
+            store.load("a1-0000000000000000"),
+            Err(ProductError::NotFound(_))
+        ));
+        let product = product(Path::new("/media/red.mp4"), 1, 2, 3);
+        assert!(matches!(store.import(&product), Err(ProductError::NoStore)));
     }
 }
