@@ -114,6 +114,10 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   document atomically, and prints the hash. `analysis.add { asset, words }`
   is the protocol form and returns `{ hash }`; it writes analysis state, not
   the project (no revision, history or event).
+- **Samples are not transcripts.** Frame/audio samples belong under
+  `cache/analysis` and are disposable; transcripts and analyzer products
+  belong under `analysis/` as content-addressed state. The sampling and
+  sidecar contract is `docs/pitfalls/analysis.md`.
 - **Check.** `words-complete --transcript HASH` requires each relevant word to
   be whole in one shown clip/transition side (trim, split or anchor-edge cuts
   fail), with the transcript asset actually shown in the anchored span. A
