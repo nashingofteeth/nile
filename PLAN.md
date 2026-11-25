@@ -13,11 +13,13 @@ README is the user-facing how-to. Keep it in sync as milestones land.
 in-place editing, and a sticky aspect lock; percent speed input (the model
 keeps the rational rate); transition retiming (`--frames/--dur/--percent`,
 the `x`/`X` frames form, `r` for a rate); LUTs remain CLI-only in the panel;
+per-sequence audio post (normalize/fades) exported once after the final mix
+at 48 kHz, with TUI/protocol settings parity;
 the media pool preserves its selection, preview clock, and insert cursor
 across toggles; the CLI/TUI were split into modules and `Document` pairs the
-project with its history; project state (history, clipboard, proxy/black
-cache) lives in `.nile/<stem>/`, with an optional directory default in
-`.nile/config.json` (`nile default`).
+project with its history; project state (history, clipboard, transcript and
+analysis state, proxy/black cache) lives in `.nile/<stem>/`, with an optional
+directory default in `.nile/config.json` (`nile default`).
 
 ## Vision
 
@@ -44,12 +46,12 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v17, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v18, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v23 (grouped batches, media groups, annotations, timeline anchors, crop windows, crop keyframes) |
+| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v24 (grouped batches, media groups, annotations, timeline anchors, crop windows, crop keyframes, sequence audio post) |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
@@ -587,20 +589,29 @@ shared by the TUI and agents — with no clipgen code present.
   [--json]`, which `nile annotation check` also consumes (expectations
   evaluated over the frame map); `Effect::Crop` is a window with keyframes
   (project v16, history v23): x/y animate, w/h step at keys, and height rungs
-  are authoring-only. Remaining: audio post, jobs.
+  are authoring-only. **Audio post** is per-sequence `AudioSettings` (project
+  v18, history v24): `nile sequence audio --normalize/--fade-in/--fade-out`,
+  with TUI and `sequence.audio` parity; one-pass `loudnorm` at -16 LUFS/
+  -1.5 dBTP/LRA 11 plus clamped programme fades, applied once after the final
+  mix at 48 kHz. Chunked export stays single while audio post is active.
+  Remaining: move the chain to the scheduler's final mux so parallel chunks
+  can carry it, then jobs. Known gaps: silent-stream loudnorm detection;
+  explicit EDL/OTIO `--map`/`--group` non-UTF-8 paths (CLI import and the
+  `--media` scan are guarded).
 - **Gate:** a keyframed crop export is frame-exact and its report maps a
   moved note to the right frame; a cancelled job leaves no half-written
   deliverable.
 
-### 6. Analysis sampling + sidecar contract (supporting)
+### 6. Analysis sampling + sidecar contract (sampler landed; sidecar pending)
 
-- `nle-ffmpeg` samples frames/audio on demand into packed buffers/files with
-  a content-addressed cache (same key discipline as proxies/keyframes:
-  path + mtime + version + params). Sidecars consume packed data, not
-  per-frame JPEGs.
-- Define the sidecar contract (NDJSON requests + packed raw frames) and prove
-  it with one trivial analyzer before any ML arrives; ML stays out of process
-  and out of the Rust dependency graph.
+- Landed: `nle-ffmpeg/src/sampling.rs` — `FrameSpec`/`AudioSpec`, packed
+  RGB24/PCM, and a `SampleCache` keyed by version + params + canonical source
+  + size/mtime, with offline lookup and atomic raw+meta writes.
+  `docs/pitfalls/analysis.md` is the contract.
+- Pending: the cache-root wiring in `nile-cli`, the NDJSON sidecar and staged
+  products under `analysis/products/`, per-frame times/indices, byte/frame
+  caps, the hidden trivial analyzer, and CV-backed checks. ML stays out of
+  process and out of the Rust dependency graph.
 
 ### 7. Toolkit hooks (after the core)
 
@@ -615,10 +626,10 @@ shared by the TUI and agents — with no clipgen code present.
 
 ### Non-goals before the merge
 
-No transcripts, CV, LLM calls, selection/crop **policy**, show-folder
-assumptions, "social" concepts, course features, titles or nested sequences
-in `nle-core`. Those belong to the toolkit on top; keeping the core generic
-is what makes the merge modular.
+No ML, CV/selection/crop **policy**, LLM calls, show-folder assumptions,
+"social" concepts, course features, titles or nested sequences in `nle-core`.
+Those belong to the toolkit on top; keeping the core generic is what makes the
+merge modular.
 
 ### Order and merge gate
 
