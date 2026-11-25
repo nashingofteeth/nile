@@ -9,7 +9,8 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
 `undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`,
 `sequence.audio`, `media.list`, `media.add`, `playhead.set`,
-`annotation.list`, `annotation.check`, `analysis.add`. The internal `wire_catalog!` macro
+`annotation.list`, `annotation.check`, `analysis.add`, `job.submit`,
+`job.list`, `job.get`, `job.cancel`. The internal `wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a
 method to the invocation, then a sample to `all_calls()`; the `METHODS.len()`
@@ -148,8 +149,48 @@ writes analysis state only: no project save, revision bump, history entry or
 event. Malformed words are `-32602`; a read-only, corrupt or otherwise failing
 store is `-32603` (internal). Additive, so `PROTOCOL_VERSION` stays at 5.
 
-## Time
+## Jobs
 
+Jobs are **server-owned** and durable: `nile serve` is the only writer. A
+submit takes `{base_revision, output, sequence, export}` and first writes a
+project snapshot (`.nile/<stem>/jobs/<id>/project.json`) and then the record
+(`job.json`), both atomically. The record keeps the snapshot's `revision` and
+the chosen `sequence`; the renderer reads only that snapshot, so an edit after
+submit cannot change the deliverable or its report. `output` must be absolute
+(the server's cwd is its own); a relative path is invalid params, like
+`annotation.check`.
+
+The record is the wire DTO (`nle_core::jobs::JobRecord`):
+
+```text
+{version, id, state, revision, sequence, output, export,
+ created_at, started_at?, finished_at?, progress: {done, total},
+ report?, error?, snapshot}
+```
+
+`state` is `queued | running | done | failed | cancelled | interrupted`;
+`export` is `{preset: "preview"|"balanced"|"max", crf?, encoder_preset?}` —
+deliberately narrow. Engine, bitrate, chunk workers and the chunk cache are
+deferred: a job renders one cancellable graph, so a parallel knob would be a
+promise the queue cannot keep.
+
+One export runs at a time in submission (id) order. `queued` survives a
+restart; a `running` job is marked `interrupted` at startup and never silently
+resumed. `job.cancel` drops a queued job, or sets the flag the running
+export's ffmpeg poll loop checks (the child is killed and the hidden temp
+output removed). It returns the record as of the call: a running job may still
+read `running` until its child is reaped and the terminal event fires. An
+unknown id or a terminal job is invalid params (`-32602`), never a silent
+no-op. The render writes to a hidden temp beside `output` and renames only on
+success; a cancelled job leaves no half-written deliverable.
+
+`job.submit` is compare-and-swap: a stale `base_revision` is `-32001`. It is
+not a model write — the project revision, history and playhead do not move.
+`job.list` returns `{revision: <live>, jobs}` (the revision is context, not a
+CAS token); `job.get`/`job.cancel` return the same record shape as submit.
+Additive, so `PROTOCOL_VERSION` stays at 5.
+
+## Time
 `from`, `Outcome.playhead`, `SetSpeed.rate`, and event `at` are rational
 strings (`"1/2"`, `"30000/1001"`). Action targets (`at`, `to`) stay the
 catalog's f64 fields and snap to the frame grid; outcomes and events are
@@ -190,6 +231,16 @@ events seen before a response and `next_event()` reads those after it.
 Unknown or malformed notifications are skipped and counted
 (`Client::skipped()`); a malformed **response** is fatal. Current events are
 request-triggered; an async event source needs a channel/thread.
+
+`job.progress {id, state, progress}` fires while a render advances (throttled;
+progress is advisory and recovered by `job.get`). `job.changed {id, state,
+report?}` marks every terminal transition, including startup's
+`interrupted`; `report` is the retained sidecar for a `done` job. Both are
+queued by the worker and drained after the next successful call, because the
+single-threaded transport writes events only with a reply: a client that wants
+live progress polls `job.list`/`job.get`. An error reply drops queued events
+(the transport contract), so terminal state must always be read from the
+durable record.
 
 Events belong to a successful call: an error reply discards any events the
 handler queued.

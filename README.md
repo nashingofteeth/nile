@@ -455,6 +455,23 @@ nile bench [--runs N] [--preset preview|balanced|max] [--parallel N]
 # Renders to a temp file and reports wall time and effective fps.
 ```
 
+### Durable jobs (needs `nile serve`)
+
+```sh
+nile job submit -o final.mp4 [--sequence N] [--preset balanced] [--crf 22]
+nile job ls                                # id, state, progress, output
+nile job show 1                            # the full record as JSON
+nile job cancel 1                          # drop queued or kill the render
+```
+
+`nile export` stays synchronous and file-based. `nile job submit` instead
+snapshots the server's current project and queues it: the render keeps working
+after the shell exits, survives a server restart when still queued, and never
+silently resumes a job that was mid-render. One export runs at a time, oldest
+first. A finished job keeps its report beside the output
+(`final.mp4.report.json`) and links it from the record. The TUI's `:jobs`
+panel is the same queue; `x` cancels, `o` points at the report.
+
 ### One-shot tools and logging
 
 ```sh
@@ -479,7 +496,7 @@ server per project owns the socket; a second `nile serve` refuses. Multiple
 connections serialize their calls through one handler. Call `hello` first,
 then `project.show`, `timeline.edl`,
 `sequence.list|use|add|audio`, `media.list|add`, `action.preview`,
-`action.apply`, `undo`, or `redo`.
+`action.apply`, `undo`, `redo`, or the durable `job.submit|list|get|cancel`.
 Actions apply to the active sequence; add media and a second sequence first,
 then switch to it:
 
