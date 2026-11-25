@@ -75,6 +75,9 @@ pub(crate) enum ImportMsg {
         total: usize,
         path: PathBuf,
     },
+    /// The expanded batch cannot be stored in `nile.json` (a non-UTF-8 path).
+    /// Refused before probing, so no asset ever reaches the main thread.
+    Refused(String),
     Done {
         outcomes: Vec<ImportOutcome>,
         errors: Vec<String>,
@@ -165,6 +168,12 @@ pub(crate) fn start_import(app: &mut App, paths: Vec<PathBuf>) -> Result<String,
     app.import_job = Some(ImportJob { rx });
     std::thread::spawn(move || {
         let (files, errors) = crate::cmd::import::expand_import_paths(&paths);
+        // `nile.json` stores paths as UTF-8: fail the whole batch before any
+        // probe, so the main thread never adds an asset that cannot be saved.
+        if let Err(e) = crate::cmd::import::validate_import_paths(&files) {
+            let _ = tx.send(ImportMsg::Refused(e.to_string()));
+            return;
+        }
         let total = files.len();
         if tx.send(ImportMsg::Total(total)).is_err() {
             return;
@@ -207,6 +216,11 @@ pub(crate) fn poll_import(app: &mut App, player: &dyn Mpv) {
             }
             Ok(ImportMsg::Progress { done, total, path }) => {
                 app.set_message(&format!("importing {done}/{total} · {}", short_name(&path)));
+            }
+            Ok(ImportMsg::Refused(e)) => {
+                app.import_job = None;
+                app.fail(&e);
+                return;
             }
             Ok(ImportMsg::Done { outcomes, errors }) => {
                 app.import_job = None;

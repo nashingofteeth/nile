@@ -1106,13 +1106,14 @@ fn non_utf8_argv_is_refused_cleanly() {
     s.assert_loads("non-UTF-8 --at", &text);
 }
 
-/// The path-flag half: `import` takes a `PathBuf`, so the raw bytes reach the
-/// pool and the JSON save refuses to write them back. Linux-only because APFS
-/// cannot store an invalid-UTF-8 filename, so the copy below fails with
-/// `EILSEQ` on macOS.
+/// The path-flag half: `import` takes a `PathBuf`, but `nile.json` stores
+/// paths as UTF-8, so a non-UTF-8 path must be refused *before* probing — no
+/// asset line, no project or history write, and no half-import of a valid
+/// sibling. Linux-only because APFS cannot store an invalid-UTF-8 filename,
+/// so the copy below fails with `EILSEQ` on macOS.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_non_utf8_import_path_is_refused_at_save() {
+fn a_non_utf8_import_path_is_refused_before_any_write() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -1120,9 +1121,12 @@ fn a_non_utf8_import_path_is_refused_at_save() {
     s.base();
     let bad = OsStr::from_bytes(b"bad-\xff.mp4");
 
-    // A real file at the non-UTF-8 name: the import must get as far as the
-    // project save, so the refusal names UTF-8 rather than a missing file.
+    // A real file at the non-UTF-8 name: the refusal must come from the path
+    // validation, not from a missing file or the save.
     std::fs::copy(s.file("red.mp4"), s.path().join(bad)).expect("copy media to a non-UTF-8 name");
+    let before = s.read(P);
+    let history = s.path().join(".nile").join("p").join("history.json");
+    assert!(!history.exists(), "the fixture starts without history");
 
     let out = s.run_os(&[OsStr::new("import"), bad]);
     let text = merged(&out);
@@ -1136,10 +1140,148 @@ fn a_non_utf8_import_path_is_refused_at_save() {
         "a non-UTF-8 import should be a clean refusal:\n{text}"
     );
     assert!(
-        text.contains("invalid UTF-8"),
+        !text.contains('✓'),
+        "no asset may be reported before the refusal:\n{text}"
+    );
+    assert!(
+        text.contains("UTF-8"),
         "the import refusal should name UTF-8:\n{text}"
     );
+    assert!(
+        text.contains(bad.to_string_lossy().as_ref()),
+        "the refusal should name the lossy display:\n{text}"
+    );
+    assert_eq!(s.read(P), before, "a refused import wrote the project");
+    assert!(!history.exists(), "a refused import wrote history");
     s.assert_loads("non-UTF-8 import", &text);
+
+    // A valid sibling (`wide169.mp4` is not in the base pool) must not be
+    // imported either: the batch is refused as a whole, before probing.
+    let out = s.run_os(&[OsStr::new("import"), OsStr::new("wide169.mp4"), bad]);
+    let text = merged(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the batch with a non-UTF-8 path should be refused:\n{text}"
+    );
+    assert!(
+        !text.contains('✓'),
+        "the valid sibling must not be reported:\n{text}"
+    );
+    assert_eq!(
+        s.read(P),
+        before,
+        "the valid sibling must not be half-imported:\n{text}"
+    );
+    assert!(!history.exists(), "a refused batch wrote history");
+    let assets = s.ok(&["media", "ls"]);
+    assert!(
+        !assets.contains("wide169.mp4"),
+        "the valid sibling entered the pool:\n{assets}"
+    );
+    s.assert_loads("non-UTF-8 batch", &text);
+}
+
+/// The EDL/OTIO `--media` scan pools files before building the timeline, so a
+/// non-UTF-8 name there must be refused before *any* probe — otherwise it
+/// half-pools and only the save complains. Linux-only for the same APFS
+/// reason as the import case above.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_media_scan_is_refused_before_pooling() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let s = Sandbox::new();
+    s.base();
+    let bad = OsStr::from_bytes(b"bad-\xff.mp4");
+    std::fs::copy(s.file("red.mp4"), s.path().join(bad)).expect("copy media to a non-UTF-8 name");
+    s.write(
+        "e.edl",
+        "TITLE: t\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    let before = s.read(P);
+    let history = s.path().join(".nile").join("p").join("history.json");
+    assert!(!history.exists(), "the fixture starts without history");
+
+    let out = s.run(&["import-edl", "e.edl", "--media", ".", "--force"]);
+    let text = merged(&out);
+    assert!(
+        !text.contains("panicked"),
+        "a non-UTF-8 media scan panicked:\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a non-UTF-8 media scan should be a clean refusal:\n{text}"
+    );
+    assert!(
+        !text.contains('✓'),
+        "no asset may be reported before the refusal:\n{text}"
+    );
+    assert!(
+        text.contains("UTF-8"),
+        "the media-scan refusal should name UTF-8:\n{text}"
+    );
+    assert!(
+        text.contains(bad.to_string_lossy().as_ref()),
+        "the refusal should name the lossy display:\n{text}"
+    );
+    assert_eq!(s.read(P), before, "a refused media scan wrote the project");
+    assert!(!history.exists(), "a refused media scan wrote history");
+    s.assert_loads("non-UTF-8 --media", &text);
+}
+
+/// `add` auto-imports into the pool, so it stages an asset before the edit.
+/// A non-UTF-8 path must be refused before that stage: no clip, no
+/// `auto-imported` line, no project or history write. Linux-only for the same
+/// APFS reason as the import case above.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_add_path_is_refused_before_auto_import() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let s = Sandbox::new();
+    s.base();
+    let bad = OsStr::from_bytes(b"bad-\xff.mp4");
+    std::fs::copy(s.file("red.mp4"), s.path().join(bad)).expect("copy media to a non-UTF-8 name");
+    let before = s.read(P);
+    let history = s.path().join(".nile").join("p").join("history.json");
+    assert!(!history.exists(), "the fixture starts without history");
+
+    let out = s.run_os(&[OsStr::new("add"), bad]);
+    let text = merged(&out);
+    assert!(
+        !text.contains("panicked"),
+        "a non-UTF-8 add panicked:\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a non-UTF-8 add should be a clean refusal:\n{text}"
+    );
+    assert!(
+        !text.contains('✓'),
+        "no clip may be reported before the refusal:\n{text}"
+    );
+    assert!(
+        !text.contains("auto-imported"),
+        "the asset must not be auto-imported:\n{text}"
+    );
+    assert!(
+        text.contains("UTF-8"),
+        "the add refusal should name UTF-8:\n{text}"
+    );
+    assert!(
+        text.contains(bad.to_string_lossy().as_ref()),
+        "the refusal should name the lossy display:\n{text}"
+    );
+    assert_eq!(s.read(P), before, "a refused add wrote the project");
+    assert!(!history.exists(), "a refused add wrote history");
+    s.assert_loads("non-UTF-8 add", &text);
 }
 
 /// Clip ids are meant to be unique across tracks, but a hand-edited or

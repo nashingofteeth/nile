@@ -107,3 +107,65 @@ fn a_duplicate_import_is_reported_not_added() {
     assert_eq!(app.project.depth(), 0);
     assert!(app.message.contains("already pooled"), "{}", app.message);
 }
+
+// A refused batch never reaches the main thread: no probe outcome means no
+// asset in memory, no undo entry, and no `save_project`.
+#[test]
+fn a_refused_import_leaves_no_asset_and_no_save() {
+    let path = temp_project_path("import-refused");
+    let mut app = App::new(asset_project(), path.clone());
+    app.loaded = true;
+    let fake = FakeMpv::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.import_job = Some(ImportJob { rx });
+    tx.send(ImportMsg::Refused(
+        "/media/bad-\u{fffd}.mp4: path is not valid UTF-8".to_string(),
+    ))
+    .unwrap();
+    poll_import(&mut app, &fake);
+
+    assert_eq!(app.project.media.len(), 1, "no asset was added");
+    assert_eq!(app.project.depth(), 0, "no undo entry");
+    assert!(app.message.contains("UTF-8"), "{}", app.message);
+    assert!(!path.exists(), "a refused import must not save");
+}
+
+// The worker's own path: expansion finds a real non-UTF-8 name, and the
+// batch is refused before the first probe. Linux-only because APFS cannot
+// create the file.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_import_path_fails_the_tui_job_before_probing() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    use super::super::jobs::start_import;
+
+    let path = temp_project_path("import-worker-refused");
+    let mut app = App::new(asset_project(), path.clone());
+    app.loaded = true;
+    let bad = OsStr::from_bytes(b"bad-\xff.mp4");
+    let bad_path = path.parent().expect("a parent").join(bad);
+    std::fs::write(&bad_path, b"").expect("create a non-UTF-8 name");
+
+    start_import(&mut app, vec![bad_path]).expect("the job starts");
+    let fake = FakeMpv::new();
+    for _ in 0..400 {
+        poll_import(&mut app, &fake);
+        if app.import_job.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(app.import_job.is_none(), "the worker never reported");
+    assert!(app.message.contains("UTF-8"), "{}", app.message);
+    assert!(
+        app.message.contains(bad.to_string_lossy().as_ref()),
+        "{}",
+        app.message
+    );
+    assert_eq!(app.project.media.len(), 1, "no asset in memory");
+    assert_eq!(app.project.depth(), 0, "no undo entry");
+    assert!(!path.exists(), "save_project must not be reached");
+}
