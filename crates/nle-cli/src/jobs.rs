@@ -657,6 +657,31 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_executor_leaves_no_deliverable_or_temp() {
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let mut project = Project::load(&path).unwrap();
+        project.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 180,
+        });
+        project.timeline.video_track_mut().unwrap().segments =
+            vec![nle_core::timeline::Segment::Gap(nle_core::timeline::Gap {
+                duration: Seconds::from_integer(1),
+            })];
+        let out = path.with_file_name("cancelled.mp4");
+        let job = store
+            .create(&project, 1, out.clone(), JobExport::default())
+            .unwrap();
+        let cancel = AtomicBool::new(true);
+        let mut progress = |_done: u64, _total: u64| {};
+        let result = run_export_job(&store, &job, &cancel, &mut progress);
+        assert!(matches!(result, Err(JobRunError::Cancelled)));
+        assert!(!out.exists(), "no output after a cancel");
+        assert!(!partial_path(&out, job.id).exists(), "no temp left behind");
+    }
+
+    #[test]
     fn partial_output_keeps_the_extension_and_is_not_the_deliverable() {
         let out = Path::new("/tmp/show.mp4");
         let temp = partial_path(out, 7);
