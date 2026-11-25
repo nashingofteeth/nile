@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nle_core::edit::{Actor, EditError, Histories, History, UndoOutcome};
+use nle_core::jobs::{JobExport, JobRecord};
 use nle_core::{
     Action, AudioSettings, Batch, BatchOutcome, Document, Outcome as ActionOutcome, PreviewOutcome,
     Project, ProjectError, Register, VideoSettings, frame_of, grid_time, load_register,
@@ -437,6 +438,66 @@ impl Session {
         }
     }
 
+    /// The durable job queue is server state: a direct (file-backed) session
+    /// has no worker and must say so instead of pretending it queued anything.
+    fn jobs_need_server() -> SessionError {
+        SessionError::Remote("jobs need a running `nile serve` for this project".into())
+    }
+
+    #[allow(dead_code)] // TUI job panel
+    pub fn jobs(&mut self) -> Result<Vec<JobRecord>, SessionError> {
+        match &mut self.backend {
+            Backend::Direct { .. } => Err(Self::jobs_need_server()),
+            Backend::Remote(remote) => {
+                let list = remote
+                    .call(|client| client.jobs())
+                    .map_err(|e| SessionError::Remote(e.to_string()))?;
+                Ok(list.jobs)
+            }
+        }
+    }
+
+    #[allow(dead_code)] // TUI job panel (`o` refetches the live record)
+    pub fn job(&mut self, id: u64) -> Result<JobRecord, SessionError> {
+        match &mut self.backend {
+            Backend::Direct { .. } => Err(Self::jobs_need_server()),
+            Backend::Remote(remote) => remote
+                .call(|client| client.job(id))
+                .map_err(|e| SessionError::Remote(e.to_string())),
+        }
+    }
+
+    #[allow(dead_code)] // TUI job panel
+    pub fn cancel_job(&mut self, id: u64) -> Result<JobRecord, SessionError> {
+        match &mut self.backend {
+            Backend::Direct { .. } => Err(Self::jobs_need_server()),
+            Backend::Remote(remote) => remote
+                .call(|client| client.cancel_job(id))
+                .map_err(|e| SessionError::Remote(e.to_string())),
+        }
+    }
+
+    /// Snapshot and queue the server's current project. The client sends its
+    /// own revision; a stale TUI gets the typed conflict rather than a
+    /// snapshot of a project the user has not seen.
+    #[allow(dead_code)] // CLI submits through the client; kept for a TUI `:job submit`
+    pub fn submit_job(
+        &mut self,
+        output: PathBuf,
+        sequence: u32,
+        export: JobExport,
+    ) -> Result<JobRecord, SessionError> {
+        match &mut self.backend {
+            Backend::Direct { .. } => Err(Self::jobs_need_server()),
+            Backend::Remote(remote) => {
+                let revision = remote.revision;
+                remote
+                    .call(|client| client.submit_job(revision, output, sequence, export))
+                    .map_err(|e| SessionError::Remote(e.to_string()))
+            }
+        }
+    }
+
     pub fn select_sequence(&mut self, id: u32) -> Result<(), SessionError> {
         match &mut self.backend {
             Backend::Direct { document, .. } => document.select_sequence(id).map_err(Into::into),
@@ -763,6 +824,7 @@ mod remote_tests {
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let listener = UnixListener::bind(&socket).unwrap();
         let direct = Session::from_history(project, History::default(), path.clone());
+        let queue_path = path.clone();
         let serve = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let reader = stream.try_clone().unwrap();
@@ -770,6 +832,7 @@ mod remote_tests {
                 session: direct,
                 events: Vec::new(),
                 poisoned: None,
+                jobs: crate::jobs::JobQueue::start(&queue_path).unwrap(),
             };
             let mut server = Server::new(BufReader::new(reader), stream, handler);
             server.serve().unwrap();

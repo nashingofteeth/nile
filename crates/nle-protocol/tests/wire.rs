@@ -7,14 +7,15 @@ use std::path::PathBuf;
 
 use nle_core::analysis::Word;
 use nle_core::expect::{CheckOutcome, CheckReport, CheckSummary, ReportRef};
+use nle_core::jobs::{ExportPreset, JobExport, JobProgress, JobRecord, JobState};
 use nle_core::{
     Action, AnnotationStatus, AudioSettings, CheckResult, Project, ProjectDiff, Seconds,
     TransitionKind, TransitionLen,
 };
 use nle_protocol::{
     AnalysisHash, AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR,
-    INVALID_PARAMS, INVALID_REQUEST, Id, METHOD_NOT_FOUND, MediaAsset, MediaList, MediaUsage,
-    Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply, Preview,
+    INVALID_PARAMS, INVALID_REQUEST, Id, JobList, METHOD_NOT_FOUND, MediaAsset, MediaList,
+    MediaUsage, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply, Preview,
     REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError, SequenceList,
     SequenceReply, SequenceSummary, Server,
 };
@@ -219,6 +220,43 @@ impl Handler for Fake {
             Call::AnalysisAdd { asset, words } => Ok(Reply::Analysis(AnalysisHash {
                 hash: format!("t1-{:016x}", u64::from(*asset) + words.len() as u64),
             })),
+            Call::JobSubmit {
+                base_revision,
+                output,
+                sequence,
+                export: _,
+            } => {
+                self.check(*base_revision)?;
+                Ok(Reply::Job(record(1, JobState::Queued, output, *sequence)))
+            }
+            Call::JobList => Ok(Reply::Jobs(JobList::new(
+                self.revision,
+                vec![record(
+                    1,
+                    JobState::Running,
+                    &PathBuf::from("/media/job.mp4"),
+                    1,
+                )],
+            ))),
+            Call::JobGet { id } => Ok(Reply::Job(record(
+                *id,
+                JobState::Queued,
+                &PathBuf::from("/media/job.mp4"),
+                1,
+            ))),
+            Call::JobCancel { id } => {
+                self.events.push(Event::JobChanged {
+                    id: *id,
+                    state: JobState::Cancelled,
+                    report: None,
+                });
+                Ok(Reply::Job(record(
+                    *id,
+                    JobState::Cancelled,
+                    &PathBuf::from("/media/job.mp4"),
+                    1,
+                )))
+            }
         }
     }
 
@@ -268,6 +306,28 @@ fn media(id: u32, path: &str) -> MediaAsset {
             sequence: 1,
             segment: 1,
         }],
+    }
+}
+
+fn record(id: u64, state: JobState, output: &PathBuf, sequence: u32) -> JobRecord {
+    JobRecord {
+        version: nle_core::jobs::JOB_VERSION,
+        id,
+        state,
+        revision: 7,
+        sequence,
+        output: output.clone(),
+        export: JobExport::default(),
+        created_at: 1,
+        started_at: None,
+        finished_at: None,
+        progress: JobProgress {
+            done: 10,
+            total: 100,
+        },
+        report: None,
+        error: None,
+        snapshot: PathBuf::from("project.json"),
     }
 }
 
@@ -339,6 +399,19 @@ fn all_calls() -> Vec<Call> {
                 end: Seconds::from_integer(1),
             }],
         },
+        Call::JobSubmit {
+            base_revision: 0,
+            output: PathBuf::from("/media/out.mp4"),
+            sequence: 1,
+            export: JobExport {
+                preset: ExportPreset::Max,
+                crf: Some(20),
+                encoder_preset: None,
+            },
+        },
+        Call::JobList,
+        Call::JobGet { id: 3 },
+        Call::JobCancel { id: 4 },
     ]
 }
 
@@ -680,6 +753,76 @@ fn golden_media_add_request() {
 }
 
 #[test]
+fn golden_job_submit_request_and_round_trip() {
+    let call = Call::JobSubmit {
+        base_revision: 7,
+        output: PathBuf::from("/media/out.mp4"),
+        sequence: 2,
+        export: JobExport {
+            preset: ExportPreset::Max,
+            crf: Some(20),
+            encoder_preset: None,
+        },
+    };
+    let request = Request::new(
+        Id::from(1u64),
+        call.method(),
+        call.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"job.submit","params":{"base_revision":7,"export":{"crf":20,"preset":"max"},"output":"/media/out.mp4","sequence":2}}"#
+    );
+
+    let (reply, _) = exchange(&mut Fake::new(7), call.clone());
+    let Reply::Job(job) = reply.expect("submit") else {
+        panic!("expected a job");
+    };
+    assert_eq!(job.state, JobState::Queued);
+    assert_eq!(job.sequence, 2);
+    assert_eq!(job.output, PathBuf::from("/media/out.mp4"));
+
+    let (reply, _) = exchange(&mut Fake::new(7), Call::JobList);
+    let Reply::Jobs(list) = reply.expect("list") else {
+        panic!("expected jobs");
+    };
+    assert_eq!(list.jobs.len(), 1);
+
+    // Cancel is a job reply plus its terminal event, in that order.
+    let (reply, output) = exchange(&mut Fake::new(7), Call::JobCancel { id: 4 });
+    assert!(matches!(reply, Ok(Reply::Job(ref job)) if job.state == JobState::Cancelled));
+    let lines: Vec<&str> = std::str::from_utf8(&output)
+        .expect("utf-8")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 2, "one response plus one event: {lines:?}");
+    let event: Value = serde_json::from_str(lines[1]).expect("event envelope");
+    assert_eq!(
+        event,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "job.changed",
+            "params": {"id": 4, "state": "cancelled"}
+        })
+    );
+}
+
+#[test]
+fn a_stale_job_submit_is_a_revision_conflict() {
+    let (reply, _) = exchange(
+        &mut Fake::new(7),
+        Call::JobSubmit {
+            base_revision: 6,
+            output: PathBuf::from("/media/out.mp4"),
+            sequence: 1,
+            export: JobExport::default(),
+        },
+    );
+    let error = reply.expect_err("stale");
+    assert!(error.to_string().contains("revision"), "{error}");
+}
+
+#[test]
 fn every_action_slot_walks_the_protocol() {
     let actions = nle_core::action::sample_actions();
     assert_eq!(actions.len(), nle_core::action::SLOTS);
@@ -757,6 +900,19 @@ fn events_round_trip_through_notifications() {
             active: 2,
             revision: 4,
         },
+        Event::JobProgress {
+            id: 3,
+            state: JobState::Running,
+            progress: JobProgress {
+                done: 30,
+                total: 120,
+            },
+        },
+        Event::JobChanged {
+            id: 3,
+            state: JobState::Done,
+            report: Some(PathBuf::from("/media/out.mp4.report.json")),
+        },
     ];
     assert_eq!(nle_protocol::EVENTS.len(), events.len());
     for event in events {
@@ -765,7 +921,7 @@ fn events_round_trip_through_notifications() {
         assert_eq!(back, event);
     }
 
-    let unknown = Notification::new("job.progress", json!({}));
+    let unknown = Notification::new("job.telemetry", json!({}));
     let error = Event::from_notification(unknown).expect_err("unknown event");
     assert_eq!(error.code, METHOD_NOT_FOUND);
 }
@@ -831,7 +987,7 @@ fn events_before_a_response_are_buffered() {
 
 #[test]
 fn an_unknown_event_is_skipped_and_the_call_succeeds() {
-    let bad = r#"{"jsonrpc":"2.0","method":"job.progress","params":{}}"#;
+    let bad = r#"{"jsonrpc":"2.0","method":"job.telemetry","params":{}}"#;
     let response = r#"{"jsonrpc":"2.0","id":1,"result":"TITLE: t"}"#;
     let input = format!("{bad}\n{response}\n");
     let mut client = Client::new(Cursor::new(input), Vec::new());
@@ -845,7 +1001,7 @@ fn an_unknown_event_is_skipped_and_the_call_succeeds() {
 
 #[test]
 fn next_event_skips_undecodable_notifications() {
-    let bad = r#"{"jsonrpc":"2.0","method":"job.progress","params":{}}"#;
+    let bad = r#"{"jsonrpc":"2.0","method":"job.telemetry","params":{}}"#;
     let good = Event::Playhead {
         at: Seconds::new(1, 2),
     };
