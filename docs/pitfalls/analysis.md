@@ -161,7 +161,8 @@ Packed bytes never travel on the wire — only paths.
   "source_mtime_secs","source_mtime_nanos"},"result":{"kind":"mean_luma",
   "luma_milli":[…]}}`; `luma_milli` is per-frame Rec. 709 luma ×1000 in
   integer units. The analyzer writes it canonically (plus one newline); the
-  host accepts only the canonical bytes, whatever whitespace the child used.
+  host accepts only those bytes (or the same bytes without the newline).
+  Pretty-printed or reordered output is a refusal, not silently rewritten.
   `AnalysisProduct::freshness` compares the recorded signature with the live
   file and answers `Fresh`/`Stale`/`Offline`; `is_compatible` owns the
   product/sampler version check.
