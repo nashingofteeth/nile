@@ -41,8 +41,9 @@ pub use extend::{
     extend_gap_end_on, extend_gap_head, extend_gap_head_on, extend_gap_tail, extend_gap_tail_on,
 };
 pub use history::{
-    AnnotationsChange, AssetChange, Atom, Change, GroupChange, Histories, HistoriesState, History,
-    HistoryState, MediaGroupsChange, TrackChange, TracksChange, UndoOutcome,
+    AnnotationsChange, AssetChange, Atom, AudioChange, Change, GroupChange, Histories,
+    HistoriesState, History, HistoryState, MediaGroupsChange, TrackChange, TracksChange,
+    UndoOutcome,
 };
 pub use speed::{set_speed, set_speed_on};
 pub use transitions::{add_transition, retime_transition_on, transition_at};
@@ -67,8 +68,8 @@ pub const MAX_HISTORY: usize = 100;
 /// v18 adds grouped changes (one undo step for a batch of actions);
 /// v19 adds media-group creation/removal; v20 adds annotations; v21 scopes
 /// timeline annotations into track changes; v22 stores crop as a window;
-/// v23 adds crop keyframes.
-pub const HISTORY_VERSION: u32 = 23;
+/// v23 adds crop keyframes; v24 adds sequence audio-post settings.
+pub const HISTORY_VERSION: u32 = 24;
 
 #[derive(Debug, Error)]
 pub enum EditError {

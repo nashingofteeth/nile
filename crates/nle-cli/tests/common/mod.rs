@@ -402,6 +402,84 @@ impl Sandbox {
             .is_empty()
     }
 
+    /// The audio streams' codec names, in file order (one entry per stream).
+    pub fn audio_streams(&self, file: &str) -> Vec<String> {
+        self.probe(
+            file,
+            &[
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+            ],
+        )
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// The first audio stream's sample rate in Hz.
+    pub fn audio_sample_rate(&self, file: &str) -> u32 {
+        self.probe(
+            file,
+            &[
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=sample_rate",
+                "-of",
+                "csv=p=0",
+            ],
+        )
+        .parse()
+        .unwrap_or_else(|_| panic!("sample rate of {file}"))
+    }
+
+    /// Mean volume (dBFS) of `[at, at + dur)` — the fade check. `volumedetect`
+    /// over the decoded audio; `-ss` sits before `-i` so ffmpeg seeks and then
+    /// decodes accurately (output-side trimming here measured the wrong span).
+    pub fn audio_mean_volume(&self, file: &str, at: f64, dur: f64) -> f64 {
+        let out = Command::new("ffmpeg")
+            .current_dir(self.path())
+            .args([
+                "-hide_banner",
+                "-v",
+                "info",
+                "-ss",
+                &format!("{at:.3}"),
+                "-t",
+                &format!("{dur:.3}"),
+                "-i",
+                file,
+                "-vn",
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .expect("spawn ffmpeg volumedetect");
+        assert!(
+            out.status.success(),
+            "volumedetect {file}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let line = stderr
+            .lines()
+            .find(|line| line.contains("mean_volume:"))
+            .unwrap_or_else(|| panic!("no mean_volume for {file}:\n{stderr}"));
+        line.split("mean_volume:")
+            .nth(1)
+            .and_then(|v| v.trim().trim_end_matches("dB").trim().parse().ok())
+            .unwrap_or_else(|| panic!("unparseable mean_volume: {line:?}"))
+    }
+
     /// The first video stream's container tag — `avc1`, `hvc1`, `hev1`.
     pub fn video_tag(&self, file: &str) -> String {
         self.probe(

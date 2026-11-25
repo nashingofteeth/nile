@@ -510,6 +510,24 @@ fn unknown_verbs_and_bad_flags_stay_apart() {
     assert!(f.positional().is_none(), "no stray positionals");
 }
 
+#[test]
+fn an_optional_boolean_flag_distinguishes_bare_true_from_false() {
+    let (_, mut f) = split_args("sequence audio --normalize --fade-in 0.5").unwrap();
+    assert_eq!(f.take_opt("normalize"), Some(None), "bare means true");
+    assert_eq!(f.take("fade-in").as_deref(), Some("0.5"));
+
+    let (_, mut f) = split_args("sequence audio --normalize false").unwrap();
+    assert_eq!(f.take_opt("normalize"), Some(Some("false".into())));
+    assert_eq!(f.positional().as_deref(), Some("audio"));
+    assert!(f.positional().is_none(), "the value was consumed");
+
+    let (_, mut f) = split_args("sequence audio --normalize=false").unwrap();
+    assert_eq!(f.take_opt("normalize"), Some(Some("false".into())));
+
+    let (_, mut f) = split_args("sequence audio --fade-in 1").unwrap();
+    assert_eq!(f.take_opt("normalize"), None, "absent is not a false");
+}
+
 // Tab-completed paths come back quoted; the shared tokenizer must hand them
 // to `:add`/`:import` as one argument (the shell would do this for the CLI).
 #[test]

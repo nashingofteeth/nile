@@ -17,7 +17,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use nle_core::analysis::Word;
-use nle_core::{Action, CheckReport, Project, Seconds, VideoSettings};
+use nle_core::{Action, AudioSettings, CheckReport, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
 use crate::call::{
@@ -296,6 +296,22 @@ impl<R: BufRead, W: Write> Client<R, W> {
             name: name.into(),
             fps,
             video,
+        })? {
+            Reply::Sequence(reply) => Ok(reply),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    /// Set the active sequence's audio-post settings (a model write guarded
+    /// by CAS). Returns the affected sequence and the active id.
+    pub fn set_audio(
+        &mut self,
+        base_revision: u64,
+        audio: AudioSettings,
+    ) -> Result<SequenceReply, ClientError> {
+        match self.call(Call::SequenceAudio {
+            base_revision,
+            audio,
         })? {
             Reply::Sequence(reply) => Ok(reply),
             other => Err(ClientError::UnexpectedReply(other.kind())),

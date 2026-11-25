@@ -872,6 +872,18 @@ enum SequenceCmd {
         /// Sequence id (from `nile sequence ls`)
         id: u32,
     },
+    /// Set the active sequence's audio post (normalization and fades)
+    Audio {
+        /// Normalize the mix to -16 LUFS / -1.5 dBTP (on, or off)
+        #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+        normalize: Option<bool>,
+        /// Fade-in at the programme head, in seconds
+        #[arg(long, value_name = "SECONDS", allow_hyphen_values = true)]
+        fade_in: Option<String>,
+        /// Fade-out at the programme tail, in seconds
+        #[arg(long, value_name = "SECONDS", allow_hyphen_values = true)]
+        fade_out: Option<String>,
+    },
 }
 
 /// CLI spelling of the encoder choices (clap needs ValueEnum to build

@@ -37,7 +37,10 @@ fn protocol_server_round_trip() {
 
     let hello = call(&mut serve, 1, "hello", None);
     assert_eq!(hello["result"]["protocol"], 5);
-    assert_eq!(hello["result"]["project_version"], 17);
+    assert_eq!(
+        hello["result"]["project_version"],
+        nle_core::project::PROJECT_VERSION
+    );
     let revision = hello["result"]["revision"].as_u64().expect("revision");
     assert!(
         hello["result"]["methods"]
@@ -263,6 +266,70 @@ fn sequence_list_use_and_add_round_trip() {
         8,
         "sequence.add",
         Some(json!({"base_revision": revision, "name": "Stale"})),
+    );
+    assert_eq!(stale["error"]["code"], -32001);
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn sequence_audio_round_trips_through_the_server() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+
+    // A model write: CAS, revision bump, both sequence events.
+    let set = call(
+        &mut serve,
+        2,
+        "sequence.audio",
+        Some(json!({
+            "base_revision": revision,
+            "audio": {
+                "normalize": true,
+                "fade_in": "1/2",
+                "fade_out": "1/1"
+            }
+        })),
+    );
+    let after = set["result"]["revision"].as_u64().expect("revision");
+    assert_eq!(after, revision + 1);
+    assert_eq!(set["result"]["active"], 1);
+    assert_eq!(set["result"]["sequence"]["id"], 1);
+    assert_eq!(set["result"]["sequence"]["audio"]["normalize"], true);
+    assert_eq!(set["result"]["sequence"]["audio"]["fade_in"], "1/2");
+    assert_eq!(set["result"]["sequence"]["audio"]["fade_out"], "1/1");
+    let event = serve.read();
+    assert_eq!(event["method"], "project.changed");
+    assert_eq!(event["params"]["revision"], after);
+    let event = serve.read();
+    assert_eq!(event["method"], "sequence.changed");
+    assert_eq!(event["params"]["active"], 1);
+    assert_eq!(event["params"]["revision"], after);
+
+    // The persisted project and the sequence listing agree.
+    let show = call(&mut serve, 3, "project.show", None);
+    assert_eq!(
+        active(&show["result"])["audio"]["normalize"],
+        true,
+        "project.show carries the field"
+    );
+    let list = call(&mut serve, 4, "sequence.list", None);
+    assert_eq!(list["result"]["sequences"][0]["audio"]["normalize"], true);
+    assert_eq!(list["result"]["sequences"][0]["audio"]["fade_in"], "1/2");
+
+    // A stale CAS is an error, not a write.
+    let stale = call(
+        &mut serve,
+        5,
+        "sequence.audio",
+        Some(json!({
+            "base_revision": revision,
+            "audio": {"normalize": false, "fade_in": "0/1", "fade_out": "0/1"}
+        })),
     );
     assert_eq!(stale["error"]["code"], -32001);
 

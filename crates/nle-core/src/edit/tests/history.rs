@@ -930,3 +930,36 @@ fn a_track_change_refuses_when_annotations_changed_outside() {
     assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
     assert!(p.annotations.is_empty(), "failed undo left the list alone");
 }
+
+#[test]
+fn audio_settings_undo_and_redo_exactly() {
+    use crate::project::AudioSettings;
+
+    let mut p = fixture();
+    let mut h = History::default();
+    let revised = AudioSettings {
+        normalize: true,
+        fade_in: Seconds::new(1, 2),
+        fade_out: Seconds::new(1, 4),
+    };
+    let desc = h.set_audio(&mut p, revised, 3).unwrap();
+    assert_eq!(p.audio, revised);
+    assert!(desc.contains("normalize on"), "{desc}");
+    assert_eq!(h.depth(), 1);
+
+    let outcome = h.undo(&mut p).unwrap();
+    assert_eq!(p.audio, AudioSettings::default());
+    assert_eq!(outcome.playhead, 3, "the edit's frame is restored");
+    h.redo(&mut p).unwrap();
+    assert_eq!(p.audio, revised);
+
+    // Re-applying the live settings records nothing (no dead undo step).
+    let depth = h.depth();
+    h.set_audio(&mut p, revised, 0).unwrap();
+    assert_eq!(h.depth(), depth);
+
+    // An out-of-band change refuses rather than being overwritten.
+    p.audio.fade_in = Seconds::from_integer(1);
+    assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
+    assert_eq!(p.audio.fade_in, Seconds::from_integer(1));
+}

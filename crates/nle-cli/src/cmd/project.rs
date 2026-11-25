@@ -522,8 +522,13 @@ pub(crate) fn cmd_sequence(project_path: &Path, action: &SequenceCmd) -> Result<
                     .flat_map(|track| track.segments.iter())
                     .filter(|seg| matches!(seg, Segment::Clip(_)))
                     .count();
+                let audio = if sequence.audio.is_active() {
+                    format!(" · audio {}", sequence.audio.summary())
+                } else {
+                    String::new()
+                };
                 say!(
-                    "{mark} #{:<2} {:<20} {fps:<12} {video:<11} {clips} clip(s)",
+                    "{mark} #{:<2} {:<20} {fps:<12} {video:<11} {clips} clip(s){audio}",
                     sequence.id,
                     sequence.name
                 );
@@ -557,6 +562,42 @@ pub(crate) fn cmd_sequence(project_path: &Path, action: &SequenceCmd) -> Result<
             let name = project.active_sequence().name.clone();
             Document::new(project).save(project_path)?;
             say!("✓ sequence #{id} {name} is active");
+            Ok(())
+        }
+        SequenceCmd::Audio {
+            normalize,
+            fade_in,
+            fade_out,
+        } => {
+            let project = Project::load(project_path)?;
+            if normalize.is_none() && fade_in.is_none() && fade_out.is_none() {
+                say!(
+                    "#{} {} · audio {}",
+                    project.active_id(),
+                    project.active_sequence().name,
+                    project.audio.summary()
+                );
+                return Ok(());
+            }
+            let mut audio = project.audio;
+            if let Some(normalize) = normalize {
+                audio.normalize = *normalize;
+            }
+            if let Some(fade_in) = fade_in {
+                audio.fade_in = parse_time(fade_in)
+                    .with_context(|| format!("invalid --fade-in {fade_in:?}"))?;
+            }
+            if let Some(fade_out) = fade_out {
+                audio.fade_out = parse_time(fade_out)
+                    .with_context(|| format!("invalid --fade-out {fade_out:?}"))?;
+            }
+            let histories = edit::Histories::load_project(project_path).unwrap_or_default();
+            let mut doc = Document::with_histories(project, histories);
+            let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
+            let desc = doc.set_audio(audio, playhead)?;
+            doc.save(project_path)?;
+            doc.save_history(&edit::Histories::sidecar_path(project_path))?;
+            say!("✓ {desc}");
             Ok(())
         }
     }
@@ -778,6 +819,9 @@ pub(crate) fn show_report(project: &Project) -> String {
     }
     if let Some(v) = &project.video {
         out += &format!(" · {}×{}", v.width, v.height);
+    }
+    if project.audio.is_active() {
+        out += &format!(" · audio {}", project.audio.summary());
     }
     out += &format!(" · at {} s", format_seconds(&project.playhead));
     out.push('\n');

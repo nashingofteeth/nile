@@ -32,6 +32,11 @@ pub enum ParseError {
 /// Boolean options (everything else takes a value).
 const BOOL_FLAGS: &[&str] = &["ripple", "range", "timeline", "no-hold-size", "black"];
 
+/// Options whose boolean value is optional: bare means `true`, `=false`
+/// (or a following `false`) means `false`. `normalize` is the audio-post
+/// toggle; the CLI's `[--normalize [BOOL]]` spells the same grammar.
+const OPTIONAL_BOOL_FLAGS: &[&str] = &["normalize"];
+
 /// Short flags the CLI uses, spelled `-o` in the `:cmd` line too
 /// (`:export -o out.mp4`). Only the ones that exist on the CLI.
 const SHORT_FLAGS: &[(&str, &str)] = &[("o", "out")];
@@ -88,6 +93,21 @@ pub fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
         }
         let value = if BOOL_FLAGS.contains(&name.as_str()) {
             None
+        } else if OPTIONAL_BOOL_FLAGS.contains(&name.as_str()) {
+            match inline {
+                Some(v) => Some(v),
+                // `--normalize false` consumes the explicit value (and a
+                // bad value is reported by the command, not left as a stray
+                // positional); a following flag means bare `true`.
+                None => match raw.get(i) {
+                    Some(v) if !v.starts_with('-') => {
+                        let v = v.clone();
+                        i += 1;
+                        Some(v)
+                    }
+                    _ => None,
+                },
+            }
         } else {
             Some(match inline {
                 Some(v) => v,
@@ -188,6 +208,14 @@ impl Flags {
     pub fn take(&mut self, name: &str) -> Option<String> {
         let i = self.opts.iter().position(|(n, _)| n == name)?;
         self.opts.remove(i).1
+    }
+
+    /// Remove `--name`, preserving whether it carried a value: `Some(None)` is
+    /// a bare flag, `None` means it was absent. Needed for `[--flag [VALUE]]`
+    /// options where presence and value are separate decisions.
+    pub fn take_opt(&mut self, name: &str) -> Option<Option<String>> {
+        let i = self.opts.iter().position(|(n, _)| n == name)?;
+        Some(self.opts.remove(i).1)
     }
 
     /// Every occurrence of a repeatable flag (`--map A=B --map C=D`).
