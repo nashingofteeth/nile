@@ -3,7 +3,7 @@
 //! broken envelope or a typed call that cannot survive encoding fails here.
 
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nle_core::analysis::Word;
 use nle_core::expect::{CheckOutcome, CheckReport, CheckSummary, ReportRef};
@@ -309,14 +309,14 @@ fn media(id: u32, path: &str) -> MediaAsset {
     }
 }
 
-fn record(id: u64, state: JobState, output: &PathBuf, sequence: u32) -> JobRecord {
+fn record(id: u64, state: JobState, output: &Path, sequence: u32) -> JobRecord {
     JobRecord {
         version: nle_core::jobs::JOB_VERSION,
         id,
         state,
         revision: 7,
         sequence,
-        output: output.clone(),
+        output: output.to_path_buf(),
         export: JobExport::default(),
         created_at: 1,
         started_at: None,
