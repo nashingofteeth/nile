@@ -519,8 +519,10 @@ video/
         ├── clipboard.json
         ├── view.json      # zoom, scroll, active track, pool source marks
         ├── analysis/
-        │   └── transcripts/  # content-addressed transcript words (t1-…)
+        │   ├── transcripts/  # content-addressed transcript words (t1-…)
+        │   └── products/     # analyzer outputs (a1-…)
         └── cache/
+            ├── analysis/      # packed frame/audio samples (disposable)
             ├── proxy/         # rendered video proxies
             ├── audio/         # continuous preview audio masters
             ├── wave/          # cached audio peaks for the waveform

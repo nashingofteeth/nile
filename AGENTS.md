@@ -25,6 +25,7 @@ build — see "Learning Rust along the way".
 | `nle-protocol`, `serve`, wire methods | `docs/pitfalls/protocol.md` |
 | sequences, selection, `nile sequence` | `docs/pitfalls/sequences.md` |
 | annotations, `nile annotation`, `analysis`, `nile analysis` | `docs/pitfalls/annotations.md` |
+| analysis sampling, cache/analysis | `docs/pitfalls/analysis.md` |
 | render reports, `nile report`, export | `docs/pitfalls/render-report.md` |
 | crop keyframes, keyed crop | `docs/pitfalls/crop-keyframes.md` |
 | worktrees, parallel agents | `docs/worktrees.md` |
