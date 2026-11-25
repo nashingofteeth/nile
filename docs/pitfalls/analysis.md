@@ -1,13 +1,15 @@
 # Analysis sampling + sidecar contract
 
 Read before adding frame/audio sampling, an analyzer sidecar, or a CV-backed
-expectation. The **sampler is live** in `crates/nle-ffmpeg/src/sampling.rs`
-(`FrameSpec`/`AudioSpec`, `SampleCache`, RGB24/PCM); the sidecar/analyzer,
-frame times/indices and the CV checks are the pending half. Precedents:
-`crates/nle-cli/src/proxy.rs` (`RENDER_VERSION`, tmp+rename, `prune_at`),
-`crates/nle-cli/src/filmstrip.rs`/`thumbnails.rs` (`asset.path` + size + mtime
-key; filmstrip also the source span and dimensions) and
-`crates/nle-core/src/analysis.rs` (`TranscriptStore`, `t1-` addresses).
+expectation. The **sampler** lives in `crates/nle-ffmpeg/src/sampling.rs`
+(`FrameSpec`/`AudioSpec`, `SampleCache`, RGB24/PCM); the **sidecar host and
+bundled mean-luma analyzer** live in `crates/nle-cli/src/analysis.rs`, with
+products in `crates/nle-core/src/analysis.rs` (`ProductStore`, `a1-`
+addresses). Frame times/indices, audio analysis and CV checks are still
+pending. Precedents: `crates/nle-cli/src/proxy.rs` (`RENDER_VERSION`,
+tmp+rename, `prune_at`), `crates/nle-cli/src/filmstrip.rs`/`thumbnails.rs`
+(`asset.path` + size + mtime key; filmstrip also the source span and
+dimensions) and the transcript store (`t1-` addresses).
 
 ## Purpose and where it lands
 
@@ -17,8 +19,9 @@ key; filmstrip also the source span and dimensions) and
   `TimeMap` first, exactly as proxy segments are built.
 - `crates/nle-ffmpeg/src/sampling.rs` owns the argv builder, the packed bytes
   and the cache entry; it stays free of `.nile/` paths and project state.
-  `SampleCache::new(root)` takes a caller directory; the cache root and the
-  sidecar host live in `nle-cli` beside `proxy.rs` (host wiring pending).
+  `SampleCache::new(root)` takes a caller directory; `nile analysis analyze`
+  passes `cache_dir(project_path).join("analysis")`, creates a staging
+  directory beneath it, and spawns the hidden child.
 - **ML stays out of process and out of the dependency graph.** No new runtime
   crate: an analyzer is a child that reads packed files and writes a product.
   `Cargo.toml` does not change for CV.
@@ -57,11 +60,12 @@ Packed is one read, exact bytes.
   `sample_rate`/`channels`) to equal the request, and `frames`/`samples` not
   to exceed the request's count. A disagreeing pair is corrupt input, not a
   shorter sample.
-- **Validation is positivity today; caps are pending.** `FrameSpec` /
+- **Validation is positivity plus the host's sample budget.** `FrameSpec` /
   `AudioSpec` reject negative/zero ranges, zero fps/rate/channels and zero
-  dimensions, and the sampler buffers the whole sample in memory. A byte/
-  frame cap and the host's request bound land with the sidecar; until then
-  the caller must pick a range that fits memory.
+  dimensions, and the sampler buffers the whole sample in memory.
+  `nile analysis analyze` checks `frames × width × height × 3` against a
+  256 MiB budget *before* sampling; the sampler still has no cap of its own,
+  so any other caller must pick a range that fits memory.
 
 ## Cache
 
@@ -152,6 +156,19 @@ Packed bytes never travel on the wire — only paths.
   (`max_product_bytes`, default 256 MiB), verifies the `a1-` address against
   its content, then renames it to `analysis/products/a1-<16 hex>`; identical
   bytes at an existing address are idempotent, different bytes are a refusal.
+- **Landed product shape.** `{"version":1,"analyzer":{"name","version"},
+  "sample":{"version","key","params","source","source_arg","source_size",
+  "source_mtime_secs","source_mtime_nanos"},"result":{"kind":"mean_luma",
+  "luma_milli":[…]}}`; `luma_milli` is per-frame Rec. 709 luma ×1000 in
+  integer units. The analyzer writes it canonically (plus one newline); the
+  host accepts only the canonical bytes, whatever whitespace the child used.
+  `AnalysisProduct::freshness` compares the recorded signature with the live
+  file and answers `Fresh`/`Stale`/`Offline`; `is_compatible` owns the
+  product/sampler version check.
+- **`shutdown` is the third method.** Ids are 1/2/3 for hello/analyze/
+  shutdown; the analyzer answers `{"id":3,"ok":{"shutdown":true}}` and exits.
+  A bad line after the handshake gets its own error line and the loop
+  continues; an oversized line or an unknown response shape is fatal.
 
 ## Out-of-process analyzer boundary
 
@@ -177,13 +194,13 @@ Packed bytes never travel on the wire — only paths.
   one. A `SAMPLE_VERSION` or product-schema bump makes it incompatible, not
   stale-by-mtime. Consumers refuse stale/incompatible products as
   unverifiable; `evaluate` stays pure and never runs an analyzer.
-- **Prove the contract before any ML:** a hidden `nile analysis-analyzer`
+- **The contract is proved before any ML:** a hidden `nile analysis-analyzer`
   subcommand in the same binary (`#[command(hide = true)]`, not a second
   installed bin) computes per-frame mean luma from the packed RGB24 and
-  writes a product into `stage`. `behaviour.rs` spawns it through
-  `env!("CARGO_BIN_EXE_nile")`, so the process boundary — not a function call
-  — is what the test pins. ML replaces it outside the workspace; `nile` links
-  nothing new.
+  writes a product into `stage`. `behaviour.rs` drives `nile analysis
+  analyze` through `env!("CARGO_BIN_EXE_nile")`, so the process boundary —
+  not a function call — is what the test pins. ML replaces it outside the
+  workspace; `nile` links nothing new.
 
 ## Security and failure rules
 
@@ -214,7 +231,7 @@ Packed bytes never travel on the wire — only paths.
 
 ## Test plan
 
-Live in `sampling.rs` (15 tests):
+Live in `sampling.rs` (19 tests):
 - **Frame bytes:** a generated testsrc sampled at a grid → payload is exactly
   `frames × width × height × 3`, packed rows, expected RGB and dimensions.
 - **Audio bytes:** a generated tone at 48 kHz → the requested sample count,
@@ -227,17 +244,23 @@ Live in `sampling.rs` (15 tests):
 - **argv guard:** no shell, `--` before the positional output, and the
   `rawvideo`/`s16le` flags.
 
-Pending with the sidecar/analyzer:
+Landed with the sidecar/analyzer:
+- The hidden mean-luma analyzer → `a1-…` product via `stage`, with address
+  re-hash and sample/source cross-checks; `behaviour.rs` also removes the
+  source and re-runs to prove the offline sample hit.
+- A malformed line, oversized line, relative path and escaping stage name are
+  typed errors; `hostile.rs` drives the child with garbage and asserts it
+  never panics.
+- **Product staleness:** `ProductStore` tests cover `Fresh`/`Stale`/`Offline`
+  and an incompatible schema/sampler bump; a pruned sample leaves the product
+  readable because the source signature is recorded, not recomputed.
+
+Pending:
 - `times`/`indices` and exact source-frame selection agree with the source
   grid; a request/meta disagreement is refused.
-- The hidden mean-luma analyzer → `a1-…` product via `stage`, address
-  re-hash verified; a malformed request, relative path, escaping stage name,
-  nonzero exit and oversized line each produce a typed error and no project
-  change.
-- **Product staleness:** a product survives a removed source (offline) and is
-  refused when the live source's size/mtime differs from its recorded
-  signature; a pruned sample does not make it unreadable.
 - **Prune:** `cache prune` reports the analysis line, removes `.raw`/`.json`
   and stale staging dirs, leaves `analysis/` alone, and a pruned sample
-  re-extracts.
-- **Caps:** an over-budget window is refused before ffmpeg when the cap lands.
+  re-extracts. The host's `StageDir` removes its own run; a killed host can
+  still leave `cache/analysis/staging/<pid>-<seq>/` for that sweep.
+- **Caps:** the sampler itself still buffers without a byte frame cap; only
+  the CLI host's budget refuses an oversized request.

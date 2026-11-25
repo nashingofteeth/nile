@@ -638,6 +638,80 @@ fn analysis_import_stores_a_transcript_and_words_complete_uses_it() {
 }
 
 #[test]
+fn analysis_analyze_stores_a_mean_luma_product_and_reuses_the_sample_offline() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6; red's asset is #1
+    let project_before = s.read(P);
+    let args = [
+        "analysis",
+        "analyze",
+        "--asset",
+        "1",
+        "--duration",
+        "1",
+        "--fps",
+        "5",
+        "--width",
+        "32",
+        "--height",
+        "24",
+    ];
+    let hash = s.ok(&args).trim().to_string();
+    assert!(hash.starts_with("a1-"), "{hash}");
+    assert_eq!(hash.len(), 19, "{hash}");
+
+    let state = nle_core::state::state_dir(&s.file(P));
+    let product_path = state.join("analysis/products").join(&hash);
+    let product: serde_json::Value =
+        serde_json::from_slice(&fs::read(&product_path).expect("the product file")).unwrap();
+    assert_eq!(product["version"], 1);
+    assert_eq!(product["analyzer"]["name"], "mean-luma");
+    assert_eq!(product["sample"]["key"].as_str().map(str::len), Some(16));
+    assert_eq!(product["result"]["kind"], "mean_luma");
+    let luma = product["result"]["luma_milli"]
+        .as_array()
+        .expect("per-frame luma");
+    assert_eq!(luma.len(), 5, "1 s at 5 fps");
+    for frame in luma {
+        let value = frame.as_u64().expect("integer luma");
+        assert!(
+            (50_000..60_000).contains(&value),
+            "red luma {value} out of range"
+        );
+    }
+    assert_eq!(
+        s.read(P),
+        project_before,
+        "an analysis run must not rewrite the project"
+    );
+
+    // One packed sample (`.raw` + `.json`), and no staging directory left.
+    let cache = state.join("cache/analysis");
+    let entries = || {
+        fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(entries().len(), 2, "{:?}", entries());
+    let staging = cache.join("staging");
+    assert!(
+        !staging.exists() || staging.read_dir().unwrap().next().is_none(),
+        "the per-run staging directory is removed"
+    );
+
+    // The source is gone, but the packed sample is enough: same address, no
+    // new cache entries, no project write.
+    fs::remove_file(s.file("red.mp4")).unwrap();
+    let again = s.ok(&args).trim().to_string();
+    assert_eq!(again, hash, "the offline sample produced the same product");
+    assert_eq!(entries().len(), 2, "the sample hit did not grow the cache");
+    assert_eq!(s.read(P), project_before);
+}
+
+#[test]
 fn annotation_check_counts_unverifiable_and_resolved_failures_as_failed() {
     let s = Sandbox::new();
     s.base();

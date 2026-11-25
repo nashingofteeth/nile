@@ -1498,6 +1498,54 @@ fn analysis_import_refuses_bad_input() {
     s.assert_loads("analysis import garbage", "");
 }
 
+/// The hidden analyzer is a process boundary, so garbage on its stdin must be
+/// answered or refused, never a panic. A malformed line gets a typed
+/// `bad_request`; an over-cap line kills it before it can allocate the rest.
+#[test]
+fn the_analysis_analyzer_survives_malformed_and_oversized_lines() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    fn spawn() -> std::process::Child {
+        Command::new(env!("CARGO_BIN_EXE_nile"))
+            .arg("analysis-analyzer")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn analysis-analyzer")
+    }
+
+    let mut child = spawn();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"{ not a json object\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = merged(&out);
+    assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("bad_request"),
+        "{text}"
+    );
+
+    let mut child = spawn();
+    // One byte past the 1 MiB cap, no newline until the end.
+    let huge = vec![b'a'; 1024 * 1024 + 1];
+    let _ = child.stdin.as_mut().unwrap().write_all(&huge);
+    let _ = child.stdin.as_mut().unwrap().write_all(b"\n");
+    let out = child.wait_with_output().unwrap();
+    let text = merged(&out);
+    assert!(!text.contains("panicked"), "{text}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an over-cap line is fatal: {text}"
+    );
+}
+
 // The diagnostic path runs without a monitor, but it still creates a scratch
 // copy. A TMPDIR it cannot use must be refused cleanly (1), never panicked
 // (101). Non-unix `temp_dir()` ignores TMPDIR, so this only means something
