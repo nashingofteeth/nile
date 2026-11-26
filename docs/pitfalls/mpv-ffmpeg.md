@@ -20,7 +20,8 @@ Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
     jump at the seam); hashed by the segment + geometry + fps + the sequence's
     audio post + the assets it reads;
   - a *span* where another track is audible (`proxy::composite_proxy`): every
-    unmuted track's slice of it, hashed the same way over the slices.
+    unmuted track's slice of it, hashed the same way over the slices. A slice
+    trims like any trim-in, so a keyed crop's keys re-base onto its head.
 - Each asset's **path and mtime** are in the hash, so a replaced file
   re-renders — and so is each **LUT file** an effect reads (the segment JSON
   carries only its path, so editing a `.cube` in place must re-render too).

@@ -499,11 +499,18 @@ fn slice_tracks(project: &Project, start: Seconds, end: Seconds) -> Vec<Track> {
 fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
     match seg {
         Segment::Gap(_) => Segment::Gap(Gap { duration: len }),
-        Segment::Clip(c) => Segment::Clip(Clip {
-            asset_in: c.source_at(offset),
-            asset_out: c.source_at(offset + len),
-            ..c.clone()
-        }),
+        Segment::Clip(c) => {
+            let mut piece = Clip {
+                asset_in: c.source_at(offset),
+                asset_out: c.source_at(offset + len),
+                ..c.clone()
+            };
+            // The slice's head is clip-relative timeline `offset`, so re-base
+            // crop keys onto it exactly like a trim-in; otherwise the proxy
+            // animates from the old head.
+            piece.rebase_crop_keys(offset);
+            Segment::Clip(piece)
+        }
         Segment::Transition(t) => {
             // `composite_spans` widens a span to contain any transition whole,
             // so it arrives uncut (`offset == 0`, `len == dur`); keep it as-is
@@ -562,7 +569,9 @@ fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nle_core::timeline::{Clip, Effect, Gap, Transition, TransitionKind, TransitionSource};
+    use nle_core::timeline::{
+        Clip, CropKey, Effect, Gap, Transition, TransitionKind, TransitionSource,
+    };
 
     fn clip() -> Segment {
         Segment::Clip(Clip::new(
@@ -708,6 +717,56 @@ mod tests {
         // Muted tracks are not part of the export (or the composite).
         p.timeline.tracks[1].muted = true;
         assert_eq!(slice_tracks(&p, secs(1), secs(3)).len(), 1);
+    }
+
+    /// A span boundary can cut a keyed-crop clip from one track. The slice's
+    /// head is the window that was playing at the cut, so its keys must be
+    /// re-based onto that head (the same rule trim/split follow) — otherwise
+    /// the proxy plays the animation from the old start.
+    #[test]
+    fn slice_tracks_rebases_crop_keys() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let key = |at: Seconds, x: f64| CropKey {
+            at,
+            x,
+            y: 0.0,
+            w: 50.0,
+            h: 50.0,
+        };
+        let mut c = Clip::new(1, a, secs(0), secs(3));
+        c.effects = vec![Effect::Crop {
+            x: 10.0,
+            y: 0.0,
+            w: 50.0,
+            h: 50.0,
+            keys: vec![key(secs(0), 10.0), key(secs(2), 30.0)],
+        }];
+        p.timeline.tracks[0].segments = vec![Segment::Clip(c)];
+
+        let slice = slice_tracks(&p, secs(1), secs(3));
+        let Some(Segment::Clip(clipped)) = slice[0]
+            .segments
+            .iter()
+            .find(|s| matches!(s, Segment::Clip(_)))
+        else {
+            panic!("the clip is in the slice: {:?}", slice[0].segments);
+        };
+        let Effect::Crop { keys, .. } = &clipped.effects[0] else {
+            panic!("the slice keeps the keyed crop");
+        };
+        assert_eq!(keys[0].at, secs(0), "the new head is the origin");
+        assert_eq!(
+            keys[0].x, 20.0,
+            "the window at the trim offset becomes the head key"
+        );
+        assert_eq!(keys[1].at, secs(1), "later keys shift with the head");
     }
 
     /// A span is widened to contain a transition whole, so the slice must keep
