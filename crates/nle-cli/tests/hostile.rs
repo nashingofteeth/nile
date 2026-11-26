@@ -492,6 +492,12 @@ fn odd_media() {
         "TITLE: unknown\nFCM: NON-DROP FRAME\n\n\
          001  AX  X  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n",
     );
+    s.write(
+        "one.edl",
+        "TITLE: one\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
     s.write("bad.otio", "not json");
     run(
         &s,
@@ -576,12 +582,24 @@ fn odd_media() {
                 "import-edl append --track 0",
                 &[&[
                     "import-edl",
-                    "unknown.edl",
+                    "one.edl",
                     "--media",
                     ".",
                     "--append",
                     "--track",
                     "0",
+                ]],
+            ),
+            (
+                "import-edl append a bad size",
+                &[&[
+                    "import-edl",
+                    "one.edl",
+                    "--media",
+                    ".",
+                    "--append",
+                    "--size",
+                    "0x0",
                 ]],
             ),
             (
