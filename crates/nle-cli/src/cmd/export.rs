@@ -155,13 +155,7 @@ pub(crate) fn run_export(
     // workloads where the caller measured a win.
     let workers = options.parallel.unwrap_or(1).max(1);
     let mut skipped = None;
-    if workers > 1 && project.audio.is_active() {
-        // Chunks render independent graphs, so loudnorm/fades would be applied
-        // per chunk and again at every seam. Audio post is a whole-programme
-        // stage: keep one graph, one final AAC encode.
-        log::line("audio post exports in one graph; using one encoder");
-        skipped = Some("audio post needs one encode");
-    } else if workers > 1 {
+    if workers > 1 {
         match crate::cmd::schedule::run(
             &project,
             project_path,

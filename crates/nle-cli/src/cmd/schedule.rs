@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use nle_core::state;
 use nle_core::time::secs_f64;
 use nle_core::timeline::{Segment, Track, Transition};
-use nle_core::{Project, Seconds};
+use nle_core::{AudioSettings, Project, Seconds};
 
 use nle_ffmpeg::trim::run_ffmpeg_opt;
 use nle_ffmpeg::{Encoder, ExportSpec, export_range_quiet};
@@ -121,7 +121,14 @@ pub(crate) fn run(
         Err(e) => return Err(e),
     };
 
-    concat(&paths, output, &project.timeline.end(), quiet, encoder)?;
+    concat(
+        &paths,
+        output,
+        &project.timeline.end(),
+        quiet,
+        encoder,
+        nle_ffmpeg::audio_post_filter(project).as_deref(),
+    )?;
     let shown = nle_ffmpeg::probe(output)?
         .format
         .duration
@@ -177,6 +184,22 @@ fn render_all(
     })
 }
 
+/// The sub-project a chunk renders: the timeline sliced to the chunk's
+/// widened window, with audio post switched off. Audio post is a
+/// whole-programme stage and runs once at the final mux; a chunk graph that
+/// emitted loudnorm/fades would shape every chunk (and every seam) separately.
+fn chunk_project(project: &Project, chunk: &Chunk) -> Result<Project> {
+    let timeline = project
+        .timeline
+        .slice_range(chunk.pre, chunk.post)
+        .with_context(|| format!("slice {}..{}", fmt(&chunk.pre), fmt(&chunk.post)))?;
+    let mut sub = project.clone();
+    sub.timeline = timeline;
+    sub.audio = AudioSettings::default();
+    sub.set_playhead(0.0);
+    Ok(sub)
+}
+
 fn render_chunk(
     project: &Project,
     cache: &Path,
@@ -189,13 +212,7 @@ fn render_chunk(
         return Ok(path);
     }
 
-    let timeline = project
-        .timeline
-        .slice_range(chunk.pre, chunk.post)
-        .with_context(|| format!("slice {}..{}", fmt(&chunk.pre), fmt(&chunk.post)))?;
-    let mut sub = project.clone();
-    sub.timeline = timeline;
-    sub.set_playhead(0.0);
+    let sub = chunk_project(project, chunk)?;
     let offset = chunk.a - chunk.pre;
     let duration = chunk.b - chunk.a;
     // Render into a unique temp file and rename only on success: a killed
@@ -225,6 +242,7 @@ fn concat(
     total: &Seconds,
     quiet: bool,
     encoder: Encoder,
+    audio_post: Option<&str>,
 ) -> Result<()> {
     let video = tempfile::Builder::new()
         .suffix(".mkv")
@@ -262,13 +280,19 @@ fn concat(
         "0:a:0".into(),
         "-c:v".into(),
         "copy".into(),
-        "-c:a".into(),
-        "aac".into(),
-        "-b:a".into(),
-        "192k".into(),
-        "-t".into(),
-        format!("{:.6}", secs_f64(total)),
     ];
+    // The joined PCM is decoded once here and shaped over the whole
+    // programme, then encoded AAC once — never per chunk.
+    if let Some(chain) = audio_post {
+        args.push("-af".into());
+        args.push(chain.to_string());
+    }
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-b:a".into());
+    args.push("192k".into());
+    args.push("-t".into());
+    args.push(format!("{:.6}", secs_f64(total)));
     if matches!(
         output.extension().and_then(|e| e.to_str()),
         Some("mp4" | "mov" | "m4v")
@@ -508,6 +532,9 @@ fn chunk_hash(project: &Project, spec: &ExportSpec, chunk: &Chunk) -> u64 {
     // invalidate these chunks.
     let mut sequence = project.active_sequence().clone();
     sequence.playhead = Seconds::from_integer(0);
+    // Chunks are always rendered without audio post (the final mux applies it
+    // once), so changing loudness/fades must not invalidate them.
+    sequence.audio = AudioSettings::default();
     project.active_id().hash(&mut h);
     serde_json::to_vec(&sequence)
         .unwrap_or_default()
@@ -737,6 +764,86 @@ mod tests {
         assert!(!frame_aligned(&p));
         p.fps = Some(Seconds::from_integer(0));
         assert!(!frame_aligned(&p));
+    }
+
+    fn audible(mut p: Project) -> Project {
+        p.media[0].probe.streams.push(nle_core::RawStream {
+            index: 1,
+            codec_type: Some("audio".into()),
+            codec_name: Some("aac".into()),
+            sample_rate: Some("48000".into()),
+            channels: Some(2),
+            channel_layout: Some("stereo".into()),
+            ..Default::default()
+        });
+        p
+    }
+
+    /// Audio post is a whole-programme stage: a chunk graph must carry the
+    /// plain mix, or every chunk (and every seam) gets its own loudnorm/fades.
+    #[test]
+    fn a_chunk_graph_never_applies_audio_post() {
+        let mut p = audible(project());
+        p.audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::from_integer(1),
+            fade_out: Seconds::from_integer(1),
+        };
+        let full = nle_ffmpeg::compile_export(&p).unwrap().graph;
+        assert!(full.contains("loudnorm"), "{full}");
+        assert!(full.contains("afade"), "{full}");
+
+        let chunk = Chunk {
+            a: Seconds::from_integer(0),
+            b: Seconds::from_integer(2),
+            pre: Seconds::from_integer(0),
+            post: Seconds::from_integer(2),
+        };
+        let sub = chunk_project(&p, &chunk).unwrap();
+        let g = nle_ffmpeg::compile_export(&sub).unwrap().graph;
+        assert!(!g.contains("loudnorm"), "{g}");
+        assert!(!g.contains("afade"), "{g}");
+    }
+
+    #[test]
+    fn audio_post_settings_do_not_invalidate_chunks() {
+        let p = project();
+        let spec = ExportOptions::default().spec(Path::new("/tmp/out.mp4"));
+        let one = Chunk {
+            a: Seconds::from_integer(0),
+            b: Seconds::from_integer(2),
+            pre: Seconds::from_integer(0),
+            post: Seconds::from_integer(2),
+        };
+        let mut posted = p.clone();
+        posted.audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::from_integer(1),
+            fade_out: Seconds::from_integer(1),
+        };
+        assert_eq!(
+            chunk_hash(&p, &spec, &one),
+            chunk_hash(&posted, &spec, &one),
+            "chunks are audio-post-free, so the settings must not rebuild them"
+        );
+    }
+
+    #[test]
+    fn an_empty_timeline_has_nothing_to_schedule() {
+        let mut skipped = None;
+        let out = Path::new("/tmp/out.mp4");
+        let result = run(
+            &Project::new(),
+            Path::new("/tmp/p.json"),
+            out,
+            &ExportOptions::default(),
+            4,
+            true,
+            &mut skipped,
+        )
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(skipped, Some("nothing to split"));
     }
 
     #[test]

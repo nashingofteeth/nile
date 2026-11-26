@@ -66,12 +66,11 @@ just no longer drags the audio clock with it.
   carries its AAC silence track but applies no normalize/fade. A *silent*
   audio stream is not detected (that would need decoding); it is the one case
   `loudnorm` can still reject.
-- **Chunking steps aside.** The scheduler renders each chunk as its own
-  graph, which would repeat loudnorm/fades per chunk and at every seam.
-  `run_export` refuses the chunk path when `AudioSettings::is_active()` and
-  says `single (audio post needs one encode)`; the final mux still encodes
-  AAC exactly once. Moving the chain to the scheduler's final mux is the
-  deferred way to combine audio post with parallel chunks.
+- **Chunks defer audio post to the final mux.** A chunk graph renders plain
+  PCM with `sub.audio` cleared, and the chunk hash ignores the settings, so a
+  loudness/fade change reuses the chunks. `concat` then decodes the joined PCM
+  once, passes `audio_post_filter` to `-af` over the whole programme, and
+  encodes AAC once — never per chunk and never a double encode.
 - The monitor's continuous audio master hashes the settings
   (`AUDIO_PREVIEW_VERSION` bumped), so changing them re-renders the preview
   mix, and `export_audio_quiet` uses the same graph as the deliverable.

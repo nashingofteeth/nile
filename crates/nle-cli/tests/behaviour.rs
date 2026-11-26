@@ -1675,13 +1675,17 @@ fn audio_post_exports_one_aac_stream_and_keeps_the_duration() {
     s.ok(&["add", "green.mp4", "--in", "0", "--out", "2"]);
     s.ok(&["sequence", "audio", "--normalize"]);
 
-    // Audio post is a whole-programme stage, so the chunk scheduler must step
-    // aside rather than apply loudnorm/fades once per chunk. One graph, one
-    // final AAC encode.
+    // Audio post is a whole-programme stage, so the chunk scheduler renders
+    // plain PCM chunks and the final mux applies loudnorm/fades once over the
+    // joined programme. One final AAC encode, not one per chunk.
     let summary = s.ok(&["export", "--parallel", "2", "-o", "post.mp4"]);
     assert!(
-        summary.contains("single (audio post needs one encode)"),
-        "{summary}"
+        summary.contains("2-way"),
+        "scheduler was not used: {summary}"
+    );
+    assert!(
+        !summary.contains("single ("),
+        "audio post must not force one graph any more: {summary}"
     );
     s.assert_dur(
         "post.mp4",
@@ -1697,6 +1701,91 @@ fn audio_post_exports_one_aac_stream_and_keeps_the_duration() {
         s.audio_sample_rate("post.mp4"),
         48_000,
         "loudnorm's 192 kHz output is resampled back to the graph rate"
+    );
+}
+
+#[test]
+fn chunked_audio_post_matches_the_single_graph() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["add", "green.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&[
+        "sequence",
+        "audio",
+        "--normalize",
+        "--fade-in",
+        "0.5",
+        "--fade-out",
+        "0.5",
+    ]);
+    s.ok(&["export", "-o", "single.mp4"]);
+    let out = s.ok(&["export", "-o", "chunked.mp4", "--parallel", "2"]);
+    assert!(out.contains("2-way"), "scheduler was not used: {out}");
+
+    for file in ["single.mp4", "chunked.mp4"] {
+        s.assert_dur(file, 4.0, "audio post keeps the programme length");
+        assert_eq!(s.audio_streams(file), ["aac"], "{file}: one encode");
+        assert_eq!(s.audio_sample_rate(file), 48_000, "{file}: 48 kHz");
+    }
+    // The fade/loudnorm must be shaped over the joined programme, not once
+    // per chunk: both paths fade in at the head and out at the tail.
+    for file in ["single.mp4", "chunked.mp4"] {
+        let head = s.audio_mean_volume(file, 0.0, 0.1);
+        let middle = s.audio_mean_volume(file, 2.0, 0.2);
+        let tail = s.audio_mean_volume(file, 3.9, 0.1);
+        assert!(
+            head < middle - 3.0,
+            "{file}: fade-in head {head:.1} dB vs middle {middle:.1} dB"
+        );
+        assert!(
+            tail < middle - 3.0,
+            "{file}: fade-out tail {tail:.1} dB vs middle {middle:.1} dB"
+        );
+    }
+    let single = s.audio_mean_volume("single.mp4", 2.0, 0.2);
+    let chunked = s.audio_mean_volume("chunked.mp4", 2.0, 0.2);
+    assert!(
+        (single - chunked).abs() < 1.5,
+        "single {single:.1} dB vs chunked {chunked:.1} dB at programme level"
+    );
+}
+
+#[test]
+fn chunked_audio_post_on_a_video_only_programme_writes_silence() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "video_only.mp4"]);
+    s.ok(&["add", "video_only.mp4", "--in", "0", "--out", "1"]);
+    s.ok(&[
+        "add",
+        "video_only.mp4",
+        "--at",
+        "1",
+        "--in",
+        "0",
+        "--out",
+        "1",
+    ]);
+    s.ok(&[
+        "sequence",
+        "audio",
+        "--normalize",
+        "--fade-in",
+        "0.5",
+        "--fade-out",
+        "0.5",
+    ]);
+    let out = s.ok(&["export", "-o", "silent.mp4", "--parallel", "2"]);
+    assert!(out.contains("2-way"), "scheduler was not used: {out}");
+    s.assert_dur("silent.mp4", 2.0, "the video-only length");
+    assert_eq!(s.audio_streams("silent.mp4"), ["aac"]);
+    assert_eq!(s.audio_sample_rate("silent.mp4"), 48_000);
+    let level = s.audio_mean_volume("silent.mp4", 0.5, 0.5);
+    assert!(
+        level < -60.0,
+        "a video-only programme has no audio material to shape: {level:.1} dB"
     );
 }
 
