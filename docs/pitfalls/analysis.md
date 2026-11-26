@@ -5,8 +5,8 @@ expectation. The **sampler** lives in `crates/nle-ffmpeg/src/sampling.rs`
 (`FrameSpec`/`AudioSpec`, `SampleCache`, RGB24/PCM); the **sidecar host and
 bundled analyzers** live in `crates/nle-cli/src/analysis.rs`, with products
 in `crates/nle-core/src/analysis.rs` (`ProductStore`, `a1-` addresses, the
-`subject_boxes` result). Frame times/indices and subject boxes landed; audio
-analysis is still pending. Precedents: `crates/nle-cli/src/proxy.rs`
+`subject_boxes` result). Frame times/indices, subject boxes and audio levels
+have landed. Precedents: `crates/nle-cli/src/proxy.rs`
 (`RENDER_VERSION`, tmp+rename, `prune_at`),
 `crates/nle-cli/src/filmstrip.rs`/`thumbnails.rs` (`asset.path` + size + mtime
 key; filmstrip also the source span and dimensions) and the transcript store
@@ -67,7 +67,9 @@ Packed is one read, exact bytes.
   the same envelope with `kind: "audio"`, `sample_rate`, `channels` and
   `samples` (per-channel frames actually packed, at most
   `floor(duration × sample_rate)`); there is no `start`. Payload length is
-  `samples × channels × 2`.
+  `samples × channels × 2`. Audio levels are computed from this payload by the
+  child, so introducing them did not change the packed format: `SAMPLE_VERSION`
+  stays 2.
 - **The request must agree with the payload.** Recompute the length from
   `meta` and require `bytes == raw.len()`; require `width`/`height` (or
   `sample_rate`/`channels`) to equal the request, `frames`/`samples` not to
@@ -136,23 +138,27 @@ JSON-RPC envelope. stderr is unstructured log text and is never parsed. A
 control line is capped at 1 MiB; a longer line is fatal, not truncated.
 Packed bytes never travel on the wire — only paths.
 
-- **Handshake.** Host: `{"id":1,"method":"hello","protocol":2}`; analyzer:
-  `{"id":1,"ok":{"protocol":2,"analyzer":{"name","version"},
-  "tasks":["mean_luma","subject_boxes"]}}`. A protocol mismatch refuses to
-  run, and so does asking for a task the analyzer did not advertise. The host
-  samples before the handshake, so an unsupported detector still pays for the
-  packed window (the sample is cached); the child never reads or decodes it.
+- **Handshake.** Host: `{"id":1,"method":"hello","protocol":3}`; analyzer:
+  `{"id":1,"ok":{"protocol":3,"analyzer":{"name","version"},
+  "tasks":["mean_luma","subject_boxes","audio_levels"]}}`. A protocol mismatch
+  refuses to run, and so does asking for a task the analyzer did not
+  advertise. The host samples before the handshake, so an unsupported detector
+  still pays for the packed window (the sample is cached); the child never
+  reads or decodes it. Protocol 3 added `audio_levels` and an audio `request`
+  tag; the envelope shape is otherwise unchanged.
 - **Request.** `analyze` carries `input` (`kind`, `sample` — the cache key —
   plus the absolute `data` and `meta` paths), `request` (tagged by `mode`: a
-  grid's `start`/`duration`/`fps`, or an index request's `rate`/`indices`, plus
-  `width`/`height`; an audio window would use `sample_rate`/`channels`),
-  `task` (tagged by `kind`: `mean_luma`, or `subject_boxes` with `labels` and
-  `floor_milli`), `stage` (a host-made temp directory under
-  `cache/analysis/`), and `limits`. A mode may not carry the other mode's
-  fields. `meta` is authoritative for shape, the request is the window, and
-  the analyzer cross-checks the two — including `times` and `indices`. Ids are
-  positive, unique and increasing per child; every path is absolute (the
-  child's cwd is not the client's) and the analyzer refuses a relative one.
+  grid's `start`/`duration`/`fps`, an index request's `rate`/`indices`, or an
+  audio window's `start`/`duration`/`sample_rate`/`channels`; grid/index also
+  carry `width`/`height`), `task` (tagged by `kind`: `mean_luma`,
+  `subject_boxes` with `labels` and `floor_milli`, or `audio_levels` with
+  `window_samples`), `stage` (a host-made temp directory under
+  `cache/analysis/`), and `limits`. A mode may not carry another mode's
+  fields, and `input.kind` must agree with it. `meta` is authoritative for
+  shape, the request is the window, and the analyzer cross-checks the two —
+  including `times` and `indices`. Ids are positive, unique and increasing per
+  child; every path is absolute (the child's cwd is not the client's) and the
+  analyzer refuses a relative one.
 - **Response.** Exactly one line per request, same `id`, `ok` or `error`
   (codes `bad_request`, `unsupported`, `io`, `corrupt_input`, `internal`).
   `ok` reports the product `hash` and the file name inside `stage`; the host
@@ -170,6 +176,13 @@ Packed bytes never travel on the wire — only paths.
 {"id":3,"method":"analyze", … "request":{"mode":"grid","start":"0/1",
  "duration":"2/1","fps":"2/1","width":32,"height":24},
  "task":{"kind":"subject_boxes","labels":["face"],"floor_milli":200}, …}
+{"id":4,"method":"analyze","input":{"kind":"audio","sample":"9b1d…",
+ "data":"/p/.nile/nile/cache/analysis/9b1d….raw",
+ "meta":"/p/.nile/nile/cache/analysis/9b1d….json"},
+ "request":{"mode":"audio","start":"0/1","duration":"1/1",
+ "sample_rate":48000,"channels":1},
+ "task":{"kind":"audio_levels","window_samples":4800},
+ "stage":"/p/.nile/nile/cache/analysis/staging/1234-8"}
 {"id":2,"ok":{"hash":"a1-…","stage":"product.json"}}
 {"id":2,"error":{"code":"bad_request","message":"relative path"}}
 ```
@@ -215,6 +228,21 @@ Packed bytes never travel on the wire — only paths.
   box, a confidence below `floor_milli`, or a frame index that is not its
   position. Adoption additionally cross-checks `grid` against the request and
   `frames.len()` against `meta.frames`.
+- **Audio product shape.** The same envelope with
+  `"result":{"kind":"audio_levels","start":"0/1","sample_rate":48000,
+  "channels":1,"window_samples":4800,"windows":[
+  {"start":0,"samples":4800,"rms_millionths":182000,
+  "peak_millionths":421000}]}`. `start` is the source time of sample 0 of the
+  packed payload; each window's `start` is a per-channel sample offset from
+  it. Amplitudes are millionths of full scale (`1_000_000` = full s16), never
+  floats. Windows tile the payload: the first starts at 0, each next starts
+  where the previous ended, every window but the last is exactly
+  `window_samples` long, and only the final one may be shorter. `validate`
+  refuses a hole, an overlong or empty window, RMS above peak, a peak over
+  `1_000_000`, and a zero rate/channels/window. Adoption also cross-checks
+  `start`/rate/channels/`window_samples` against the request and the window
+  total against `meta.samples`, so a truncated result is refused rather than
+  read as a shorter sample.
 - **`shutdown` is the third method.** Ids are 1/2/3 for hello/analyze/
   shutdown; the analyzer answers `{"id":3,"ok":{"shutdown":true}}` and exits.
   A bad line after the handshake gets its own error line and the loop
@@ -389,3 +417,18 @@ Landed with subject detection:
 - **End to end:** `behaviour.rs` runs `nile analysis detect --label red`, then
   `annotation add --expect subject-in-frame` and `annotation check` on a real
   export; a crop that excludes the box flips the check to fail.
+
+Landed with audio levels:
+- **Compute:** a known half-scale square wave is 500 000 RMS and peak, full
+  scale is a 1 000 000 peak, silence is 0/0; windows tile 5 samples as 2+2+1,
+  and stereo counts frames, not interleaved values.
+- **Schema:** `AudioLevels::validate` refuses a hole, a short non-last window,
+  zero rate/channels/window, empty windows, RMS above peak and a peak over
+  full scale; the canonical bytes stay integer.
+- **Process:** the analyzer derives the same windows from packed s16le, and
+  `require_audio_result` refuses a product whose rate/channels/window or
+  covered sample count disagrees with the metadata.
+- **End to end:** `behaviour.rs` runs `nile analysis analyze-audio`, checks the
+  `audio_levels` product shape, proves a frame sample and an audio sample get
+  different cache entries, refuses an audio-less asset, and re-runs with the
+  source removed to prove the offline sample hit.
