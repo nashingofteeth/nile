@@ -615,19 +615,26 @@ impl SampleCache {
     /// Sample `spec`, or load the cached result. Same invalidation rules as
     /// [`SampleCache::frames`].
     pub fn audio(&self, spec: &AudioSpec) -> Result<AudioSample, SampleError> {
+        self.audio_entry(spec).map(|(sample, _)| sample)
+    }
+
+    /// [`SampleCache::audio`], plus the identity and paths of the entry it read
+    /// (or just wrote), for the same reason [`SampleCache::frames_entry`]
+    /// returns them: an out-of-process analyzer is handed paths, not bytes.
+    pub fn audio_entry(&self, spec: &AudioSpec) -> Result<(AudioSample, SampleEntry), SampleError> {
         spec.validate()?;
         let params = audio_params(spec);
         let key = source_key(&spec.source);
         if let Some(id) = source_identity(&spec.source) {
             let entry = entry_key(params, &key.component, &id);
             if let Some(sample) = self.load_audio(entry, params, &key, spec) {
-                return Ok(sample);
+                return Ok((sample, self.entry_info(entry, params)));
             }
             let sample = sample_audio(spec)?;
             self.store_audio(entry, params, &key, &id, spec, &sample)?;
-            Ok(sample)
-        } else if let Some(sample) = self.offline_audio(params, &key, spec) {
-            Ok(sample)
+            Ok((sample, self.entry_info(entry, params)))
+        } else if let Some((entry, sample)) = self.offline_audio(params, &key, spec) {
+            Ok((sample, self.entry_info(entry, params)))
         } else {
             Err(SampleError::MissingFile(spec.source.display().to_string()))
         }
@@ -748,10 +755,18 @@ impl SampleCache {
         })
     }
 
-    fn offline_audio(&self, params: u64, key: &SourceKey, spec: &AudioSpec) -> Option<AudioSample> {
+    fn offline_audio(
+        &self,
+        params: u64,
+        key: &SourceKey,
+        spec: &AudioSpec,
+    ) -> Option<(u64, AudioSample)> {
         self.find_offline(params, key, |data| matches!(data, SampleData::Audio { .. }))
             .into_iter()
-            .find_map(|entry| self.load_audio(entry, params, key, spec))
+            .find_map(|entry| {
+                self.load_audio(entry, params, key, spec)
+                    .map(|sample| (entry, sample))
+            })
     }
 
     /// Scan entry metadata for generations matching the spec and the source's
@@ -1428,6 +1443,34 @@ mod tests {
         path
     }
 
+    /// One file with both a picture and a tone, for the claim that the same
+    /// source's frame and audio samples are different cache entries.
+    fn av_tone(dir: &Path) -> PathBuf {
+        let path = dir.join("av.mp4");
+        ffmpeg(&[
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=32x24:r=5:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=300:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            path.to_str().unwrap(),
+        ]);
+        path
+    }
+
     fn frame_spec(source: &Path) -> FrameSpec {
         FrameSpec {
             source: source.to_path_buf(),
@@ -1927,6 +1970,47 @@ mod tests {
         std::fs::remove_file(&source).unwrap();
         assert_eq!(cache.audio(&spec).unwrap(), first);
         assert_eq!(entries(&cache), 2);
+    }
+
+    #[test]
+    fn an_audio_entry_names_the_packed_sample_and_never_shares_a_frame_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = av_tone(dir.path());
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let spec = audio_spec(&source);
+        let (first, entry) = cache.audio_entry(&spec).unwrap();
+        assert_eq!(entry.version(), SAMPLE_VERSION);
+        assert_eq!(entry.key().len(), 16);
+        assert_eq!(entry.params().len(), 16);
+        assert!(entry.data_path().ends_with(format!("{}.raw", entry.key())));
+        assert!(entry.meta_path().ends_with(format!("{}.json", entry.key())));
+        let meta: SampleMeta = serde_json::from_slice(&std::fs::read(entry.meta_path()).unwrap())
+            .expect("the entry's metadata");
+        assert_eq!(meta.key, entry.key());
+        assert_eq!(meta.params, entry.params());
+        assert_eq!(meta.bytes, first.pcm().len() as u64);
+        let SampleData::Audio {
+            sample_rate,
+            channels,
+            samples,
+        } = meta.data
+        else {
+            panic!("an audio sample");
+        };
+        assert_eq!((sample_rate, channels, samples), (48_000, 2, 48_000));
+
+        // A hit names the same entry.
+        let (again, hit) = cache.audio_entry(&spec).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(hit, entry);
+
+        // The same source sampled as frames is a different kind, params and
+        // entry: an analyzer cannot be handed one in place of the other.
+        let frames = frame_spec(&source);
+        let (_, frame_entry) = cache.frames_entry(&frames).unwrap();
+        assert_ne!(frame_entry.key(), entry.key());
+        assert_ne!(frame_entry.params(), entry.params());
+        assert_eq!(entries(&cache), 4, "two raw + two json entries");
     }
 
     #[test]

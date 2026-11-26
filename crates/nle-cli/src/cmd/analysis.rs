@@ -10,7 +10,7 @@ use nle_core::analysis::{
 };
 use nle_core::time::checked_sub;
 use nle_core::{Project, Seconds, parse_time};
-use nle_ffmpeg::sampling::{FrameMode, FrameSpec, SampleCache};
+use nle_ffmpeg::sampling::{AudioSpec, FrameMode, FrameSpec, SampleCache};
 
 use crate::{analysis, parse_fps_arg, say};
 
@@ -67,7 +67,7 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
     let stage = analysis::StageDir::create(cache.root())?;
     let store = ProductStore::at(project_path);
     let hash = analysis::run_sidecar(
-        &spec,
+        analysis::SampleRequest::Frames(&spec),
         &entry,
         &stage,
         &store,
@@ -137,7 +137,7 @@ pub(crate) fn cmd_detect(project_path: &Path, args: DetectArgs<'_>) -> Result<()
     let stage = analysis::StageDir::create(cache.root())?;
     let store = ProductStore::at(project_path);
     let hash = analysis::run_sidecar(
-        &spec,
+        analysis::SampleRequest::Frames(&spec),
         &entry,
         &stage,
         &store,
@@ -146,6 +146,48 @@ pub(crate) fn cmd_detect(project_path: &Path, args: DetectArgs<'_>) -> Result<()
             floor_milli,
         },
         &analyzer,
+    )?;
+    let product: AnalysisProduct = store.load(&hash)?;
+    product
+        .validate()
+        .map_err(|error| anyhow::anyhow!("stored product: {error}"))?;
+    say!("{hash}");
+    Ok(())
+}
+
+/// `nile analysis analyze-audio --asset N …` — sample an audio window and run
+/// the bundled level analyzer out of process.
+pub(crate) struct AnalyzeAudioArgs<'a> {
+    pub(crate) asset: u32,
+    pub(crate) start: Option<&'a str>,
+    pub(crate) duration: Option<&'a str>,
+    pub(crate) window: Option<&'a str>,
+    pub(crate) sample_rate: Option<u32>,
+    pub(crate) channels: Option<u16>,
+}
+
+pub(crate) fn cmd_analyze_audio(project_path: &Path, args: AnalyzeAudioArgs<'_>) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let (spec, window_samples) = audio_spec(
+        &project,
+        args.asset,
+        args.start,
+        args.duration,
+        args.window,
+        args.sample_rate,
+        args.channels,
+    )?;
+    let cache = SampleCache::new(analysis::sample_cache_dir(project_path));
+    let (_sample, entry) = cache.audio_entry(&spec)?;
+    let stage = analysis::StageDir::create(cache.root())?;
+    let store = ProductStore::at(project_path);
+    let hash = analysis::run_sidecar(
+        analysis::SampleRequest::Audio(&spec),
+        &entry,
+        &stage,
+        &store,
+        &analysis::Task::AudioLevels { window_samples },
+        &analysis::Analyzer::Bundled,
     )?;
     let product: AnalysisProduct = store.load(&hash)?;
     product
@@ -167,6 +209,99 @@ fn resolve_analyzer(path: Option<&Path>) -> Result<analysis::Analyzer> {
         bail!("analyzer path must be absolute: {}", selected.display());
     }
     Ok(analysis::Analyzer::External(selected))
+}
+
+/// Resolve the audio window and its window length in samples per channel.
+///
+/// Rate and channels default to the asset's own audio stream (48 kHz mono when
+/// the probe does not say), so a caller gets a sample at the media's rate
+/// without repeating the probe; `--sample-rate`/`--channels` override.
+fn audio_spec(
+    project: &Project,
+    asset: u32,
+    start: Option<&str>,
+    duration: Option<&str>,
+    window: Option<&str>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+) -> Result<(AudioSpec, u64)> {
+    let media = project
+        .asset(asset)
+        .with_context(|| format!("asset #{asset} is not in the media pool"))?;
+    if !media.probe.has_audio() {
+        bail!("asset #{asset} has no audio stream to sample");
+    }
+    let start = match start {
+        Some(value) => parse_cli_time(value, "--start")?,
+        None => Seconds::from_integer(0),
+    };
+    let duration = match duration {
+        Some(value) => parse_cli_time(value, "--duration")?,
+        None => {
+            let asset_duration = media.duration().with_context(|| {
+                format!("asset #{asset} has no probed duration; pass --duration")
+            })?;
+            default_duration(asset_duration, start)?
+        }
+    };
+    if duration <= Seconds::from_integer(0) {
+        bail!(BAD_WINDOW);
+    }
+    let stream = media.probe.audio();
+    let sample_rate = match sample_rate {
+        Some(rate) => rate,
+        None => stream
+            .and_then(|audio| audio.sample_rate.as_deref())
+            .and_then(|rate| rate.parse::<u32>().ok())
+            .filter(|rate| *rate > 0)
+            .unwrap_or(48_000),
+    };
+    if sample_rate == 0 {
+        bail!("--sample-rate must be non-zero");
+    }
+    let channels = match channels {
+        Some(channels) => channels,
+        None => stream
+            .and_then(|audio| audio.channels)
+            .and_then(|channels| u16::try_from(channels).ok())
+            .filter(|channels| *channels > 0)
+            .unwrap_or(1),
+    };
+    if channels == 0 {
+        bail!("--channels must be non-zero");
+    }
+    let window = match window {
+        Some(value) => parse_cli_time(value, "--window")?,
+        None => Seconds::new(1, 10),
+    };
+    if window <= Seconds::from_integer(0) {
+        bail!("--window must be positive");
+    }
+    let window_samples = floor_samples(window, sample_rate);
+    if window_samples == 0 {
+        bail!("--window is shorter than one sample at {sample_rate} Hz");
+    }
+    Ok((
+        AudioSpec {
+            source: media.path.clone(),
+            start,
+            duration,
+            sample_rate,
+            channels,
+        },
+        window_samples,
+    ))
+}
+
+/// `floor(window × sample_rate)` in exact integers: a window is a whole number
+/// of samples, never a rounded-up one that would overrun the payload.
+fn floor_samples(window: Seconds, sample_rate: u32) -> u64 {
+    let numerator = i128::from(*window.numer()) * i128::from(sample_rate);
+    let denominator = i128::from(*window.denom());
+    if numerator <= 0 || denominator <= 0 {
+        return 0;
+    }
+    (numerator / denominator).min(u64::MAX as i128) as u64
 }
 
 /// Resolve the shared source window into the grid the sampler will pack.

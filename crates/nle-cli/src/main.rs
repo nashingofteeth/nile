@@ -895,6 +895,27 @@ enum AnalysisCmd {
         #[arg(long)]
         height: Option<u32>,
     },
+    /// Sample an asset's audio and run the bundled level analyzer
+    AnalyzeAudio {
+        /// Asset id (from `nile media ls`)
+        #[arg(long)]
+        asset: u32,
+        /// Source start (seconds or timecode; default 0)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        start: Option<String>,
+        /// Source window length (default: from --start to the asset's end)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        duration: Option<String>,
+        /// RMS/peak window length in seconds (default 0.1)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        window: Option<String>,
+        /// Sample rate (default: the asset's audio stream, else 48000)
+        #[arg(long, value_name = "RATE")]
+        sample_rate: Option<u32>,
+        /// Channels (default: the asset's audio stream, else 1)
+        #[arg(long, value_name = "N")]
+        channels: Option<u16>,
+    },
     /// Sample an asset and run a subject detector, printing its a1-… product
     Detect {
         /// Asset id (from `nile media ls`)
@@ -1158,6 +1179,29 @@ fn main() -> Result<()> {
                     json,
                 },
         } => return cmd_annotation_check(&project, report, *sequence, id, *json),
+        Cmd::Analysis {
+            action:
+                AnalysisCmd::AnalyzeAudio {
+                    asset,
+                    start,
+                    duration,
+                    window,
+                    sample_rate,
+                    channels,
+                },
+        } => {
+            return cmd::analysis::cmd_analyze_audio(
+                &project,
+                cmd::analysis::AnalyzeAudioArgs {
+                    asset: *asset,
+                    start: start.as_deref(),
+                    duration: duration.as_deref(),
+                    window: window.as_deref(),
+                    sample_rate: *sample_rate,
+                    channels: *channels,
+                },
+            );
+        }
         Cmd::Analysis {
             action:
                 AnalysisCmd::Detect {
