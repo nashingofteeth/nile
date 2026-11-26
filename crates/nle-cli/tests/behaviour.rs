@@ -23,6 +23,26 @@ fn baseline_export() {
 }
 
 #[test]
+fn a_relative_export_name_with_a_colon_renders() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6
+
+    // `--` stops option parsing, not ffmpeg's URL parser: a relative name
+    // whose first component has `:` (`a:b.mp4`) reads as protocol `a`. The
+    // argv helper renders it `./a:b.mp4`, so the file lands where asked.
+    s.ok(&["export", "-o", "a:b.mp4"]);
+    let exported = s.file("a:b.mp4").display().to_string();
+    s.assert_dur(&exported, 6.0, "6 s");
+
+    // `nile trim` builds its argv through the same helper.
+    s.ok(&[
+        "trim", "red.mp4", "--in", "0", "--out", "1", "-o", "t:c.mp4",
+    ]);
+    let trimmed = s.file("t:c.mp4").display().to_string();
+    s.assert_dur(&trimmed, 1.0, "1 s");
+}
+
+#[test]
 fn two_sequences_export_at_their_own_sizes() {
     let s = Sandbox::new();
     s.base(); // sequence 1: 320x240, three clips
