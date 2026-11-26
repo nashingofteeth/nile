@@ -25,12 +25,15 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use nle_core::Seconds;
 use nle_core::analysis::{
     AnalysisProduct, AnalyzerInfo, ProductResult, ProductSample, ProductStore, SourceSignature,
 };
-use nle_ffmpeg::sampling::{FrameSpec, SAMPLE_VERSION, SampleData, SampleEntry, SampleMeta};
+use nle_ffmpeg::sampling::{
+    FrameMode, FrameSpec, MAX_SAMPLE_BYTES, SAMPLE_VERSION, SampleData, SampleEntry, SampleMeta,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
@@ -45,10 +48,10 @@ pub(crate) const MAX_CONTROL_LINE: usize = 1024 * 1024;
 /// The host's default cap for one staged product.
 pub(crate) const DEFAULT_MAX_PRODUCT_BYTES: u64 = 256 * 1024 * 1024;
 
-/// The host's sample budget until the sampler grows its own byte/frame caps.
-/// A single packed sample is buffered in memory, so the window and geometry
-/// are checked here, before ffmpeg runs.
-pub(crate) const MAX_SAMPLE_BYTES: u64 = 256 * 1024 * 1024;
+/// The host's sample budget. The sampler now has its own byte/frame caps;
+/// this keeps the CLI's refusal message before the cache and ffmpeg are
+/// touched, and is the same number so the two cannot drift.
+pub(crate) const MAX_SAMPLE_BUDGET: u64 = MAX_SAMPLE_BYTES;
 
 /// The one file an analyzer may report and the host may adopt.
 const PRODUCT_FILE: &str = "product.json";
@@ -138,6 +141,102 @@ pub(crate) fn sample_cache_dir(project_path: &Path) -> PathBuf {
     nle_core::state::cache_dir(project_path).join("analysis")
 }
 
+/// Prune this project's packed samples and stale per-run staging directories.
+///
+/// A staging directory is named `<pid>-<seq>` and only ever holds a child's
+/// throwaway output. [`StageDir`] removes its own run, but a killed host leaves
+/// one behind; this sweep is the only other remover. `analysis/products/` is
+/// state, not cache (`cache/analysis` and `analysis/` are siblings), so it is
+/// never reached from here.
+pub(crate) fn prune(
+    project_path: &Path,
+    max_age: Duration,
+    dry_run: bool,
+) -> Result<crate::proxy::PruneReport, crate::proxy::ProxyError> {
+    let dir = sample_cache_dir(project_path);
+    let now = SystemTime::now();
+    let mut report = crate::proxy::prune_at(&dir, max_age, now, dry_run)?;
+    prune_staging(&dir.join("staging"), max_age, now, dry_run, &mut report)?;
+    Ok(report)
+}
+
+/// Sweep `staging/<pid>-<seq>/` directories older than `max_age`. Only that
+/// exact shape is a candidate: a name a future caller puts there is not ours.
+fn prune_staging(
+    staging: &Path,
+    max_age: Duration,
+    now: SystemTime,
+    dry_run: bool,
+    report: &mut crate::proxy::PruneReport,
+) -> Result<(), crate::proxy::ProxyError> {
+    let entries = match std::fs::read_dir(staging) {
+        Ok(entries) => entries,
+        // No staging directory yet is not an error: nothing to prune.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_stage_name(name) {
+            continue;
+        }
+        // `symlink_metadata`: a link named like a stage must not be followed.
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !meta.file_type().is_dir() {
+            continue;
+        }
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .unwrap_or_default();
+        let bytes = dir_size(&entry.path());
+        if age <= max_age {
+            report.kept += 1;
+            report.kept_bytes += bytes;
+            continue;
+        }
+        if !dry_run && std::fs::remove_dir_all(entry.path()).is_err() {
+            report.failed += 1;
+            continue;
+        }
+        report.removed += 1;
+        report.bytes += bytes;
+    }
+    Ok(())
+}
+
+/// `<pid>-<seq>`, exactly what [`StageDir::create`] makes: two non-empty
+/// decimal numbers and one hyphen.
+fn is_stage_name(name: &str) -> bool {
+    let Some((pid, seq)) = name.split_once('-') else {
+        return false;
+    };
+    !pid.is_empty()
+        && !seq.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && seq.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Bytes a staging directory occupies. Plain files only, and never through a
+/// symlink: a link is not this run's output.
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta = std::fs::symlink_metadata(entry.path()).ok()?;
+            meta.file_type().is_file().then_some(meta.len())
+        })
+        .sum()
+}
+
 /// Refuse a sample whose packed payload cannot fit the host's memory budget.
 ///
 /// This is deliberately checked before
@@ -157,9 +256,9 @@ pub(crate) fn check_sample_budget(spec: &FrameSpec) -> Result<(), SidecarError> 
             "the window is shorter than one frame at this fps".to_string(),
         ));
     }
-    if bytes > MAX_SAMPLE_BYTES {
+    if bytes > MAX_SAMPLE_BUDGET {
         return Err(SidecarError::RequestTooLarge(format!(
-            "{frames} frames at {}×{} need {bytes} bytes (limit {MAX_SAMPLE_BYTES})",
+            "{frames} frames at {}×{} need {bytes} bytes (limit {MAX_SAMPLE_BUDGET})",
             spec.width, spec.height
         )));
     }
@@ -287,6 +386,7 @@ fn converse(
     let data = wire_path(entry.data_path())?;
     let meta = wire_path(entry.meta_path())?;
     let stage_wire = wire_path(stage)?;
+    let request = wire_request(spec);
     write_control(
         &mut stdin,
         &Analyze {
@@ -298,14 +398,7 @@ fn converse(
                 data: &data,
                 meta: &meta,
             },
-            request: GridRequest {
-                mode: "grid",
-                start: rational(&spec.start),
-                duration: rational(&spec.duration),
-                fps: rational(&spec.fps),
-                width: spec.width,
-                height: spec.height,
-            },
+            request,
             stage: &stage_wire,
             limits: Limits {
                 max_product_bytes: DEFAULT_MAX_PRODUCT_BYTES,
@@ -686,7 +779,7 @@ struct AnalyzeRequest {
     #[allow(dead_code)]
     method: String,
     input: InputRefOwned,
-    request: GridRequestIn,
+    request: FrameRequestIn,
     stage: String,
     limits: LimitsIn,
 }
@@ -700,13 +793,23 @@ struct InputRefOwned {
     meta: String,
 }
 
+/// The wire DTO: stringly and permissive so the tag can be read first. The
+/// typed [`FrameRequest`] is what the rest of the analyzer sees, so a mode
+/// cannot carry fields it does not use.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GridRequestIn {
+struct FrameRequestIn {
     mode: String,
-    start: String,
-    duration: String,
-    fps: String,
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    duration: Option<String>,
+    #[serde(default)]
+    fps: Option<String>,
+    #[serde(default)]
+    rate: Option<String>,
+    #[serde(default)]
+    indices: Option<Vec<u64>>,
     width: u32,
     height: u32,
 }
@@ -718,54 +821,70 @@ struct LimitsIn {
 }
 
 #[derive(Debug)]
-struct Grid {
-    duration: Seconds,
-    fps: Seconds,
+struct FrameRequest {
+    mode: FrameMode,
     width: u32,
     height: u32,
 }
 
-impl Grid {
-    fn parse(request: &GridRequestIn) -> Result<Self, SidecarError> {
-        if request.mode != "grid" {
-            return Err(SidecarError::Unsupported(format!(
-                "mode {:?} (this analyzer samples a grid)",
-                request.mode
-            )));
-        }
-        let start = parse_rational(&request.start, "start")?;
-        let duration = parse_rational(&request.duration, "duration")?;
-        let fps = parse_rational(&request.fps, "fps")?;
-        if start < Seconds::from_integer(0) {
-            return Err(SidecarError::BadRequest(
-                "start must not be negative".to_string(),
-            ));
-        }
-        if duration <= Seconds::from_integer(0) {
-            return Err(SidecarError::BadRequest(
-                "duration must be positive".to_string(),
-            ));
-        }
-        if fps <= Seconds::from_integer(0) {
-            return Err(SidecarError::BadRequest("fps must be positive".to_string()));
-        }
+impl FrameRequest {
+    fn parse(request: &FrameRequestIn) -> Result<Self, SidecarError> {
+        let mode = match request.mode.as_str() {
+            "grid" => {
+                if request.rate.is_some() || request.indices.is_some() {
+                    return Err(SidecarError::BadRequest(
+                        "a grid request must not carry rate/indices".to_string(),
+                    ));
+                }
+                let mode = FrameMode::Grid {
+                    start: parse_rational(required(&request.start, "start")?, "start")?,
+                    duration: parse_rational(required(&request.duration, "duration")?, "duration")?,
+                    fps: parse_rational(required(&request.fps, "fps")?, "fps")?,
+                };
+                mode.validate()
+                    .map_err(|error| SidecarError::BadRequest(error.to_string()))?;
+                mode
+            }
+            "indices" => {
+                if request.start.is_some() || request.duration.is_some() || request.fps.is_some() {
+                    return Err(SidecarError::BadRequest(
+                        "an index request derives its window from rate/indices".to_string(),
+                    ));
+                }
+                let indices = request.indices.clone().ok_or_else(|| {
+                    SidecarError::BadRequest("indices is required for an index request".to_string())
+                })?;
+                let mode = FrameMode::Indices {
+                    rate: parse_rational(required(&request.rate, "rate")?, "rate")?,
+                    indices,
+                };
+                mode.validate()
+                    .map_err(|error| SidecarError::BadRequest(error.to_string()))?;
+                mode
+            }
+            other => {
+                return Err(SidecarError::Unsupported(format!(
+                    "mode {other:?} (this analyzer samples a grid or exact source indices)"
+                )));
+            }
+        };
         if request.width == 0 || request.height == 0 {
             return Err(SidecarError::BadRequest(
                 "width and height must be non-zero".to_string(),
             ));
         }
         Ok(Self {
-            duration,
-            fps,
+            mode,
             width: request.width,
             height: request.height,
         })
     }
+}
 
-    /// `floor(duration × fps)` in exact integers, matching the sampler.
-    fn frame_count(&self) -> u64 {
-        floor_product(self.duration, self.fps)
-    }
+fn required<'a>(value: &'a Option<String>, what: &str) -> Result<&'a str, SidecarError> {
+    value
+        .as_deref()
+        .ok_or_else(|| SidecarError::BadRequest(format!("{what} is required for this mode")))
 }
 
 fn parse_rational(value: &str, what: &str) -> Result<Seconds, SidecarError> {
@@ -788,15 +907,6 @@ fn parse_rational(value: &str, what: &str) -> Result<Seconds, SidecarError> {
     Ok(Seconds::new(numerator, denominator))
 }
 
-fn floor_product(a: Seconds, b: Seconds) -> u64 {
-    let numerator = *a.numer() as i128 * *b.numer() as i128;
-    let denominator = *a.denom() as i128 * *b.denom() as i128;
-    if numerator <= 0 || denominator <= 0 {
-        return 0;
-    }
-    (numerator / denominator).min(u64::MAX as i128) as u64
-}
-
 fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarError> {
     if request.input.kind != "frames" {
         return Err(SidecarError::Unsupported(format!(
@@ -812,7 +922,7 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
     let meta_path = require_absolute(&request.input.meta, "meta")?;
     let data_path = require_absolute(&request.input.data, "data")?;
     let stage = require_absolute(&request.stage, "stage")?;
-    let grid = Grid::parse(&request.request)?;
+    let requested = FrameRequest::parse(&request.request)?;
 
     // Metadata first: it is authoritative for shape, the request is the
     // window. A disagreement is corrupt input, not a shorter sample.
@@ -835,22 +945,66 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
         width,
         height,
         frames,
+        times,
+        indices,
     } = &meta.data
     else {
         return Err(SidecarError::Unsupported(
             "audio samples are not mean-luma input".to_string(),
         ));
     };
-    if *width != grid.width || *height != grid.height {
+    if *width != requested.width || *height != requested.height {
         return Err(SidecarError::CorruptInput(format!(
             "metadata is {width}×{height}, request is {}×{}",
-            grid.width, grid.height
+            requested.width, requested.height
         )));
     }
-    let wanted = grid.frame_count();
+    let wanted = requested.mode.frame_count();
     if *frames == 0 || *frames > wanted {
         return Err(SidecarError::CorruptInput(format!(
             "metadata has {frames} frames, request allows at most {wanted}"
+        )));
+    }
+    // Times and source indices must be the ones the request names; a sample
+    // from another clock is not the one this product would describe.
+    let expected_times = requested
+        .mode
+        .times(*frames as usize)
+        .ok_or_else(|| SidecarError::CorruptInput("frame times overflow".to_string()))?;
+    if *times != expected_times {
+        return Err(SidecarError::CorruptInput(
+            "metadata frame times disagree with the request".to_string(),
+        ));
+    }
+    match &requested.mode {
+        FrameMode::Grid { .. } => {
+            if indices.is_some() {
+                return Err(SidecarError::CorruptInput(
+                    "a grid sample records source frame indices".to_string(),
+                ));
+            }
+        }
+        FrameMode::Indices {
+            indices: requested_indices,
+            ..
+        } => {
+            if *frames as usize != requested_indices.len() {
+                return Err(SidecarError::CorruptInput(format!(
+                    "metadata packs {frames} of {} requested frames",
+                    requested_indices.len()
+                )));
+            }
+            if indices.as_deref() != Some(requested_indices.as_slice()) {
+                return Err(SidecarError::CorruptInput(
+                    "metadata source indices disagree with the request".to_string(),
+                ));
+            }
+        }
+    }
+    if meta.bytes > MAX_SAMPLE_BYTES {
+        return Err(SidecarError::CorruptInput(format!(
+            "the sample is {} bytes (limit {MAX_SAMPLE_BYTES})",
+            meta.bytes
         )));
     }
     let stride = (*width as u64)
@@ -997,9 +1151,52 @@ struct Analyze<'a> {
     id: u64,
     method: &'a str,
     input: InputRef<'a>,
-    request: GridRequest,
+    request: FrameRequestRef<'a>,
     stage: &'a str,
     limits: Limits,
+}
+
+/// The window on the wire, tagged by mode. A grid carries its own clock; an
+/// index request carries the source rate and frame numbers, so the analyzer
+/// can derive the same times the sampler recorded.
+#[derive(Debug, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum FrameRequestRef<'a> {
+    Grid {
+        start: String,
+        duration: String,
+        fps: String,
+        width: u32,
+        height: u32,
+    },
+    Indices {
+        rate: String,
+        indices: &'a [u64],
+        width: u32,
+        height: u32,
+    },
+}
+
+fn wire_request(spec: &FrameSpec) -> FrameRequestRef<'_> {
+    match &spec.mode {
+        FrameMode::Grid {
+            start,
+            duration,
+            fps,
+        } => FrameRequestRef::Grid {
+            start: rational(start),
+            duration: rational(duration),
+            fps: rational(fps),
+            width: spec.width,
+            height: spec.height,
+        },
+        FrameMode::Indices { rate, indices } => FrameRequestRef::Indices {
+            rate: rational(rate),
+            indices,
+            width: spec.width,
+            height: spec.height,
+        },
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1008,16 +1205,6 @@ struct InputRef<'a> {
     sample: &'a str,
     data: &'a str,
     meta: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct GridRequest {
-    mode: &'static str,
-    start: String,
-    duration: String,
-    fps: String,
-    width: u32,
-    height: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1259,29 +1446,62 @@ mod tests {
     }
 
     #[test]
-    fn the_analyzer_cross_checks_the_window_and_metadata() {
-        let grid = Grid::parse(&GridRequestIn {
+    fn the_analyzer_parses_grid_and_index_requests() {
+        let grid = FrameRequest::parse(&FrameRequestIn {
             mode: "grid".to_string(),
-            start: "0/1".to_string(),
-            duration: "1/2".to_string(),
-            fps: "2/1".to_string(),
+            start: Some("0/1".to_string()),
+            duration: Some("1/2".to_string()),
+            fps: Some("2/1".to_string()),
+            rate: None,
+            indices: None,
             width: 32,
             height: 24,
         })
         .unwrap();
-        assert_eq!(grid.frame_count(), 1);
-        assert_eq!(grid.duration, Seconds::new(1, 2));
+        assert_eq!(grid.mode.frame_count(), 1);
+        assert_eq!(grid.mode.time(0), Some(Seconds::from_integer(0)));
 
-        let error = Grid::parse(&GridRequestIn {
+        let index = FrameRequest::parse(&FrameRequestIn {
+            mode: "indices".to_string(),
+            start: None,
+            duration: None,
+            fps: None,
+            rate: Some("30000/1001".to_string()),
+            indices: Some(vec![0, 7]),
+            width: 16,
+            height: 12,
+        })
+        .unwrap();
+        assert_eq!(index.mode.frame_count(), 2);
+        assert_eq!(index.mode.time(1), Some(Seconds::new(7 * 1001, 30_000)));
+        assert_eq!(index.mode.indices(), Some([0, 7].as_slice()));
+
+        // A mode cannot carry the other mode's fields.
+        let error = FrameRequest::parse(&FrameRequestIn {
             mode: "grid".to_string(),
-            start: "-1/1".to_string(),
-            duration: "1/2".to_string(),
-            fps: "2/1".to_string(),
+            start: Some("0/1".to_string()),
+            duration: Some("1/1".to_string()),
+            fps: Some("2/1".to_string()),
+            rate: Some("30/1".to_string()),
+            indices: None,
+            width: 4,
+            height: 4,
+        })
+        .unwrap_err();
+        assert!(matches!(error, SidecarError::BadRequest(_)), "{error:?}");
+
+        let error = FrameRequest::parse(&FrameRequestIn {
+            mode: "grid".to_string(),
+            start: Some("-1/1".to_string()),
+            duration: Some("1/2".to_string()),
+            fps: Some("2/1".to_string()),
+            rate: None,
+            indices: None,
             width: 32,
             height: 24,
         })
         .unwrap_err();
-        assert!(matches!(error, SidecarError::BadRequest(_)));
+        assert!(matches!(error, SidecarError::BadRequest(_)), "{error:?}");
     }
 
     #[test]
@@ -1323,29 +1543,20 @@ mod tests {
                 luma_milli: vec![1, 2],
             },
         };
-        let error = require_one_result_per_frame(
-            &product,
-            &SampleData::Frames {
-                width: 32,
-                height: 24,
-                frames: 3,
-            },
-        )
-        .unwrap_err();
+        let frames = |count: u64| SampleData::Frames {
+            width: 32,
+            height: 24,
+            frames: count,
+            times: (0..count)
+                .map(|index| Seconds::new(index as i64, 5))
+                .collect(),
+            indices: None,
+        };
+        let error = require_one_result_per_frame(&product, &frames(3)).unwrap_err();
         assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
         assert!(error.to_string().contains("2 frame results"), "{error}");
 
-        assert!(
-            require_one_result_per_frame(
-                &product,
-                &SampleData::Frames {
-                    width: 32,
-                    height: 24,
-                    frames: 2,
-                },
-            )
-            .is_ok()
-        );
+        assert!(require_one_result_per_frame(&product, &frames(2)).is_ok());
 
         let error = require_one_result_per_frame(
             &product,
@@ -1360,12 +1571,148 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_request_names_the_mode_and_its_fields() {
+        let grid_spec = FrameSpec {
+            source: PathBuf::from("/media/x.mp4"),
+            mode: FrameMode::Grid {
+                start: Seconds::from_integer(0),
+                duration: Seconds::from_integer(1),
+                fps: Seconds::from_integer(2),
+            },
+            width: 32,
+            height: 24,
+        };
+        let grid = wire_request(&grid_spec);
+        let json = serde_json::to_value(&grid).unwrap();
+        assert_eq!(json["mode"], "grid");
+        assert_eq!(json["fps"], "2/1");
+        assert_eq!(json["width"], 32);
+        assert!(json.get("rate").is_none(), "{json}");
+
+        let index_spec = FrameSpec {
+            source: PathBuf::from("/media/x.mp4"),
+            mode: FrameMode::Indices {
+                rate: Seconds::new(30_000, 1001),
+                indices: vec![0, 7],
+            },
+            width: 16,
+            height: 12,
+        };
+        let index = wire_request(&index_spec);
+        let json = serde_json::to_value(&index).unwrap();
+        assert_eq!(json["mode"], "indices");
+        assert_eq!(json["rate"], "30000/1001");
+        assert_eq!(json["indices"], serde_json::json!([0, 7]));
+        assert!(json.get("start").is_none(), "{json}");
+    }
+
+    /// The analyzer trusts `meta` for shape but re-derives the times and
+    /// indices from the request: a sample from another clock is refused.
+    #[test]
+    fn the_analyzer_cross_checks_times_and_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let data = dir.path().join("sample.raw");
+        // Two 1×1 frames: black, white.
+        std::fs::write(&data, [0, 0, 0, 255, 255, 255]).unwrap();
+        let meta_path = dir.path().join("sample.json");
+        let write_meta = |times: Vec<Seconds>, indices: Option<Vec<u64>>| {
+            let meta = SampleMeta {
+                version: SAMPLE_VERSION,
+                params: "fedcba9876543210".to_string(),
+                source: "/media/x.mp4".to_string(),
+                source_arg: "/media/x.mp4".to_string(),
+                source_size: 1,
+                source_mtime_secs: 2,
+                source_mtime_nanos: 3,
+                key: "0123456789abcdef".to_string(),
+                bytes: 6,
+                data: SampleData::Frames {
+                    width: 1,
+                    height: 1,
+                    frames: 2,
+                    times,
+                    indices,
+                },
+            };
+            std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        };
+        let request = |indices: Option<Vec<u64>>| AnalyzeRequest {
+            id: 2,
+            method: "analyze".to_string(),
+            input: InputRefOwned {
+                kind: "frames".to_string(),
+                sample: "0123456789abcdef".to_string(),
+                data: data.display().to_string(),
+                meta: meta_path.display().to_string(),
+            },
+            request: FrameRequestIn {
+                mode: if indices.is_some() {
+                    "indices".to_string()
+                } else {
+                    "grid".to_string()
+                },
+                start: indices.is_none().then(|| "0/1".to_string()),
+                duration: indices.is_none().then(|| "2/1".to_string()),
+                fps: indices.is_none().then(|| "1/1".to_string()),
+                rate: indices.as_ref().map(|_| "1/1".to_string()),
+                indices,
+                width: 1,
+                height: 1,
+            },
+            stage: stage.display().to_string(),
+            limits: LimitsIn {
+                max_product_bytes: DEFAULT_MAX_PRODUCT_BYTES,
+            },
+        };
+
+        write_meta(
+            vec![Seconds::from_integer(0), Seconds::from_integer(1)],
+            None,
+        );
+        let product = analyze_request(&request(None)).unwrap();
+        assert_eq!(
+            product.result,
+            ProductResult::MeanLuma {
+                luma_milli: vec![0, 255_000]
+            }
+        );
+
+        // A recorded time that the request does not derive is corrupt input.
+        write_meta(
+            vec![Seconds::from_integer(0), Seconds::from_integer(2)],
+            None,
+        );
+        let error = analyze_request(&request(None)).unwrap_err();
+        assert!(matches!(error, SidecarError::CorruptInput(_)), "{error:?}");
+        assert!(error.to_string().contains("times"), "{error}");
+
+        // An index request with matching metadata works, and one missing an
+        // index is refused rather than read as a shorter sample.
+        write_meta(
+            vec![Seconds::from_integer(0), Seconds::from_integer(1)],
+            Some(vec![0, 1]),
+        );
+        assert!(analyze_request(&request(Some(vec![0, 1]))).is_ok());
+        assert!(analyze_request(&request(Some(vec![0, 2]))).is_err());
+        write_meta(
+            vec![Seconds::from_integer(0), Seconds::from_integer(1)],
+            None,
+        );
+        let error = analyze_request(&request(Some(vec![0, 1]))).unwrap_err();
+        assert!(matches!(error, SidecarError::CorruptInput(_)), "{error:?}");
+    }
+
+    #[test]
     fn a_budget_refuses_an_oversized_window_before_sampling() {
         let spec = FrameSpec {
             source: PathBuf::from("/media/clip.mp4"),
-            start: Seconds::from_integer(0),
-            duration: Seconds::from_integer(600),
-            fps: Seconds::from_integer(30),
+            mode: FrameMode::Grid {
+                start: Seconds::from_integer(0),
+                duration: Seconds::from_integer(600),
+                fps: Seconds::from_integer(30),
+            },
             width: 4096,
             height: 4096,
         };
@@ -1376,5 +1723,83 @@ mod tests {
         );
         // The error names the cap, not a raw allocation failure.
         assert!(error.to_string().contains("limit"), "{error}");
+    }
+
+    #[test]
+    fn stage_names_are_pid_hyphen_sequence() {
+        for good in ["1-0", "1234-17", "9-99999999999999999999"] {
+            assert!(is_stage_name(good), "{good}");
+        }
+        for bad in ["", "1", "1-", "-1", "a-1", "1-b", "1-2-3", "1_2", "notes"] {
+            assert!(!is_stage_name(bad), "{bad:?}");
+        }
+    }
+
+    /// `cache prune` reports and removes old samples and stale staging
+    /// directories, keeps young ones, and never reaches `analysis/products/`.
+    #[test]
+    fn prune_removes_old_samples_and_staging_but_never_products() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("nile.json");
+        std::fs::write(&project, b"{}").unwrap();
+        let cache = sample_cache_dir(&project);
+        std::fs::create_dir_all(&cache).unwrap();
+        let now = SystemTime::now();
+        let old = Duration::from_secs(31 * 24 * 3600);
+        let young = Duration::from_secs(3600);
+        let write = |name: &str, len: usize, age: Duration| {
+            let path = cache.join(name);
+            std::fs::write(&path, vec![0u8; len]).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(now - age))
+                .unwrap();
+        };
+        write("0123456789abcdef.raw", 10, old);
+        write("0123456789abcdef.json", 5, old);
+        write("0123456789abcdef.tmp-7-3.raw", 4, old);
+        write("fedcba9876543210.raw", 6, young);
+
+        let staging = cache.join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let stage = |name: &str, payload: usize, age: Duration| {
+            let path = staging.join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join(PRODUCT_FILE), vec![0u8; payload]).unwrap();
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(now - age))
+                .unwrap();
+        };
+        stage("1234-0", 7, old);
+        stage("1234-1", 3, young);
+        // Not a stage name: a deliberate bystander survives.
+        stage("notes", 9, old);
+
+        // Products are state, under `analysis/`, not under `cache/`.
+        let products = nle_core::state::state_dir(&project).join("analysis/products");
+        std::fs::create_dir_all(&products).unwrap();
+        let product = products.join("a1-0123456789abcdef");
+        std::fs::write(&product, b"product").unwrap();
+
+        let report = prune(&project, Duration::from_secs(30 * 24 * 3600), true).unwrap();
+        assert_eq!((report.removed, report.kept), (4, 2), "{report:?}");
+        assert_eq!(report.bytes, 10 + 5 + 4 + 7);
+        assert_eq!(report.kept_bytes, 6 + 3);
+        assert!(cache.join("0123456789abcdef.raw").exists(), "dry run");
+        assert!(staging.join("1234-0").is_dir(), "dry run");
+
+        let report = prune(&project, Duration::from_secs(30 * 24 * 3600), false).unwrap();
+        assert_eq!((report.removed, report.kept), (4, 2), "{report:?}");
+        assert!(!cache.join("0123456789abcdef.raw").exists());
+        assert!(!cache.join("0123456789abcdef.json").exists());
+        assert!(!cache.join("0123456789abcdef.tmp-7-3.raw").exists());
+        assert!(!staging.join("1234-0").exists(), "stale staging removed");
+        assert!(cache.join("fedcba9876543210.raw").exists(), "young kept");
+        assert!(staging.join("1234-1").is_dir(), "young staging kept");
+        assert!(staging.join("notes").is_dir(), "not a staging directory");
+        assert!(product.exists(), "analysis/products is never pruned");
     }
 }
