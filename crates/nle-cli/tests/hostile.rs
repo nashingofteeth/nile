@@ -483,6 +483,16 @@ fn tracks_and_pool() {
 #[test]
 fn odd_media() {
     let s = Sandbox::new();
+    s.write(
+        "bad.edl",
+        "TITLE: bad\nFCM: NON-DROP FRAME\n\n001 AX V C 00:00:00:00 nope\n",
+    );
+    s.write(
+        "unknown.edl",
+        "TITLE: unknown\nFCM: NON-DROP FRAME\n\n\
+         001  AX  X  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n",
+    );
+    s.write("bad.otio", "not json");
     run(
         &s,
         &[
@@ -553,6 +563,41 @@ fn odd_media() {
             (
                 "import-otio an empty group part",
                 &[&["import-otio", "nope.otio", "--group", "CAM=a,,b"]],
+            ),
+            (
+                "import-edl append a malformed EDL",
+                &[&["import-edl", "bad.edl", "--media", ".", "--append"]],
+            ),
+            (
+                "import-edl append an unknown channel",
+                &[&["import-edl", "unknown.edl", "--media", ".", "--append"]],
+            ),
+            (
+                "import-edl append --track 0",
+                &[&[
+                    "import-edl",
+                    "unknown.edl",
+                    "--media",
+                    ".",
+                    "--append",
+                    "--track",
+                    "0",
+                ]],
+            ),
+            (
+                "import-edl append and force",
+                &[&[
+                    "import-edl",
+                    "unknown.edl",
+                    "--media",
+                    ".",
+                    "--append",
+                    "--force",
+                ]],
+            ),
+            (
+                "import-otio append malformed JSON",
+                &[&["import-otio", "bad.otio", "--append"]],
             ),
             (
                 "annotation add a missing asset",
@@ -785,6 +830,35 @@ fn odd_media() {
             ),
         ],
     );
+}
+
+#[test]
+fn import_append_requires_an_existing_project() {
+    let s = Sandbox::new();
+    s.write(
+        "e.edl",
+        "TITLE: e\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    s.write(
+        "e.otio",
+        r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [] } }"#,
+    );
+    for argv in [
+        &["import-edl", "e.edl", "--media", ".", "--append"][..],
+        &["import-otio", "e.otio", "--append"][..],
+    ] {
+        let out = s.run_on("missing.json", argv);
+        let text = merged(&out);
+        assert!(!text.contains("panicked"), "{argv:?}:\n{text}");
+        assert_eq!(out.status.code(), Some(1), "{argv:?}:\n{text}");
+        assert!(
+            text.contains("--append needs an existing project"),
+            "{argv:?}:\n{text}"
+        );
+        assert!(!s.file("missing.json").exists(), "no project was written");
+    }
 }
 
 #[test]

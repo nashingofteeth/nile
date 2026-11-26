@@ -164,6 +164,18 @@ impl Sandbox {
         self.seed(sequence_template());
     }
 
+    /// [`Sandbox::base`] with the pool pointing at this sandbox's own copies
+    /// (the shared template's paths are the media cache). An import with
+    /// `--media .` then finds the same paths instead of duplicates with the
+    /// same file name, which the pool deliberately treats as ambiguous.
+    pub fn local_base(&self) {
+        self.ok(&["init"]);
+        self.ok(&["import", "red.mp4", "green.mp4", "blue.mp4"]);
+        self.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+        self.ok(&["add", "green.mp4", "--at", "2", "--in", "0", "--out", "2"]);
+        self.ok(&["add", "blue.mp4", "--at", "4", "--in", "0", "--out", "2"]);
+    }
+
     /// The hostile battery's base: red 0–3, gap 3–4, blue 4–7, playhead 1.5.
     pub fn hostile_base(&self) {
         self.seed(hostile_template());

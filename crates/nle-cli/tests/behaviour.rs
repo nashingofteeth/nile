@@ -2317,6 +2317,141 @@ fn otio_import_round_trip() {
     s.assert_dur("otio.mp4", 5.0, "5 s");
 }
 
+/// `--append` adds after the current sequence end instead of replacing it.
+/// The imported record gap (event 2 starts one second late) lands after the
+/// first appended clip, so the seam and the gap are both visible.
+#[test]
+fn edl_import_append_after_the_timeline() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.write(
+        "extra.edl",
+        "TITLE: extra\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: blue.mp4\n\
+         002  AX  V  C  00:00:00:00 00:00:01:00 01:00:02:00 01:00:03:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    s.ok(&["import-edl", "extra.edl", "--media", ".", "--append"]);
+    // The original three clips are untouched; the import starts at 6 s, its
+    // interior record gap lands at 7–8 s.
+    assert!(s.show().contains("9 s"), "6 s + 3 s: {}", s.show());
+    s.export("edl-append.mp4");
+    s.assert_dur("edl-append.mp4", 9.0, "the timeline grew, not replaced");
+    s.assert_px("edl-append.mp4", 1.0, RED, "original event 1");
+    s.assert_px("edl-append.mp4", 3.0, GREEN, "original event 2");
+    s.assert_px("edl-append.mp4", 5.0, BLUE, "original event 3");
+    s.assert_px("edl-append.mp4", 6.5, BLUE, "appended event 1");
+    s.assert_px("edl-append.mp4", 7.5, BLACK, "the appended record gap");
+    s.assert_px("edl-append.mp4", 8.5, RED, "appended event 2");
+}
+
+/// `--append --track N` targets a video track other than the base one; the
+/// base sequence is left alone (the target is padded to the common end).
+#[test]
+fn edl_import_append_can_target_an_overlay_track() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.ok(&["track", "add", "video"]);
+    s.write(
+        "one.edl",
+        "TITLE: one\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    s.ok(&[
+        "import-edl",
+        "one.edl",
+        "--media",
+        ".",
+        "--append",
+        "--track",
+        "2",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let tracks = project["sequences"][0]["timeline"]["tracks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        tracks[0]["segments"].as_array().unwrap().len(),
+        3,
+        "the base track did not change"
+    );
+    let overlay = tracks[1]["segments"].as_array().unwrap();
+    assert_eq!(overlay.len(), 2, "padding gap + clip: {overlay:?}");
+    assert!(overlay[0].get("Gap").is_some(), "the target was padded");
+    assert!(
+        overlay[1].get("Clip").is_some(),
+        "the clip landed on track 2"
+    );
+}
+
+/// An audio-only EDL imports as the model's smallest pictureless shape: an
+/// empty base video track plus the audio track. No video clip is invented.
+#[test]
+fn edl_import_audio_only() {
+    let s = Sandbox::new();
+    s.write(
+        "audio.edl",
+        "TITLE: audio\nFCM: NON-DROP FRAME\n\n\
+         001  MU  A  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: audio_only.m4a\n\
+         002  MU  A  C  00:00:00:00 00:00:01:00 01:00:02:00 01:00:03:00\n\
+         * FROM CLIP NAME: audio_only.m4a\n",
+    );
+    s.ok(&["import-edl", "audio.edl", "--media", ".", "--fps", "30"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let tracks = project["sequences"][0]["timeline"]["tracks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(tracks.len(), 2, "empty video + audio");
+    assert_eq!(tracks[0]["kind"], "Video");
+    assert!(
+        tracks[0]["segments"].as_array().unwrap().is_empty(),
+        "no video material was invented: {}",
+        tracks[0]
+    );
+    assert_eq!(tracks[1]["kind"], "Audio");
+    let segments = tracks[1]["segments"].as_array().unwrap();
+    assert_eq!(segments.len(), 3, "clip, record gap, clip");
+    assert!(segments[0].get("Clip").is_some());
+    assert!(segments[1].get("Gap").is_some());
+    let asset = segments[0]["Clip"]["asset"].as_u64().expect("asset id");
+    let path = project["media"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"].as_u64() == Some(asset))
+        .and_then(|a| a["path"].as_str())
+        .expect("the audio asset");
+    assert!(path.ends_with("audio_only.m4a"), "{path}");
+    assert!(
+        s.show().contains("3 s"),
+        "audio drives the length: {}",
+        s.show()
+    );
+}
+
+/// `--append` uses the same flag for OTIO: clips land after the current
+/// sequence end, gaps included.
+#[test]
+fn otio_import_append_after_the_timeline() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.write("extra.otio", OTIO);
+    s.ok(&["import-otio", "extra.otio", "--append"]);
+    assert!(s.show().contains("11 s"), "6 s + 5 s: {}", s.show());
+    s.export("otio-append.mp4");
+    s.assert_dur("otio-append.mp4", 11.0, "the timeline grew, not replaced");
+    s.assert_px("otio-append.mp4", 1.0, RED, "original clip 1");
+    s.assert_px("otio-append.mp4", 5.0, BLUE, "original clip 3");
+    s.assert_px("otio-append.mp4", 6.5, RED, "appended clip 1");
+    s.assert_px("otio-append.mp4", 8.5, BLACK, "the appended OTIO gap");
+    s.assert_px("otio-append.mp4", 10.0, GREEN, "appended clip 2");
+}
+
 #[test]
 fn transitions() {
     let s = Sandbox::new();
