@@ -593,14 +593,19 @@ shared by the TUI and agents — with no clipgen code present.
   v18, history v24): `nile sequence audio --normalize/--fade-in/--fade-out`,
   with TUI and `sequence.audio` parity; one-pass `loudnorm` at -16 LUFS/
   -1.5 dBTP/LRA 11 plus clamped programme fades, applied once after the final
-  mix at 48 kHz. Chunked export stays single while audio post is active.
-  Remaining: move the audio chain to the scheduler's final mux so parallel
-  chunks can carry it. Jobs also landed: `nile serve` owns durable
+  mix at 48 kHz. Chunked export defers the chain to its final mux: chunks
+  render plain PCM, the chunk hash ignores the settings (a fade/normalize
+  change reuses them), and the joined programme is shaped and AAC-encoded
+  once. Jobs also landed: `nile serve` owns durable
   `.nile/<stem>/jobs/<id>/` records, snapshotted at submit
   (`job.submit|list|get|cancel|remove` on protocol v5, revision CAS,
   one-at-a-time FIFO, startup recovery, cancel, retained reports, `nile job …`
-  and the TUI `:jobs` panel). Remaining: silent-stream loudnorm detection,
-  async job-event push, orphan-temp cleanup, age/count job pruning. Known gap:
+  and the TUI `:jobs` panel). Landed: `nile job prune --keep N
+  [--older-than DAYS]` / `job.prune` (terminal only, finish-then-created
+  order, ids never recycled, a partial pass reports removed and failed ids)
+  and a startup sweep of hidden `.name.jobN.ext` temps named by terminal
+  records. Remaining: silent-stream loudnorm detection, async job-event push.
+  Known gap:
   explicit EDL/OTIO `--map`/`--group` non-UTF-8 paths (CLI import and the
   `--media` scan are guarded).
 - **Gate (met):** a keyframed crop export is frame-exact and its report maps a
@@ -617,9 +622,12 @@ shared by the TUI and agents — with no clipgen code present.
   `.nile/<stem>/cache/analysis`, spawns the hidden `nile analysis-analyzer`
   over NDJSON, and stages/validates products under `analysis/products/`
   (`a1-…`); the bundled mean-luma analyzer proves the contract.
-- Pending: per-frame times/indices, byte/frame caps, cache-prune for samples
-  and staging, audio analysis, and CV-backed checks. ML stays out of process
-  and out of the Rust dependency graph.
+- Landed: per-frame times and exact source-frame index requests (at most 96
+  per request; a request naming a frame past the media end is refused), sampler
+  byte/frame caps, and `nile cache prune` coverage for `cache/analysis` plus
+  abandoned staging (products are never swept). Pending: audio analysis and
+  CV-backed checks. ML stays out of process and out of the Rust dependency
+  graph.
 
 ### 7. Toolkit hooks (after the core)
 

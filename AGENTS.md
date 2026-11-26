@@ -211,7 +211,8 @@ plainly; never claim a pass you did not observe.
   track plus an audio one takes the multi-track path (fast = no audio).
 - **Jobs are server state.** `nile serve` owns `.nile/<stem>/jobs/<id>/`
   (`job.json` + snapshot), renders the snapshot under a CAS submit, never
-  resumes `running`, and only `rm`s terminal jobs (`cargo test -p nile jobs`).
+  resumes `running`, and only `rm`s/prunes terminal jobs; a startup sweep
+  deletes only a terminal record's exact hidden temp (`cargo test -p nile jobs`).
 
 ## Editing and TUI conventions
 
