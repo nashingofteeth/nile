@@ -2,11 +2,11 @@
 
 Project and command: **nile**. Status: **M5 shipped; post-M5 polish shipped;
 M6 shipped** (presets, bench and the opt-in chunk scheduler/cache; auto stays
-single-worker until a workload shows a win). **Next: pre-merge engine
-readiness** (sequences, protocol, time maps, annotations, keyframed effects,
-render reports, analysis jobs) so `clip-generator` can merge as a domain
-toolkit rather than a second engine. This file is the design/roadmap; the
-README is the user-facing how-to. Keep it in sync as milestones land.
+single-worker until a workload shows a win); **pre-merge engine readiness
+complete**. **Next: port `clip-generator` as a domain toolkit** over the
+protocol. Async job-event push remains deferred and does not block that port.
+This file is the design/roadmap; the README is the user-facing how-to. Keep it
+in sync as milestones land.
 
 **Post-M5 additions:** transparent crop/scale masking and the offset effect
 (lower tracks show through); a TUI effects panel with one effect per kind,
@@ -46,12 +46,12 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nle-protocol` (JSON-RPC wire types + blocking client/server, serde only) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v18, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v19, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v24 (grouped batches, media groups, annotations, timeline anchors, crop windows, crop keyframes, sequence audio post) |
+| Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v25 (grouped batches, media groups, annotations, timeline anchors, crop windows, crop keyframes, sequence audio post, subject checks) |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
@@ -89,7 +89,7 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **M4** | Multi-track + separate audio tracks | ✅ done |
 | **M5** | Transitions (`xfade`/`acrossfade`) + per-clip effects + proxy cache | ✅ done |
 | **M6** | Export scheduler (3 lanes), segment-parallel, `nile bench`, presets, resume+cache | shipped (scheduler opt-in) |
-| **Pre-merge** | Engine readiness for clipgen: sequences, protocol, time maps, annotations, keyframed effects, render reports, analysis jobs | next |
+| **Pre-merge** | Engine readiness for clipgen: sequences, protocol, time maps, annotations, keyframed effects, render reports, analysis jobs | ✅ done |
 | **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
 ### M3 — shipped (beyond the original scope)
@@ -431,7 +431,7 @@ trimming of a transition's own span (retime it with `x`/`X`,
   completion to the other path-taking commands; add yazi preview/key hints;
   revisit fzf as an alternate picker (yazi is the current one).
 
-## Pre-merge — clipgen engine readiness (next)
+## Pre-merge — clipgen engine readiness (done)
 
 `~/clip-generator` (live-show ingest → transcript/CV mining → angle/crop
 planning → feedback cases → verification) merges into nile as a **domain
@@ -463,7 +463,8 @@ shared by the TUI and agents — with no clipgen code present.
   `PROTOCOL_VERSION`, response-before-events, a 64 MiB line cap, and
   single-source `wire_catalog!` generation. The handler owns CAS, saves,
   playhead, and events. Steps 1 (sequences), 2 (protocol) and 3 (time
-  maps/groups) have landed; annotations are next.
+  maps/groups) have landed; steps 4–6 landed the annotations, render/analysis
+  contract and toolkit hooks.
 - **Order within step 0:** revision + provenance, the `nle-protocol` wire,
   `nile serve`, and fixtures are done. Steps 0–3 are complete. These
   are breaking format changes: close any live TUI before testing and rebuild
@@ -536,7 +537,7 @@ shared by the TUI and agents — with no clipgen code present.
   time inside a trimmed gap maps to "no media"; the multi-part fixture
   round-trips through `show --json --maps`.
 
-### 4. Annotations (blocking)
+### 4. Annotations (shipped)
 
 - `Annotation { id, sequence, kind, anchor, payload, provenance, status }`;
   `Anchor = Source { group/asset, time } | Timeline { range }`.
@@ -570,7 +571,7 @@ shared by the TUI and agents — with no clipgen code present.
   annotations stay put; a note round-trips through the protocol and is
   visible in the TUI.
 
-### 5. Render: keyframed effects, audio post, reports, jobs (blocking)
+### 5. Render: keyframed effects, audio post, reports, jobs (shipped)
 
 - `Effect::Crop` gains keyframes (`x`, `y`, `h`). The renderer groups passes
   by constant `crop_h` (closed rung set), animates position with a filter
@@ -605,7 +606,8 @@ shared by the TUI and agents — with no clipgen code present.
   [--older-than DAYS]` / `job.prune` (terminal only, finish-then-created
   order, ids never recycled, a partial pass reports removed and failed ids)
   and a startup sweep of hidden `.name.jobN.ext` temps named by terminal
-  records. Remaining: silent-stream loudnorm detection, async job-event push.
+  records. The normalize chain scrubs loudnorm's non-finite silence output (a
+  present-but-silent stream) before fades. Remaining: async job-event push.
   Known gap:
   explicit EDL/OTIO `--map`/`--group` non-UTF-8 paths (CLI import and the
   `--media` scan are guarded).
@@ -613,7 +615,7 @@ shared by the TUI and agents — with no clipgen code present.
   moved note to the right frame; a cancelled job leaves no deliverable and its
   report records the snapshot revision.
 
-### 6. Analysis sampling + sidecar contract (sampler + sidecar + subject boxes landed; audio pending)
+### 6. Analysis sampling + sidecar contract (sampling, sidecar, subject boxes and audio levels landed)
 
 - Landed: `nle-ffmpeg/src/sampling.rs` — `FrameSpec`/`AudioSpec`, packed
   RGB24/PCM, and a `SampleCache` keyed by version + params + canonical source
@@ -631,8 +633,12 @@ shared by the TUI and agents — with no clipgen code present.
   (bundled colour test double, or an absolute `--analyzer`), products carry
   normalized millionth boxes on a `SampleGrid`, and `subject-in-frame` maps
   each output frame through the report to the product grid and the clip's
-  crop. Protocol 2; project v19/history v25. Pending: audio analysis. ML stays
-  out of process and out of the Rust dependency graph.
+  crop. Audio levels landed: `nile analysis analyze-audio` samples through
+  `cache/analysis` and the bundled analyzer writes per-window RMS/peak
+  (millionths of full scale, all channels aggregated) as an `audio_levels`
+  product under `analysis/products/`; sidecar protocol 3 and a 250 000-window
+  sampling cap. Project v19/history v25. ML stays out of process and out of
+  the Rust dependency graph.
 
 ### 7. Toolkit hooks (after the core)
 
@@ -642,8 +648,10 @@ shared by the TUI and agents — with no clipgen code present.
   build on annotations + time maps later.
 - `nile mcp` as a thin protocol adapter; a review/log view that shows
   history entries with actor and provenance.
-- Import completeness: additive EDL/OTIO import and audio-only EDL
-  (multi-part grouping landed in step 3).
+- Import completeness landed: additive `--append` EDL/OTIO import (kind and
+  mute state preserved, ids renumbered) and audio-only EDL (empty video track
+  plus audio; `--size WxH` supplies the export canvas). Multi-part grouping
+  landed in step 3.
 
 ### Non-goals before the merge
 
@@ -654,10 +662,10 @@ merge modular.
 
 ### Order and merge gate
 
-Workspace/revisions/fixtures → sequences (done) → protocol (done) → time maps
-and media groups (done) → annotations (next) → render (keyframes, audio,
-reports, jobs) → sampling contract → toolkit hooks. Do not start the clipgen
-port until the merge-ready sentence above is true; then port ingest, planners
+Workspace/revisions/fixtures → sequences → protocol → time maps and media
+groups → annotations → render (keyframes, audio, reports, jobs) → sampling
+contract → toolkit hooks. The engine is merge-ready; async job-event push
+remains deferred and does not block the clipgen port. Port ingest, planners
 and cases against the protocol and prove parity with the existing renders in
 `fixtures/`.
 
@@ -674,8 +682,8 @@ and cases against the protocol and prove parity with the existing renders in
 ## Open / deferred
 
 - M7 GUI.
-- Tooling: make `demo.sh`/`scripts/check.sh` use a temporary sandbox or refuse
-  while a live TUI is attached, so a check cannot wipe a live demo project.
+- The gate guard covers a live `nile serve` (and any TUI attached to it) via
+  `serve.lock`; a standalone TUI has no lock and is not detected.
 
 ## Open decisions (non-blocking)
 
