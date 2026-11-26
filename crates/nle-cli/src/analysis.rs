@@ -1,4 +1,4 @@
-//! The analysis sidecar: an NDJSON host and the hidden mean-luma analyzer.
+//! The analysis sidecar: an NDJSON host and the hidden analyzer.
 //!
 //! `nile analysis analyze` samples a window through
 //! [`nle_ffmpeg::sampling::SampleCache`], creates a
@@ -29,7 +29,8 @@ use std::time::{Duration, SystemTime};
 
 use nle_core::Seconds;
 use nle_core::analysis::{
-    AnalysisProduct, AnalyzerInfo, ProductResult, ProductSample, ProductStore, SourceSignature,
+    AnalysisProduct, AnalyzerInfo, BoxRect, DetectedBox, FrameBoxes, ProductResult, ProductSample,
+    ProductStore, SampleGrid, SourceSignature, SubjectKey, sort_detected_boxes,
 };
 use nle_ffmpeg::sampling::{
     FrameMode, FrameSpec, MAX_SAMPLE_BYTES, SAMPLE_VERSION, SampleData, SampleEntry, SampleMeta,
@@ -39,7 +40,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 /// The protocol version both sides must agree on.
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 
 /// One control line may not exceed this many bytes. A longer line is fatal —
 /// never truncated, because half a JSON object is not a smaller request.
@@ -56,9 +57,61 @@ pub(crate) const MAX_SAMPLE_BUDGET: u64 = MAX_SAMPLE_BYTES;
 /// The one file an analyzer may report and the host may adopt.
 const PRODUCT_FILE: &str = "product.json";
 
-/// The analyzer name/version the bundled subcommand writes.
-const ANALYZER_NAME: &str = "mean-luma";
-const ANALYZER_VERSION: u32 = 1;
+/// What the bundled child calls itself in `hello`. The product identity is
+/// per task (mean luma keeps its stable name so old addresses do not move).
+const BUILTIN_NAME: &str = "nile-builtin";
+const BUILTIN_VERSION: u32 = 2;
+
+/// The mean-luma product identity. Stable: changing it would move every
+/// existing `a1-…` address.
+const MEAN_LUMA_NAME: &str = "mean-luma";
+const MEAN_LUMA_VERSION: u32 = 1;
+
+/// The bundled deterministic subject-box identity.
+const SUBJECT_NAME: &str = "color-boxes";
+const SUBJECT_VERSION: u32 = 1;
+
+/// What one analyze call asks the child to compute. The wire tag is the same
+/// name the hello advertises in `tasks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Task {
+    MeanLuma,
+    SubjectBoxes {
+        labels: Vec<String>,
+        floor_milli: u32,
+    },
+}
+
+impl Task {
+    pub(crate) fn wire_name(&self) -> &'static str {
+        match self {
+            Task::MeanLuma => "mean_luma",
+            Task::SubjectBoxes { .. } => "subject_boxes",
+        }
+    }
+
+    /// The product identity the bundled analyzer writes for this task.
+    fn builtin_analyzer(&self) -> AnalyzerInfo {
+        match self {
+            Task::MeanLuma => AnalyzerInfo {
+                name: MEAN_LUMA_NAME.to_string(),
+                version: MEAN_LUMA_VERSION,
+            },
+            Task::SubjectBoxes { .. } => AnalyzerInfo {
+                name: SUBJECT_NAME.to_string(),
+                version: SUBJECT_VERSION,
+            },
+        }
+    }
+}
+
+/// Where the analyzer process comes from. The external path is explicit and
+/// absolute: no PATH search, no `nile.json` entry can name an executable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Analyzer {
+    Bundled,
+    External(PathBuf),
+}
 
 /// The wire `error.code` values. Unknown codes are a protocol error, not a
 /// message to guess at.
@@ -316,16 +369,33 @@ pub(crate) fn run_sidecar(
     entry: &SampleEntry,
     stage: &StageDir,
     store: &ProductStore,
+    task: &Task,
+    analyzer: &Analyzer,
 ) -> Result<String, SidecarError> {
-    let exe = std::path::absolute(std::env::current_exe()?)?;
-    let mut child = Command::new(exe)
-        .arg("analysis-analyzer")
+    let mut command = match analyzer {
+        Analyzer::Bundled => {
+            let exe = std::path::absolute(std::env::current_exe()?)?;
+            let mut command = Command::new(exe);
+            command.arg("analysis-analyzer");
+            command
+        }
+        Analyzer::External(path) => {
+            if !path.is_absolute() {
+                return Err(SidecarError::BadRequest(format!(
+                    "analyzer path is relative: {}",
+                    path.display()
+                )));
+            }
+            Command::new(path)
+        }
+    };
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let outcome = converse(&mut child, spec, entry, stage.path(), store);
+    let outcome = converse(&mut child, spec, entry, stage.path(), store, task);
     if outcome.is_err() {
         // A protocol failure can leave the child waiting for another line.
         let _ = child.kill();
@@ -355,6 +425,7 @@ fn converse(
     entry: &SampleEntry,
     stage: &Path,
     store: &ProductStore,
+    task: &Task,
 ) -> Result<String, SidecarError> {
     let mut stdin = child
         .stdin
@@ -382,6 +453,18 @@ fn converse(
             hello.protocol
         )));
     }
+    if hello.analyzer.name.is_empty() || hello.analyzer.version == 0 {
+        return Err(SidecarError::Protocol(
+            "analyzer hello has no identity".to_string(),
+        ));
+    }
+    if !hello.tasks.iter().any(|name| name == task.wire_name()) {
+        return Err(SidecarError::Unsupported(format!(
+            "analyzer does not advertise {} (tasks: {})",
+            task.wire_name(),
+            hello.tasks.join(", ")
+        )));
+    }
 
     let data = wire_path(entry.data_path())?;
     let meta = wire_path(entry.meta_path())?;
@@ -399,6 +482,7 @@ fn converse(
                 meta: &meta,
             },
             request,
+            task: wire_task(task),
             stage: &stage_wire,
             limits: Limits {
                 max_product_bytes: DEFAULT_MAX_PRODUCT_BYTES,
@@ -406,7 +490,7 @@ fn converse(
         },
     )?;
     let ok: AnalyzeOk = expect_ok(read_response(&mut stdout)?, 2)?;
-    let hash = adopt_product(store, entry, stage, &ok)?;
+    let hash = adopt_product(store, entry, stage, &ok, spec, task)?;
 
     write_control(
         &mut stdin,
@@ -430,6 +514,8 @@ fn adopt_product(
     entry: &SampleEntry,
     stage: &Path,
     ok: &AnalyzeOk,
+    spec: &FrameSpec,
+    task: &Task,
 ) -> Result<String, SidecarError> {
     if !is_product_hash(&ok.hash) {
         return Err(SidecarError::Product(format!(
@@ -498,7 +584,7 @@ fn adopt_product(
     let meta_bytes = std::fs::read(entry.meta_path())?;
     let sample_meta: SampleMeta = serde_json::from_slice(&meta_bytes)
         .map_err(|error| SidecarError::Product(format!("sample metadata: {error}")))?;
-    require_one_result_per_frame(&product, &sample_meta.data)?;
+    require_result_shape(&product, &sample_meta.data, spec, task)?;
     let recorded = &product.sample.source;
     if recorded.source != sample_meta.source
         || recorded.source_arg != sample_meta.source_arg
@@ -516,26 +602,100 @@ fn adopt_product(
         .map_err(|error| SidecarError::Product(error.to_string()))
 }
 
-/// Metadata, not the product, says how many frames were packed. A result
-/// with a different length is a truncated or padded analysis, never a
-/// "shorter sample": refuse it before the store sees it.
-fn require_one_result_per_frame(
+/// Metadata, not the product, says how many frames were packed. A result with
+/// a different length or a grid that disagrees with the request is a
+/// truncated/padded analysis, never a "shorter sample": refuse it before the
+/// store sees it.
+fn require_result_shape(
     product: &AnalysisProduct,
     data: &SampleData,
+    spec: &FrameSpec,
+    task: &Task,
 ) -> Result<(), SidecarError> {
-    let ProductResult::MeanLuma { luma_milli } = &product.result;
-    let SampleData::Frames { frames, .. } = data else {
+    let SampleData::Frames {
+        width,
+        height,
+        frames,
+        ..
+    } = data
+    else {
         return Err(SidecarError::Product(
-            "mean luma needs a frame sample".to_string(),
+            "the analyzer needs a frame sample".to_string(),
         ));
     };
-    if luma_milli.len() as u64 != *frames {
-        return Err(SidecarError::Product(format!(
-            "the product has {} frame results but the sample packed {frames}",
-            luma_milli.len()
-        )));
+    match (task, &product.result) {
+        (Task::MeanLuma, ProductResult::MeanLuma { luma_milli }) => {
+            if luma_milli.len() as u64 != *frames {
+                return Err(SidecarError::Product(format!(
+                    "the product has {} frame results but the sample packed {frames}",
+                    luma_milli.len()
+                )));
+            }
+        }
+        (
+            Task::SubjectBoxes { labels, .. },
+            ProductResult::SubjectBoxes {
+                grid,
+                labels: declared,
+                frames: boxes,
+                ..
+            },
+        ) => {
+            let FrameMode::Grid { start, fps, .. } = &spec.mode else {
+                return Err(SidecarError::Unsupported(
+                    "subject boxes need a grid sample".to_string(),
+                ));
+            };
+            if grid.start != *start
+                || grid.fps != *fps
+                || grid.width != *width
+                || grid.height != *height
+            {
+                return Err(SidecarError::Product(
+                    "the product's grid disagrees with the sample".to_string(),
+                ));
+            }
+            if declared != labels {
+                return Err(SidecarError::Product(format!(
+                    "the product declares labels {declared:?}, request names {labels:?}"
+                )));
+            }
+            if boxes.len() as u64 != *frames {
+                return Err(SidecarError::Product(format!(
+                    "the product has {} frame boxes but the sample packed {frames}",
+                    boxes.len()
+                )));
+            }
+            for (position, frame) in boxes.iter().enumerate() {
+                if frame.index != position as u64 {
+                    return Err(SidecarError::Product(format!(
+                        "frame {position} records index {}",
+                        frame.index
+                    )));
+                }
+            }
+        }
+        (Task::MeanLuma, other) => {
+            return Err(SidecarError::Product(format!(
+                "the analyzer returned {} for mean luma",
+                product_kind(other)
+            )));
+        }
+        (Task::SubjectBoxes { .. }, other) => {
+            return Err(SidecarError::Product(format!(
+                "the analyzer returned {} for subject boxes",
+                product_kind(other)
+            )));
+        }
     }
     Ok(())
+}
+
+fn product_kind(result: &ProductResult) -> &'static str {
+    match result {
+        ProductResult::MeanLuma { .. } => "mean_luma",
+        ProductResult::SubjectBoxes { .. } => "subject_boxes",
+    }
 }
 
 fn is_product_hash(hash: &str) -> bool {
@@ -622,7 +782,11 @@ pub(crate) fn run_analyzer() -> Result<(), SidecarError> {
                 write_ok(
                     &mut output,
                     id,
-                    &serde_json::json!({ "protocol": PROTOCOL }),
+                    &serde_json::json!({
+                        "protocol": PROTOCOL,
+                        "analyzer": { "name": BUILTIN_NAME, "version": BUILTIN_VERSION },
+                        "tasks": ["mean_luma", "subject_boxes"],
+                    }),
                 )?;
                 hello_seen = true;
             }
@@ -780,8 +944,60 @@ struct AnalyzeRequest {
     method: String,
     input: InputRefOwned,
     request: FrameRequestIn,
+    task: TaskIn,
     stage: String,
     limits: LimitsIn,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskIn {
+    kind: String,
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    #[serde(default)]
+    floor_milli: Option<u32>,
+}
+
+impl TaskIn {
+    fn parse(&self) -> Result<Task, SidecarError> {
+        match self.kind.as_str() {
+            "mean_luma" => {
+                if self.labels.is_some() || self.floor_milli.is_some() {
+                    return Err(SidecarError::BadRequest(
+                        "mean_luma does not take labels/floor_milli".to_string(),
+                    ));
+                }
+                Ok(Task::MeanLuma)
+            }
+            "subject_boxes" => {
+                let mut labels = self.labels.clone().ok_or_else(|| {
+                    SidecarError::BadRequest("subject_boxes needs labels".to_string())
+                })?;
+                labels.retain(|label| !label.trim().is_empty());
+                labels.sort();
+                labels.dedup();
+                if labels.is_empty() {
+                    return Err(SidecarError::BadRequest(
+                        "subject_boxes names no labels".to_string(),
+                    ));
+                }
+                let floor_milli = self.floor_milli.unwrap_or(0);
+                if floor_milli > 1000 {
+                    return Err(SidecarError::BadRequest(format!(
+                        "floor_milli {floor_milli} is outside 0..=1000"
+                    )));
+                }
+                Ok(Task::SubjectBoxes {
+                    labels,
+                    floor_milli,
+                })
+            }
+            other => Err(SidecarError::Unsupported(format!(
+                "task {other:?} (this analyzer knows mean_luma and subject_boxes)"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -923,6 +1139,7 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
     let data_path = require_absolute(&request.input.data, "data")?;
     let stage = require_absolute(&request.stage, "stage")?;
     let requested = FrameRequest::parse(&request.request)?;
+    let task = request.task.parse()?;
 
     // Metadata first: it is authoritative for shape, the request is the
     // window. A disagreement is corrupt input, not a shorter sample.
@@ -1028,13 +1245,43 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
         )));
     }
 
-    let luma_milli = mean_luma(&data, *width, *height, *frames)?;
+    let result = match &task {
+        Task::MeanLuma => ProductResult::MeanLuma {
+            luma_milli: mean_luma(&data, *width, *height, *frames)?,
+        },
+        Task::SubjectBoxes {
+            labels,
+            floor_milli,
+        } => {
+            let FrameMode::Grid { start, fps, .. } = &requested.mode else {
+                return Err(SidecarError::Unsupported(
+                    "subject boxes need a grid sample; sample a window instead of exact indices"
+                        .to_string(),
+                ));
+            };
+            ProductResult::SubjectBoxes {
+                grid: SampleGrid {
+                    start: *start,
+                    fps: *fps,
+                    width: *width,
+                    height: *height,
+                },
+                labels: labels.clone(),
+                floor_milli: *floor_milli,
+                frames: detect_subject_boxes(
+                    &data,
+                    *width,
+                    *height,
+                    *frames,
+                    labels,
+                    *floor_milli,
+                )?,
+            }
+        }
+    };
     let product = AnalysisProduct {
         version: nle_core::analysis::PRODUCT_VERSION,
-        analyzer: AnalyzerInfo {
-            name: ANALYZER_NAME.to_string(),
-            version: ANALYZER_VERSION,
-        },
+        analyzer: task.builtin_analyzer(),
         sample: ProductSample {
             version: meta.version,
             key: meta.key.clone(),
@@ -1047,7 +1294,7 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
                 source_mtime_nanos: meta.source_mtime_nanos,
             },
         },
-        result: ProductResult::MeanLuma { luma_milli },
+        result,
     };
     product
         .validate()
@@ -1137,6 +1384,116 @@ fn mean_luma(rgb: &[u8], width: u32, height: u32, frames: u64) -> Result<Vec<u32
     Ok(result)
 }
 
+/// The bundled deterministic subject task: a bounding box around the pixels
+/// matching a colour label (`red`, `green`, `blue`, `white`, `black`). It is
+/// the test double for the process boundary, not a face detector; an external
+/// `--analyzer` is how real CV enters, with no ML in this binary.
+fn detect_subject_boxes(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    frames: u64,
+    labels: &[String],
+    floor_milli: u32,
+) -> Result<Vec<FrameBoxes>, SidecarError> {
+    for label in labels {
+        if label_matches(label, [0, 0, 0]).is_none() {
+            return Err(SidecarError::Unsupported(format!(
+                "the bundled analyzer only detects red/green/blue/white/black, not {label:?}; pass --analyzer for a real detector"
+            )));
+        }
+    }
+    if floor_milli > 1000 {
+        return Err(SidecarError::BadRequest(format!(
+            "floor_milli {floor_milli} is outside 0..=1000"
+        )));
+    }
+    let stride = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| SidecarError::CorruptInput("frame size overflows".to_string()))?;
+    let stride = usize::try_from(stride)
+        .map_err(|_| SidecarError::CorruptInput("frame size exceeds memory".to_string()))?;
+    let count = usize::try_from(frames)
+        .map_err(|_| SidecarError::CorruptInput("frame count exceeds memory".to_string()))?;
+    let expected = count
+        .checked_mul(stride)
+        .ok_or_else(|| SidecarError::CorruptInput("payload length overflows".to_string()))?;
+    if rgb.len() != expected {
+        return Err(SidecarError::CorruptInput(format!(
+            "packed payload is {} bytes, expected {expected}",
+            rgb.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(count);
+    for index in 0..count {
+        let frame = &rgb[index * stride..(index + 1) * stride];
+        let mut boxes = Vec::new();
+        for label in labels {
+            let Some(rect) = color_box(frame, width, height, label) else {
+                continue;
+            };
+            boxes.push(DetectedBox {
+                subject: SubjectKey {
+                    label: label.clone(),
+                    id: None,
+                },
+                rect,
+                confidence_milli: 1000,
+            });
+        }
+        sort_detected_boxes(&mut boxes);
+        boxes.retain(|detected| detected.confidence_milli >= floor_milli);
+        out.push(FrameBoxes {
+            index: index as u64,
+            boxes,
+        });
+    }
+    Ok(out)
+}
+
+fn label_matches(label: &str, [red, green, blue]: [u8; 3]) -> Option<bool> {
+    match label.to_ascii_lowercase().as_str() {
+        "red" => Some(red >= 128 && green <= 96 && blue <= 96),
+        "green" => Some(green >= 128 && red <= 96 && blue <= 96),
+        "blue" => Some(blue >= 128 && red <= 96 && green <= 96),
+        "white" => Some(red >= 200 && green >= 200 && blue >= 200),
+        "black" => Some(red <= 60 && green <= 60 && blue <= 60),
+        _ => None,
+    }
+}
+
+fn color_box(frame: &[u8], width: u32, height: u32, label: &str) -> Option<BoxRect> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for (pixel, rgb) in frame.as_chunks::<3>().0.iter().enumerate() {
+        if label_matches(label, *rgb) != Some(true) {
+            continue;
+        }
+        let x = (pixel as u32) % width;
+        let y = (pixel as u32) / width;
+        bounds = Some(match bounds {
+            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+            None => (x, y, x, y),
+        });
+    }
+    let (x0, y0, x1, y1) = bounds?;
+    let left = normalize_pixel(x0, width);
+    let top = normalize_pixel(y0, height);
+    let right = normalize_pixel(x1 + 1, width);
+    let bottom = normalize_pixel(y1 + 1, height);
+    Some(BoxRect {
+        x: left,
+        y: top,
+        w: (right - left).max(1),
+        h: (bottom - top).max(1),
+    })
+}
+
+/// Pixel edge → millionths of the picture side, rounding to nearest.
+fn normalize_pixel(value: u32, size: u32) -> u32 {
+    ((u64::from(value) * 1_000_000 + u64::from(size) / 2) / u64::from(size)) as u32
+}
+
 // --------------------------------------------------------------- NDJSON
 
 #[derive(Debug, Serialize)]
@@ -1152,8 +1509,32 @@ struct Analyze<'a> {
     method: &'a str,
     input: InputRef<'a>,
     request: FrameRequestRef<'a>,
+    task: TaskRef<'a>,
     stage: &'a str,
     limits: Limits,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TaskRef<'a> {
+    MeanLuma,
+    SubjectBoxes {
+        labels: &'a [String],
+        floor_milli: u32,
+    },
+}
+
+fn wire_task(task: &Task) -> TaskRef<'_> {
+    match task {
+        Task::MeanLuma => TaskRef::MeanLuma,
+        Task::SubjectBoxes {
+            labels,
+            floor_milli,
+        } => TaskRef::SubjectBoxes {
+            labels,
+            floor_milli: *floor_milli,
+        },
+    }
 }
 
 /// The window on the wire, tagged by mode. A grid carries its own clock; an
@@ -1239,6 +1620,8 @@ struct ErrorBody {
 #[serde(deny_unknown_fields)]
 struct HelloOk {
     protocol: u32,
+    analyzer: AnalyzerInfo,
+    tasks: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1520,12 +1903,176 @@ mod tests {
     }
 
     #[test]
+    fn the_bundled_subject_task_finds_a_coloured_box() {
+        // 4×2 frame: a red 2×1 run at (1,0).
+        let rgb = [
+            0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0, 0, // row 0
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // row 1
+        ];
+        let frames = detect_subject_boxes(&rgb, 4, 2, 1, &["red".to_string()], 0).expect("detect");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].index, 0);
+        assert_eq!(frames[0].boxes.len(), 1);
+        assert_eq!(
+            frames[0].boxes[0].rect,
+            BoxRect {
+                x: 250_000,
+                y: 0,
+                w: 500_000,
+                h: 500_000,
+            }
+        );
+        assert_eq!(frames[0].boxes[0].confidence_milli, 1000);
+        assert_eq!(frames[0].boxes[0].subject.label, "red");
+        assert!(frames[0].boxes[0].subject.id.is_none());
+
+        // A label with no matching pixels is an empty frame, not an error.
+        let frames = detect_subject_boxes(&rgb, 4, 2, 1, &["blue".to_string()], 0).expect("detect");
+        assert!(frames[0].boxes.is_empty());
+
+        // The bundled detector is a test double, not an arbitrary classifier.
+        let error = detect_subject_boxes(&rgb, 4, 2, 1, &["face".to_string()], 0).unwrap_err();
+        assert!(matches!(error, SidecarError::Unsupported(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_task_is_typed_on_the_wire() {
+        let value = serde_json::to_value(wire_task(&Task::MeanLuma)).unwrap();
+        assert_eq!(value, serde_json::json!({"kind": "mean_luma"}));
+
+        let task = Task::SubjectBoxes {
+            labels: vec!["face".to_string()],
+            floor_milli: 200,
+        };
+        let value = serde_json::to_value(wire_task(&task)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "subject_boxes",
+                "labels": ["face"],
+                "floor_milli": 200
+            })
+        );
+
+        let parsed = TaskIn {
+            kind: "subject_boxes".to_string(),
+            labels: Some(vec!["face".to_string(), "face".to_string()]),
+            floor_milli: Some(500),
+        }
+        .parse()
+        .expect("parse");
+        assert_eq!(
+            parsed,
+            Task::SubjectBoxes {
+                labels: vec!["face".to_string()],
+                floor_milli: 500,
+            }
+        );
+        let error = TaskIn {
+            kind: "segmenter".to_string(),
+            labels: None,
+            floor_milli: None,
+        }
+        .parse()
+        .unwrap_err();
+        assert!(matches!(error, SidecarError::Unsupported(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_subject_product_must_match_the_sample_grid() {
+        let spec = FrameSpec {
+            source: PathBuf::from("/media/a.mp4"),
+            mode: FrameMode::Grid {
+                start: Seconds::from_integer(0),
+                duration: Seconds::from_integer(1),
+                fps: Seconds::from_integer(5),
+            },
+            width: 64,
+            height: 36,
+        };
+        let product = AnalysisProduct {
+            version: nle_core::analysis::PRODUCT_VERSION,
+            analyzer: AnalyzerInfo {
+                name: "color-boxes".to_string(),
+                version: 1,
+            },
+            sample: ProductSample {
+                version: SAMPLE_VERSION,
+                key: "0123456789abcdef".to_string(),
+                params: "fedcba9876543210".to_string(),
+                source: SourceSignature {
+                    source: "/media/a.mp4".to_string(),
+                    source_arg: "/media/a.mp4".to_string(),
+                    source_size: 1,
+                    source_mtime_secs: 2,
+                    source_mtime_nanos: 3,
+                },
+            },
+            result: ProductResult::SubjectBoxes {
+                grid: SampleGrid {
+                    start: Seconds::from_integer(0),
+                    fps: Seconds::from_integer(5),
+                    width: 64,
+                    height: 36,
+                },
+                labels: vec!["red".to_string()],
+                floor_milli: 0,
+                frames: vec![FrameBoxes {
+                    index: 0,
+                    boxes: vec![DetectedBox {
+                        subject: SubjectKey {
+                            label: "red".to_string(),
+                            id: None,
+                        },
+                        rect: BoxRect {
+                            x: 0,
+                            y: 0,
+                            w: 500_000,
+                            h: 500_000,
+                        },
+                        confidence_milli: 1000,
+                    }],
+                }],
+            },
+        };
+        let data = SampleData::Frames {
+            width: 64,
+            height: 36,
+            frames: 1,
+            times: vec![Seconds::from_integer(0)],
+            indices: None,
+        };
+        let task = Task::SubjectBoxes {
+            labels: vec!["red".to_string()],
+            floor_milli: 0,
+        };
+        require_result_shape(&product, &data, &spec, &task).expect("matching grid");
+
+        let mut wrong = product.clone();
+        if let ProductResult::SubjectBoxes { grid, .. } = &mut wrong.result {
+            grid.fps = Seconds::from_integer(6);
+        }
+        let error = require_result_shape(&wrong, &data, &spec, &task).unwrap_err();
+        assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
+
+        let mut extra = product.clone();
+        if let ProductResult::SubjectBoxes { frames, .. } = &mut extra.result {
+            frames.push(FrameBoxes {
+                index: 1,
+                boxes: Vec::new(),
+            });
+        }
+        let error = require_result_shape(&extra, &data, &spec, &task).unwrap_err();
+        assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
+    }
+
+    #[test]
     fn a_product_must_have_one_result_per_packed_frame() {
         let product = AnalysisProduct {
             version: nle_core::analysis::PRODUCT_VERSION,
             analyzer: AnalyzerInfo {
-                name: ANALYZER_NAME.to_string(),
-                version: ANALYZER_VERSION,
+                name: MEAN_LUMA_NAME.to_string(),
+                version: MEAN_LUMA_VERSION,
             },
             sample: ProductSample {
                 version: SAMPLE_VERSION,
@@ -1552,19 +2099,31 @@ mod tests {
                 .collect(),
             indices: None,
         };
-        let error = require_one_result_per_frame(&product, &frames(3)).unwrap_err();
+        let spec = FrameSpec {
+            source: PathBuf::from("/media/red.mp4"),
+            mode: FrameMode::Grid {
+                start: Seconds::from_integer(0),
+                duration: Seconds::from_integer(1),
+                fps: Seconds::from_integer(5),
+            },
+            width: 32,
+            height: 24,
+        };
+        let error = require_result_shape(&product, &frames(3), &spec, &Task::MeanLuma).unwrap_err();
         assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
         assert!(error.to_string().contains("2 frame results"), "{error}");
 
-        assert!(require_one_result_per_frame(&product, &frames(2)).is_ok());
+        assert!(require_result_shape(&product, &frames(2), &spec, &Task::MeanLuma).is_ok());
 
-        let error = require_one_result_per_frame(
+        let error = require_result_shape(
             &product,
             &SampleData::Audio {
                 sample_rate: 48_000,
                 channels: 2,
                 samples: 2,
             },
+            &spec,
+            &Task::MeanLuma,
         )
         .unwrap_err();
         assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
@@ -1660,6 +2219,11 @@ mod tests {
                 indices,
                 width: 1,
                 height: 1,
+            },
+            task: TaskIn {
+                kind: "mean_luma".to_string(),
+                labels: None,
+                floor_milli: None,
             },
             stage: stage.display().to_string(),
             limits: LimitsIn {

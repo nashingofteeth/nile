@@ -601,6 +601,37 @@ fn annotation_expectations_mirror_the_cli_flags() {
     );
     assert_eq!(
         expect(
+            "annotation add --expect subject-in-frame --timeline --at 1 --asset 1 \
+             --product a1-0000000000000000 --label face --subject-id spk-2 \
+             --margin 7 --min-confidence 0.5 --tolerance-frames 2"
+        ),
+        Expectation::SubjectInFrame {
+            product: "a1-0000000000000000".into(),
+            asset: 1,
+            label: "face".into(),
+            subject_id: Some("spk-2".into()),
+            margin_pct: 7.0,
+            min_confidence: 0.5,
+            tolerance_frames: 2,
+        }
+    );
+    assert_eq!(
+        expect(
+            "annotation add --expect subject-in-frame --timeline --at 1 --asset 1 \
+             --product a1-0000000000000000 --label face"
+        ),
+        Expectation::SubjectInFrame {
+            product: "a1-0000000000000000".into(),
+            asset: 1,
+            label: "face".into(),
+            subject_id: None,
+            margin_pct: 5.0,
+            min_confidence: 1.0,
+            tolerance_frames: 0,
+        }
+    );
+    assert_eq!(
+        expect(
             "annotation add --expect words-complete --timeline --at 1 --min-coverage 0.5 --transcript t1-0000000000000000"
         ),
         Expectation::WordsComplete {
@@ -651,6 +682,20 @@ fn annotation_expectations_reject_stray_flags() {
     // A group is not a no_sliver selector.
     let msg = invalid("annotation add --expect no-sliver --timeline --at 1 --group 1");
     assert!(msg.contains("--group does not apply"), "{msg}");
+    // A subject check names an asset, a product and a label.
+    let msg = invalid(
+        "annotation add --expect subject-in-frame --timeline --at 1 --asset 1 \
+         --label face",
+    );
+    assert!(msg.contains("--product"), "{msg}");
+    let msg = invalid(
+        "annotation add --expect subject-in-frame --timeline --at 1 \
+         --product a1-0000000000000000 --label face",
+    );
+    assert!(msg.contains("--asset"), "{msg}");
+    let msg =
+        invalid("annotation add --expect cam --timeline --at 1 --asset 1 --min-confidence 0.5");
+    assert!(msg.contains("--min-confidence does not apply"), "{msg}");
     // No check at all: `--expect` is what makes it a check.
     let msg = invalid("annotation add note --timeline --at 1 --asset 1");
     assert!(msg.contains("cannot carry --asset"), "{msg}");

@@ -20,7 +20,7 @@ use anyhow::{Result, bail};
 
 use nle_core::expect::{CheckReport, CheckResult, evaluate_with};
 use nle_core::report::RenderReport;
-use nle_core::{AnnotationKind, AnnotationStatus, Project, ProjectError, TranscriptStore};
+use nle_core::{AnalysisStores, AnnotationKind, AnnotationStatus, Project, ProjectError};
 
 use crate::{say, say_err};
 
@@ -79,7 +79,7 @@ pub(crate) fn check_with(
     if project.sequence(sequence).is_none() {
         return Err(ProjectError::SequenceNotFound(sequence).into());
     }
-    let analysis = TranscriptStore::at(project_path);
+    let analysis = AnalysisStores::at(project_path);
     // `annotations_for` already scopes by sequence; `evaluate_with` still
     // compares the annotation's sequence with the report's, so a render of
     // another sequence fails there instead of being quietly excluded.

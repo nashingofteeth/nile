@@ -77,6 +77,31 @@ fn annotation_add_at_pins_the_timeline_position() {
 }
 
 #[test]
+fn a_subject_in_frame_expectation_keeps_its_wire_tag() {
+    let value = round_trip(Action::AnnotationAddAt {
+        track: 0,
+        at: 1.0,
+        to: Some(2.0),
+        kind: AnnotationKind::Expectation {
+            expect: crate::expect::Expectation::SubjectInFrame {
+                product: "a1-0000000000000000".into(),
+                asset: 1,
+                label: "face".into(),
+                subject_id: Some("spk-2".into()),
+                margin_pct: 5.0,
+                min_confidence: 0.5,
+                tolerance_frames: 2,
+            },
+        },
+    });
+    assert_eq!(value["kind"]["kind"], "expectation");
+    assert_eq!(value["kind"]["expect"]["check"], "subject_in_frame");
+    assert_eq!(value["kind"]["expect"]["product"], "a1-0000000000000000");
+    assert_eq!(value["kind"]["expect"]["subject_id"], "spk-2");
+    assert_eq!(value["kind"]["expect"]["min_confidence"], 0.5);
+}
+
+#[test]
 fn unit_actions_have_no_params() {
     assert_eq!(
         round_trip(Action::Undo),

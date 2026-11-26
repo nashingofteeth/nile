@@ -540,6 +540,10 @@ pub struct ExpectArgs {
     pub margin_pct: Option<f64>,
     pub min_coverage: Option<f64>,
     pub transcript: Option<String>,
+    pub product: Option<String>,
+    pub label: Option<String>,
+    pub subject_id: Option<String>,
+    pub min_confidence: Option<f64>,
     pub black: bool,
     pub min_frames: Option<i64>,
 }
@@ -572,6 +576,18 @@ fn expect_flags_set(a: &ExpectArgs) -> Vec<&'static str> {
     if a.transcript.is_some() {
         set.push("transcript");
     }
+    if a.product.is_some() {
+        set.push("product");
+    }
+    if a.label.is_some() {
+        set.push("label");
+    }
+    if a.subject_id.is_some() {
+        set.push("subject-id");
+    }
+    if a.min_confidence.is_some() {
+        set.push("min-confidence");
+    }
     if a.black {
         set.push("black");
     }
@@ -601,13 +617,22 @@ pub fn expect_from_args(a: ExpectArgs) -> Result<Expectation, ParseError> {
         "cam" => &["asset", "group", "tolerance-frames"],
         "crop_stable" => &["max-move", "no-hold-size"],
         "work_in_frame" => &["margin"],
+        "subject_in_frame" => &[
+            "asset",
+            "product",
+            "label",
+            "subject-id",
+            "min-confidence",
+            "margin",
+            "tolerance-frames",
+        ],
         "words_complete" => &["min-coverage", "transcript"],
         "absent" => &["asset", "group", "black", "tolerance-frames"],
         "no_sliver" => &["min-frames", "asset"],
         other => {
             return Err(ParseError::Invalid(format!(
                 "unknown expect check {other:?} — use cam, crop-stable, work-in-frame, \
-                 words-complete, absent or no-sliver"
+                 subject-in-frame, words-complete, absent or no-sliver"
             )));
         }
     };
@@ -631,6 +656,21 @@ pub fn expect_from_args(a: ExpectArgs) -> Result<Expectation, ParseError> {
         },
         "work_in_frame" => Expectation::WorkInFrame {
             margin_pct: a.margin_pct.unwrap_or(5.0),
+        },
+        "subject_in_frame" => Expectation::SubjectInFrame {
+            product: a.product.ok_or_else(|| {
+                ParseError::Invalid("subject-in-frame needs --product a1-…".to_string())
+            })?,
+            asset: a.asset.ok_or_else(|| {
+                ParseError::Invalid("subject-in-frame needs --asset N".to_string())
+            })?,
+            label: a.label.ok_or_else(|| {
+                ParseError::Invalid("subject-in-frame needs --label NAME".to_string())
+            })?,
+            subject_id: a.subject_id,
+            margin_pct: a.margin_pct.unwrap_or(5.0),
+            min_confidence: a.min_confidence.unwrap_or(1.0),
+            tolerance_frames: tolerance,
         },
         "words_complete" => Expectation::WordsComplete {
             min_coverage: a.min_coverage.unwrap_or(1.0),
@@ -885,6 +925,10 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                             margin_pct: opt_f64(&mut f, "margin")?,
                             min_coverage: opt_f64(&mut f, "min-coverage")?,
                             transcript: f.take("transcript"),
+                            product: f.take("product"),
+                            label: f.take("label"),
+                            subject_id: f.take("subject-id"),
+                            min_confidence: opt_f64(&mut f, "min-confidence")?,
                             black: f.take_bool("black"),
                             min_frames: opt_i64(&mut f, "min-frames")?,
                         };
@@ -1199,10 +1243,11 @@ pub const TRACK_USAGE: &str =
 
 /// The `--expect` flags, one spelling for the CLI and `:cmd`. A check only
 /// owns some of them; `expect_from_args` refuses the rest.
-const ANNOTATION_EXPECT_USAGE: &str = "usage: :annotation add --expect cam|crop-stable|work-in-frame|words-complete|absent|no-sliver \
+const ANNOTATION_EXPECT_USAGE: &str = "usage: :annotation add --expect cam|crop-stable|work-in-frame|subject-in-frame|words-complete|absent|no-sliver \
      --timeline [--at T] [--to T] [--track N] [--asset N | --group N] \
      [--tolerance-frames N] [--max-move P] [--no-hold-size] [--margin P] \
-     [--min-coverage F] [--transcript NAME] [--black] [--min-frames N]";
+     [--min-coverage F] [--transcript NAME] [--product HASH] [--label NAME] \
+     [--subject-id ID] [--min-confidence F] [--black] [--min-frames N]";
 
 /// A speed percentage: `100` = normal, `50` = half, `200` = double. Returns
 /// the model's rate (`percent / 100`, so 1 = normal).
