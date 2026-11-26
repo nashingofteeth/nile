@@ -20,8 +20,10 @@ Read before touching `crates/nle-core/src/otio.rs` or `import-otio`.
   while `Clip.1` uses a singular `media_reference` — handle both.
 
 - **`--append` adds after the current sequence end.** Every imported track
-  keeps its kind, lands on the next existing track of that kind (or a new one)
-  and is padded to the common end; `--track N` chooses the target video track.
-  The project's frame rate wins, a conflicting `--fps` is refused, and
+  keeps its kind **and `enabled`/mute state**: it reuses the first unclaimed
+  existing track with the same pair, otherwise creates a track with that mute
+  flag. `--track N` chooses the target video track and refuses a mute
+  mismatch. Targets are padded to the common end. The project's frame rate and
+  canvas size win — conflicting `--fps`/`--size` values are refused — and
   `--force` conflicts with `--append`. Already-pooled clip paths are reused
   instead of re-probed.

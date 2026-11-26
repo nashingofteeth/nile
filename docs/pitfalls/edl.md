@@ -21,18 +21,22 @@ Read before touching `crates/nle-core/src/edl.rs` or the `import-edl` path.
   track per channel (`A`, `A2`, `AA`/`B`), and the timeline length comes from
   the audio. No black or placeholder clip is invented. CMX `B` means both
   audio channels, so it groups with `AA`. Audio-only media carries no frame
-  rate, so pass `--fps` (or keep a video file in `--media` to seed it).
+  rate, so pass `--fps` (or keep a video file in `--media` to seed it), and no
+  picture size, so pass `--size WxH` — the import refuses to write a project
+  that export cannot give a canvas.
 - **Every event's channel must name picture or sound.** An unknown part
   (`X`, `N`, `V/X`) is `BuildError::UnknownChannel`; dropping it would silently
   shift every later event off record time. An EDL with no events at all is
   `BuildError::Empty`, not an empty project. Zero-length and non-cut events
   keep their existing warn-and-continue path.
 - **`--append` adds after the current sequence end.** Each imported track keeps
-  its kind (first video → `--track N` or the first video track; audio → the
-  next audio track, created if needed) and is padded with a gap to the common
-  end, so the imported tracks stay aligned. `--append` uses the project's frame
-  rate — a conflicting `--fps` is refused — and conflicts with `--force`
-  (`--force` means replace). Like other imports it re-baselines history.
+  its kind and mute state (reusing a matching existing track, creating one
+  otherwise) and is padded with a gap to the common end, so the imported
+  tracks stay aligned. `--track N` picks the first video target and refuses a
+  mute mismatch. `--append` uses the project's frame rate and canvas size —
+  conflicting `--fps`/`--size` values are refused — and conflicts with
+  `--force` (`--force` means replace). Like other imports it re-baselines
+  history.
 - **Record time starts at `01:00:00:00`** — the timeline origin is the
   *earliest* event, not 0. Treating 0 as the origin turns the first hour
   into one giant gap.
