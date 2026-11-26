@@ -222,8 +222,10 @@ pub(crate) fn checked_add(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     ratio_op(a, b, i128::checked_add)
 }
 
-/// `a - b`, or `None` on overflow.
-pub(crate) fn checked_sub(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+/// `a - b`, or `None` on overflow. Public so front-ends can turn an
+/// unchecked rational subtraction (which panics in debug builds) into a
+/// typed refusal.
+pub fn checked_sub(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     ratio_op(a, b, i128::checked_sub)
 }
 
