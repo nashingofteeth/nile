@@ -841,6 +841,90 @@ fn analysis_analyze_audio_stores_levels_and_reuses_the_sample_offline() {
 }
 
 #[test]
+fn analysis_analyze_audio_defaults_to_the_probe_rate_and_channels() {
+    let s = Sandbox::new();
+    s.base();
+    // Read the probe from the project rather than hard-coding the fixture, so
+    // this asserts the default actually comes from the media.
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project json");
+    let audio = project["media"]
+        .as_array()
+        .expect("media")
+        .iter()
+        .find_map(|asset| {
+            asset["probe"]["streams"]
+                .as_array()?
+                .iter()
+                .find(|stream| stream["codec_type"] == "audio")
+        })
+        .expect("red.mp4 has an audio stream");
+    let rate = audio["sample_rate"]
+        .as_str()
+        .expect("probed sample rate")
+        .parse::<u64>()
+        .expect("integer rate");
+    let channels = audio["channels"].as_u64().expect("probed channels");
+
+    let hash = s
+        .ok(&[
+            "analysis",
+            "analyze-audio",
+            "--asset",
+            "1",
+            "--duration",
+            "0.5",
+        ])
+        .trim()
+        .to_string();
+    let state = nle_core::state::state_dir(&s.file(P));
+    let product: serde_json::Value = serde_json::from_slice(
+        &fs::read(state.join("analysis/products").join(&hash)).expect("audio product"),
+    )
+    .unwrap();
+    assert_eq!(product["result"]["sample_rate"], rate);
+    assert_eq!(product["result"]["channels"], channels);
+    assert_eq!(
+        product["result"]["window_samples"],
+        rate / 10,
+        "the default 0.1 s window at the probe rate"
+    );
+
+    // A window shorter than one sample at the chosen rate is refused before
+    // ffmpeg runs.
+    let text = s.err(&[
+        "analysis",
+        "analyze-audio",
+        "--asset",
+        "1",
+        "--duration",
+        "1",
+        "--window",
+        "0.000001",
+        "--sample-rate",
+        "8000",
+    ]);
+    assert!(text.contains("shorter than one sample"), "{text}");
+
+    // A shape over the 250 000-window cap is refused before sampling too.
+    let text = s.err(&[
+        "analysis",
+        "analyze-audio",
+        "--asset",
+        "1",
+        "--duration",
+        "5",
+        "--sample-rate",
+        "60000",
+        "--window",
+        "0.000017",
+    ]);
+    assert!(text.contains("300000"), "{text}");
+    assert!(text.contains("250000"), "{text}");
+    assert!(text.contains("longer --window"), "{text}");
+}
+
+#[test]
 fn analysis_detect_feeds_a_subject_in_frame_check() {
     let s = Sandbox::new();
     s.base(); // red 0–2, green 2–4, blue 4–6; red's asset is #1
