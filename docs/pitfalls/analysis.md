@@ -55,8 +55,13 @@ Packed is one read, exact bytes.
   `indices` is strictly increasing so payload order is request order. The
   sampler seeks half a frame before the first index and uses
   `select=eq(n,…)` **before** the scale, so the picture is the source's own
-  frame, not a resample; a packed index list shorter than the request is an
-  error. `FrameSample::times()`/`time(i)`/`indices()` expose both.
+  frame, not a resample. An index request names at most `MAX_INDEX_FRAMES`
+  (96) frames: `select=eq(n,…)+…` is one left-deep expression and ffmpeg's
+  parser stops at about 100 terms, so a larger request is refused before
+  ffmpeg spawns — sample a grid for a longer range. If the media ends before
+  the last requested index, the sampler refuses the short sample
+  (`ShortIndex`) and writes no entry; it never caches a prefix.
+  `FrameSample::times()`/`time(i)`/`indices()` expose both.
 - **Audio: PCM s16le**, interleaved, no WAV/container header. The `.json` is
   the same envelope with `kind: "audio"`, `sample_rate`, `channels` and
   `samples` (per-channel frames actually packed, at most
@@ -66,13 +71,16 @@ Packed is one read, exact bytes.
   `meta` and require `bytes == raw.len()`; require `width`/`height` (or
   `sample_rate`/`channels`) to equal the request, `frames`/`samples` not to
   exceed the request's count, and `times`/`indices` to be exactly the
-  request's. A disagreeing pair is corrupt input, not a shorter sample.
+  request's. An index entry that packs fewer frames than its `indices` names
+  is a miss: it is re-sampled, and the sampler then refuses the short sample.
+  A disagreeing pair is corrupt input, not a shorter sample.
 - **Validation is positivity plus the sampler's caps.** `FrameSpec` /
   `AudioSpec` reject negative/zero ranges, zero fps/rate/channels, zero
-  dimensions, empty/out-of-order indices, and any request over
-  `MAX_SAMPLE_FRAMES` (100 000) or `MAX_SAMPLE_BYTES` (256 MiB) — **before**
-  the source is stat'ed or ffmpeg spawns. `nile analysis analyze` keeps its own
-  budget check for a CLI-level message; it uses the same byte limit.
+  dimensions, empty/out-of-order indices, an index request over
+  `MAX_INDEX_FRAMES` (96), and any request over `MAX_SAMPLE_FRAMES`
+  (100 000) or `MAX_SAMPLE_BYTES` (256 MiB) — **before** the source is
+  stat'ed or ffmpeg spawns. `nile analysis analyze` keeps its own budget check
+  for a CLI-level message; it uses the same byte limit.
 
 ## Cache
 
@@ -259,7 +267,11 @@ Live in `sampling.rs`:
 - **Times at 29.97:** grid times are `start + i/(30000/1001)` exactly; index
   times are `index/(30000/1001)`.
 - **Exact indices:** a moving test pattern's index sample compares byte-for-byte
-  with the same source frames from a 30 fps grid.
+  with the same source frames from a 30 fps grid; a case whose first index is
+  non-zero (30 and 29.97 fps) guards the half-frame-early seek.
+- **Index caps:** an index request over `MAX_INDEX_FRAMES` is refused before
+  any spawn; a request whose last index is past the media end returns
+  `ShortIndex`, writes no entry, and leaves a later valid request working.
 - **Grid vs index keys:** the two modes produce different `params`/`key` and
   two entries, never a shared one.
 - **Caps:** an over-byte or over-frame request to a missing source is refused

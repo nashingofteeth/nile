@@ -566,7 +566,8 @@ the state directory on first load; old `nle.json` projects still open with
 marks are saved in `view.json` and restored on the next session. The old global
 `~/.cache/nile` is no longer used, and `nile cache prune` only touches the current project’s cache — proxy
 renders, preview audio masters, waveform peaks, keyframe lists, asset
-thumbnails, and completed export chunks.
+thumbnails, completed export chunks, and packed analysis samples plus abandoned
+analysis staging directories (never `analysis/products/`).
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a
