@@ -2,6 +2,14 @@
 
 Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
 
+## mpv isolation
+
+- mpv is spawned with `--no-config` plus a per-process unix socket
+  (`--input-ipc-server`): neither the user's `mpv.conf`/scripts/input bindings
+  nor another nile instance can change the monitor. `spawn_args` in
+  `crates/nle-cli/src/mpv.rs` is the single list; the guard is
+  `spawn_args_ignore_user_config`.
+
 ## mpv states
 
 - `--keep-open=always` holds at EOF a frame or two before the probe duration;
