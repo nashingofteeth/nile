@@ -196,6 +196,10 @@ const FRAME_POLL: Duration = Duration::from_millis(100);
 /// the last newline have arrived, their `deadline` starts ticking; on
 /// expiry it returns `TimedOut`, which ends only this connection's serve loop.
 ///
+/// The deadline is checked after a successful read as well as after a poll:
+/// a peer that trickles a byte just inside `poll` would otherwise keep every
+/// read in the `Ok` arm and never reach the check.
+///
 /// The inner reader is a type parameter so tests can script reads instead of
 /// waiting on a real peer. `new` takes both durations so tests use tens of
 /// milliseconds.
@@ -232,6 +236,13 @@ impl<S> FrameDeadline<S> {
         }
     }
 
+    /// Whether the pending frame has outlived its grace period. Time-based,
+    /// not read-count-based, so a byte every 50 ms cannot reset it.
+    fn expired(&self) -> bool {
+        self.partial_since
+            .is_some_and(|start| start.elapsed() >= self.deadline)
+    }
+
     fn deadline_error(&self) -> io::Error {
         io::Error::new(
             io::ErrorKind::TimedOut,
@@ -248,10 +259,17 @@ impl<S: Read> Read for FrameDeadline<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.inner.read(buf) {
-                Ok(read) => {
+                Ok(read) if read > 0 => {
+                    // Check the frame that was pending *before* this read: a
+                    // newline arriving after the deadline does not rescue it,
+                    // and bytes without one cannot move the start.
+                    if self.expired() {
+                        return Err(self.deadline_error());
+                    }
                     self.observe(&buf[..read], Instant::now());
                     return Ok(read);
                 }
+                Ok(_) => return Ok(0),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e)
                     if matches!(
@@ -259,10 +277,7 @@ impl<S: Read> Read for FrameDeadline<S> {
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                     ) =>
                 {
-                    if self
-                        .partial_since
-                        .is_some_and(|start| start.elapsed() >= self.deadline)
-                    {
+                    if self.expired() {
                         return Err(self.deadline_error());
                     }
                     thread::sleep(self.poll);
@@ -1538,5 +1553,48 @@ mod tests {
             .read(&mut buf)
             .expect("idle after a complete line is allowed");
         assert_eq!(&buf[..read], b"next\n");
+    }
+
+    /// A peer that writes one byte just inside the poll interval. Every inner
+    /// read succeeds, so the `Ok` arm must enforce the deadline itself; only
+    /// the `WouldBlock` path would never run.
+    #[cfg(unix)]
+    struct Trickle {
+        gap: Duration,
+    }
+
+    #[cfg(unix)]
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            thread::sleep(self.gap);
+            buf[0] = b' ';
+            Ok(1)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trickle_without_a_newline_still_hits_the_deadline() {
+        let mut reader = FrameDeadline::new(
+            Trickle {
+                gap: Duration::from_millis(2),
+            },
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        );
+        let mut buf = [0u8; 64];
+        let mut result = Ok(0);
+        for _ in 0..200 {
+            result = reader.read(&mut buf);
+            if result.is_err() {
+                break;
+            }
+        }
+        let error = result.expect_err("a trickle cannot postpone the deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("partial frame"), "{error}");
     }
 }
