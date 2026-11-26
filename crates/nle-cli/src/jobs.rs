@@ -101,7 +101,12 @@ impl JobQueue {
         run: Arc<JobRunner>,
     ) -> Result<Arc<Self>, QueueError> {
         let store = JobStore::at(project_path);
-        let recovered = store.recover()?;
+        let recovery = store.recover()?;
+        for skipped in &recovery.skipped {
+            log::line(&format!(
+                "job queue: skipping unreadable record ({skipped}); directory kept"
+            ));
+        }
         let (wake, rx) = mpsc::channel();
         let queue = Arc::new(Self {
             store,
@@ -111,16 +116,14 @@ impl JobQueue {
         });
         {
             let mut state = queue.lock();
-            // Tell a connecting client what startup changed, without making
-            // it poll every record after `hello`.
-            for job in recovered {
-                if job.state == JobState::Interrupted {
-                    state.events.push(Event::JobChanged {
-                        id: job.id,
-                        state: job.state,
-                        report: job.report,
-                    });
-                }
+            // Only this startup's flips: a historical `interrupted` record is
+            // not news and must not be re-announced on every serve.
+            for job in recovery.interrupted {
+                state.events.push(Event::JobChanged {
+                    id: job.id,
+                    state: job.state,
+                    report: job.report,
+                });
             }
         }
         let worker = Arc::clone(&queue);
@@ -221,6 +224,40 @@ impl JobQueue {
         Ok(job)
     }
 
+    /// Retain a terminal job's record and snapshot, or delete them. A
+    /// queued/running job is not removable: cancel it first, so the worker
+    /// cannot write into a directory that vanished underneath it.
+    pub(crate) fn remove(&self, id: u64) -> Result<JobRecord, QueueError> {
+        let mut state = self.lock();
+        if let Some(active) = &state.active
+            && active.id == id
+        {
+            return Err(QueueError::Invalid(format!(
+                "job #{id} is running; cancel it first"
+            )));
+        }
+        let job = self
+            .store
+            .get(id)?
+            .ok_or_else(|| QueueError::Invalid(format!("job #{id} not found")))?;
+        if job.state == JobState::Running {
+            return Err(QueueError::Invalid(format!(
+                "job #{id} is finishing; try again"
+            )));
+        }
+        if !job.state.is_terminal() {
+            return Err(QueueError::Invalid(format!(
+                "job #{id} is {}; cancel it first",
+                job.state.label()
+            )));
+        }
+        self.store.remove(id)?;
+        // A terminal event for a record that no longer exists would confuse a
+        // poller; drop only this id's queued notifications.
+        state.events.retain(|event| event_job_id(event) != Some(id));
+        Ok(job)
+    }
+
     pub(crate) fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut self.lock().events)
     }
@@ -228,7 +265,7 @@ impl JobQueue {
     /// Pick the oldest queued job, mark it running and hand back its cancel
     /// flag. The store write happens under the same lock as cancellation, so
     /// a cancel cannot slip between "queued" and "running".
-    fn begin_next(&self) -> Option<(JobRecord, Arc<AtomicBool>)> {
+    fn begin_next(&self) -> Option<(JobRecord, Arc<AtomicBool>, u64)> {
         let mut state = self.lock();
         if state.active.is_some() {
             return None;
@@ -241,7 +278,7 @@ impl JobQueue {
             }
         };
         for mut job in jobs.into_iter().filter(|j| j.state == JobState::Queued) {
-            let snapshot = match self.store.load_snapshot(&job) {
+            let mut snapshot = match self.store.load_snapshot(&job) {
                 Ok(project) => project,
                 Err(e) => {
                     // A broken snapshot fails just this job; the next queued
@@ -258,6 +295,20 @@ impl JobQueue {
                     continue;
                 }
             };
+            // `total_frames` reads `timeline.end()` of the *active* sequence;
+            // the snapshot's stored active sequence need not be the job's.
+            if let Err(e) = snapshot.select_sequence(job.sequence) {
+                job.state = JobState::Failed;
+                job.finished_at = Some(now_secs());
+                job.error = Some(format!("sequence #{}: {e}", job.sequence));
+                let _ = self.store.update(&job);
+                state.events.push(Event::JobChanged {
+                    id: job.id,
+                    state: job.state,
+                    report: None,
+                });
+                continue;
+            }
             let total = total_frames(&snapshot);
             job.state = JobState::Running;
             job.started_at = Some(now_secs());
@@ -274,24 +325,24 @@ impl JobQueue {
                 cancel: Arc::clone(&cancel),
                 progress: job.progress,
             });
-            state.events.push(Event::JobProgress {
-                id: job.id,
-                state: JobState::Running,
-                progress: job.progress,
-            });
-            return Some((job, cancel));
+            push_progress(&mut state, job.id, job.progress);
+            return Some((job, cancel, total));
         }
         None
     }
 
-    fn finish(&self, mut job: JobRecord, result: Result<Option<PathBuf>, JobRunError>) {
+    fn finish(&self, mut job: JobRecord, total: u64, result: Result<Option<PathBuf>, JobRunError>) {
         let mut state = self.lock();
         state.active = None;
         job.finished_at = Some(now_secs());
+        // The total computed from the job's own snapshot sequence is the only
+        // one finish may report; a stale record value would drift from the
+        // progress events.
+        job.progress.total = total;
         match result {
             Ok(report) => {
                 job.state = JobState::Done;
-                job.progress.done = job.progress.total;
+                job.progress.done = total;
                 job.report = report;
                 job.error = None;
             }
@@ -323,16 +374,12 @@ impl JobQueue {
             }
             _ => return,
         };
-        state.events.push(Event::JobProgress {
-            id,
-            state: JobState::Running,
-            progress,
-        });
+        push_progress(&mut state, id, progress);
     }
 
     fn dispatch(self: Arc<Self>, rx: Receiver<()>) {
         loop {
-            while let Some((job, cancel)) = self.begin_next() {
+            while let Some((job, cancel, total)) = self.begin_next() {
                 let id = job.id;
                 let report = {
                     let run = Arc::clone(&self.run);
@@ -344,14 +391,46 @@ impl JobQueue {
                     }))
                     .unwrap_or_else(|_| Err(JobRunError::Failed("render worker panicked".into())))
                 };
-                self.finish(job, report);
+                self.finish(job, total, report);
             }
             match rx.recv() {
                 Ok(()) => {}
-                Err(_) => return, // the server dropped the queue
+                // The sender lives in the queue this worker owns, so this is
+                // only reachable if the channel is closed by a future stop
+                // path; either way no one can enqueue more work.
+                Err(_) => return,
             }
         }
     }
+}
+
+/// The job id a notification refers to, for retention cleanup.
+fn event_job_id(event: &Event) -> Option<u64> {
+    match event {
+        Event::JobProgress { id, .. } | Event::JobChanged { id, .. } => Some(*id),
+        _ => None,
+    }
+}
+
+/// Replace a pending progress notification for `id` instead of growing the
+/// queue without bound between calls. Terminal `job.changed` entries are
+/// never touched, so their order is preserved.
+fn push_progress(state: &mut QueueState, id: u64, progress: JobProgress) {
+    if let Some(Event::JobProgress {
+        progress: pending, ..
+    }) = state
+        .events
+        .iter_mut()
+        .find(|event| matches!(event, Event::JobProgress { id: pending, .. } if *pending == id))
+    {
+        *pending = progress;
+        return;
+    }
+    state.events.push(Event::JobProgress {
+        id,
+        state: JobState::Running,
+        progress,
+    });
 }
 
 /// The number of output frames a snapshot should produce.
@@ -534,6 +613,21 @@ mod tests {
             .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
     }
 
+    fn quick_runner() -> Arc<JobRunner> {
+        Arc::new(|_store, _job, _cancel, _progress| Ok(None))
+    }
+
+    fn wait_done(queue: &JobQueue, id: u64) -> JobRecord {
+        for _ in 0..200 {
+            let job = queue.get(id).expect("get");
+            if job.state.is_terminal() {
+                return job;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("job #{id} never finished");
+    }
+
     #[test]
     fn jobs_run_one_at_a_time_in_submission_order() {
         let (_dir, path) = seeded();
@@ -654,6 +748,211 @@ mod tests {
         assert!(matches!(error, QueueError::Invalid(_)));
         assert!(error.to_string().contains("not found"));
         assert!(queue.cancel(99).is_err());
+        assert!(queue.remove(99).is_err());
+    }
+
+    #[test]
+    fn progress_total_and_finish_use_the_jobs_own_sequence() {
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let mut project = Project::load(&path).unwrap();
+        let second = project.add_sequence("Second", Some(Seconds::from_integer(24)), None);
+        let sequence = project.sequence_mut(second).unwrap();
+        sequence.timeline.video_track_mut().unwrap().segments =
+            vec![nle_core::timeline::Segment::Gap(nle_core::timeline::Gap {
+                duration: Seconds::from_integer(2),
+            })];
+        // The snapshot's active sequence is 1; the job renders 2 (24 fps × 2 s
+        // = 48 frames, not 30 fps × 0 s from the active sequence).
+        let job = store
+            .create(
+                &project,
+                second,
+                PathBuf::from("/tmp/second.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        let (run, started, release, _overlap) = gated_runner();
+        let queue = JobQueue::start_with(&path, run).expect("queue");
+        assert_eq!(wait_for(&started, "job"), job.id);
+        assert_eq!(queue.get(job.id).unwrap().progress.total, 48);
+        release.send(()).unwrap();
+        let done = wait_done(&queue, job.id);
+        assert_eq!(done.state, JobState::Done);
+        assert_eq!(done.progress.total, 48);
+        assert_eq!(done.progress.done, 48);
+    }
+
+    #[test]
+    fn repeated_progress_coalesces_and_terminal_events_stay_ordered() {
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        let job = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/p.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        let (run, started, release, _overlap) = gated_runner();
+        let queue = JobQueue::start_with(&path, run).expect("queue");
+        assert_eq!(wait_for(&started, "job"), job.id);
+        for done in 1..=5 {
+            queue.progress(job.id, done * 10, 100);
+        }
+        let events = queue.take_events();
+        let progress: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, Event::JobProgress { id, .. } if *id == job.id))
+            .collect();
+        assert_eq!(progress.len(), 1, "one coalesced progress row: {events:?}");
+        assert!(
+            matches!(
+                progress[0],
+                Event::JobProgress { progress, .. } if progress.done == 50 && progress.total == 100
+            ),
+            "{events:?}"
+        );
+
+        // A progress event pending when the job finishes keeps its place
+        // before the terminal one.
+        queue.progress(job.id, 90, 100);
+        release.send(()).unwrap();
+        let _ = wait_done(&queue, job.id);
+        let events = queue.take_events();
+        let progress_at = events
+            .iter()
+            .position(|event| matches!(event, Event::JobProgress { id, .. } if *id == job.id))
+            .expect("pending progress");
+        let changed = events
+            .iter()
+            .position(|event| matches!(event, Event::JobChanged { id, .. } if *id == job.id))
+            .expect("terminal event");
+        assert!(
+            progress_at < changed,
+            "progress must precede the terminal event: {events:?}"
+        );
+        assert!(
+            !events[changed + 1..]
+                .iter()
+                .any(|event| matches!(event, Event::JobProgress { id, .. } if *id == job.id)),
+            "no progress after the terminal event: {events:?}"
+        );
+    }
+    #[test]
+    fn remove_only_terminal_jobs() {
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        for n in 0..2 {
+            store
+                .create(
+                    &project,
+                    1,
+                    PathBuf::from(format!("/tmp/rm-{n}.mp4")),
+                    JobExport::default(),
+                )
+                .unwrap();
+        }
+        let (run, started, release, _overlap) = gated_runner();
+        let queue = JobQueue::start_with(&path, run).expect("queue");
+        assert_eq!(wait_for(&started, "first job"), 1);
+
+        let running = queue.remove(1).expect_err("running");
+        assert!(running.to_string().contains("running"), "{running}");
+        let queued = queue.remove(2).expect_err("queued");
+        assert!(queued.to_string().contains("queued"), "{queued}");
+        let unknown = queue.remove(9).expect_err("unknown");
+        assert!(unknown.to_string().contains("not found"), "{unknown}");
+
+        let cancelled = queue.cancel(2).expect("cancel queued");
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        let removed = queue.remove(2).expect("remove cancelled");
+        assert_eq!(removed.id, 2);
+        assert!(!store.job_dir(2).exists());
+        assert!(queue.get(2).is_err(), "removed jobs are gone");
+
+        release.send(()).unwrap();
+        let _ = wait_done(&queue, 1);
+        queue.remove(1).expect("remove done");
+        assert!(!store.job_dir(1).exists());
+    }
+
+    #[test]
+    fn startup_announces_only_this_runs_interruptions() {
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        let historical = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/old.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        let mut historical = historical;
+        historical.state = JobState::Interrupted;
+        historical.error = Some("an older crash".into());
+        store.update(&historical).unwrap();
+        let running = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/now.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        let mut running = running;
+        running.state = JobState::Running;
+        store.update(&running).unwrap();
+
+        let queue = JobQueue::start_with(&path, quick_runner()).expect("queue");
+        let events = queue.take_events();
+        let changed: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::JobChanged {
+                    id,
+                    state: JobState::Interrupted,
+                    ..
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changed, vec![running.id], "historical rows are not news");
+    }
+
+    #[test]
+    fn startup_skips_a_corrupt_record_and_runs_the_rest() {
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        let good = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/good.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        let corrupt = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/bad.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        std::fs::write(store.job_dir(corrupt.id).join("job.json"), "{ nope").unwrap();
+
+        let queue = JobQueue::start_with(&path, quick_runner()).expect("queue");
+        let done = wait_done(&queue, good.id);
+        assert_eq!(done.state, JobState::Done);
+        assert!(store.job_dir(corrupt.id).exists(), "kept for inspection");
+        assert!(queue.get(corrupt.id).is_err());
     }
 
     #[test]

@@ -53,6 +53,7 @@ pub use extend::{
 pub use group::{MediaGroup, MediaPart};
 pub use jobs::{
     ExportPreset, JOB_VERSION, JobError, JobExport, JobProgress, JobRecord, JobState, JobStore,
+    Recovery,
 };
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};

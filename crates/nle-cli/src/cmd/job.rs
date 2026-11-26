@@ -52,6 +52,10 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
             let job = client.cancel_job(*id).map_err(anyhow::Error::msg)?;
             say!("cancelling {}", job.summary());
         }
+        JobCmd::Rm { id } => {
+            let job = client.remove_job(*id).map_err(anyhow::Error::msg)?;
+            say!("removed {}", job.summary());
+        }
         JobCmd::Submit {
             output,
             sequence,

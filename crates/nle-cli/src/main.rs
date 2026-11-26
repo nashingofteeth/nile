@@ -647,6 +647,11 @@ enum JobCmd {
         /// Job id (from `nile job ls`)
         id: u64,
     },
+    /// Delete a terminal job's record and snapshot
+    Rm {
+        /// Job id (from `nile job ls`)
+        id: u64,
+    },
     /// Snapshot the project and queue an export
     Submit {
         /// Output file (relative paths resolve against the current directory)

@@ -171,8 +171,11 @@ impl JobProgress {
 }
 
 /// One durable job. Paths are absolute when created by the server.
+///
+/// Unknown fields are tolerated on purpose: a record written by a newer build
+/// must still parse far enough to reach the [`JOB_VERSION`] check instead of
+/// failing with a generic JSON error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JobRecord {
     pub version: u32,
     pub id: u64,
@@ -213,6 +216,17 @@ impl JobRecord {
             state => format!("#{} {}", self.id, state.label()),
         }
     }
+}
+
+/// The result of [`JobStore::recover`].
+#[derive(Debug)]
+pub struct Recovery {
+    /// Every readable record after recovery, oldest id first.
+    pub jobs: Vec<JobRecord>,
+    /// Only the records this call flipped `running` → `interrupted`.
+    pub interrupted: Vec<JobRecord>,
+    /// Corrupt or newer records the store skipped (directories untouched).
+    pub skipped: Vec<JobError>,
 }
 
 /// The per-project job directory. One store instance is cheap; it is just the
@@ -323,11 +337,20 @@ impl JobStore {
 
     /// Every complete record, oldest id first. A directory without a
     /// `job.json` (a crash between mkdir and snapshot, or a hand-made dir) is
-    /// skipped; a corrupt record is an error, not silently forgotten.
+    /// skipped, as is a corrupt or newer record: one bad job must not hide the
+    /// rest of the queue. IO failures still surface.
     pub fn list(&self) -> Result<Vec<JobRecord>, JobError> {
+        Ok(self.list_inner()?.0)
+    }
+
+    /// `(records, skipped)`: a corrupt/newer `job.json` is reported for logging
+    /// at startup and otherwise ignored; the directory stays on disk.
+    fn list_inner(&self) -> Result<(Vec<JobRecord>, Vec<JobError>), JobError> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), Vec::new()));
+            }
             Err(e) => return Err(JobError::io(&self.dir, e)),
         };
         let mut ids: Vec<u64> = Vec::new();
@@ -343,12 +366,16 @@ impl JobStore {
         }
         ids.sort_unstable();
         let mut jobs = Vec::with_capacity(ids.len());
+        let mut skipped = Vec::new();
         for id in ids {
-            if let Some(record) = self.get(id)? {
-                jobs.push(record);
+            match self.get(id) {
+                Ok(Some(record)) => jobs.push(record),
+                Ok(None) => {}
+                Err(e @ (JobError::Json { .. } | JobError::Version { .. })) => skipped.push(e),
+                Err(e) => return Err(e),
             }
         }
-        Ok(jobs)
+        Ok((jobs, skipped))
     }
 
     /// Rewrite one record atomically. The record's id names its directory.
@@ -358,20 +385,40 @@ impl JobStore {
         write_json(&dir.join(JOB_FILE), record)
     }
 
+    /// Delete a job directory (record + snapshot). The caller decides whether
+    /// the state allows it; an unknown id is [`JobError::NotFound`].
+    pub fn remove(&self, id: u64) -> Result<(), JobError> {
+        let dir = self.job_dir(id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(JobError::NotFound(id)),
+            Err(e) => Err(JobError::io(dir, e)),
+        }
+    }
+
     /// Startup recovery: a `running` job has no live ffmpeg child any more.
-    /// Mark it `interrupted` (never silently resume) and return every record.
-    pub fn recover(&self) -> Result<Vec<JobRecord>, JobError> {
-        let mut jobs = self.list()?;
+    /// Mark it `interrupted` (never silently resume). `interrupted` holds only
+    /// the records flipped by **this** call, so a client is not sent events
+    /// for historical interruptions; `skipped` carries corrupt/newer records
+    /// the caller should log (their directories are left alone).
+    pub fn recover(&self) -> Result<Recovery, JobError> {
+        let (mut jobs, skipped) = self.list_inner()?;
         let now = now_secs();
+        let mut interrupted = Vec::new();
         for job in &mut jobs {
             if job.state == JobState::Running {
                 job.state = JobState::Interrupted;
                 job.finished_at = Some(now);
                 job.error = Some("server stopped while the job was running".to_string());
                 self.update(job)?;
+                interrupted.push(job.clone());
             }
         }
-        Ok(jobs)
+        Ok(Recovery {
+            jobs,
+            interrupted,
+            skipped,
+        })
     }
 
     /// The snapshot project a worker should render. The snapshot path is
@@ -505,14 +552,25 @@ mod tests {
         store.update(&running).expect("update");
 
         let recovered = store.recover().expect("recover");
-        assert_eq!(recovered.len(), 2);
-        assert_eq!(recovered[0].state, JobState::Queued);
-        assert_eq!(recovered[1].state, JobState::Interrupted);
-        assert!(recovered[1].finished_at.is_some());
-        assert!(recovered[1].error.as_deref().unwrap().contains("stopped"));
-        // A second recovery is a no-op: interrupted is terminal.
+        assert_eq!(recovered.jobs.len(), 2);
+        assert_eq!(recovered.jobs[0].state, JobState::Queued);
+        assert_eq!(recovered.jobs[1].state, JobState::Interrupted);
+        assert_eq!(recovered.interrupted.len(), 1, "only the flipped record");
+        assert_eq!(recovered.interrupted[0].id, running.id);
+        assert!(recovered.jobs[1].finished_at.is_some());
+        assert!(
+            recovered.jobs[1]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("stopped")
+        );
+        assert!(recovered.skipped.is_empty());
+        // A second recovery is a no-op: interrupted is terminal, so it must
+        // not be reported as a *new* interruption.
         let again = store.recover().expect("recover again");
-        assert_eq!(again, recovered);
+        assert_eq!(again.jobs, recovered.jobs);
+        assert!(again.interrupted.is_empty());
         assert_eq!(
             store.get(queued.id).unwrap().unwrap().state,
             JobState::Queued
@@ -534,10 +592,71 @@ mod tests {
         let mut text: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         text["version"] = serde_json::json!(JOB_VERSION + 1);
+        // A newer record may add fields; the version error must win over a
+        // generic unknown-field parse error.
+        text["future_field"] = serde_json::json!(true);
         std::fs::write(&path, text.to_string()).unwrap();
         let error = store.get(job.id).expect_err("version differs");
-        assert!(matches!(error, JobError::Version { .. }));
+        assert!(matches!(error, JobError::Version { .. }), "{error:?}");
         assert!(error.to_string().contains("delete the job directory"));
+        // The queue skips it instead of failing every other job.
+        assert!(store.list().unwrap().is_empty());
+        let recovery = store.recover().expect("recover skips it");
+        assert!(recovery.jobs.is_empty());
+        assert_eq!(recovery.skipped.len(), 1);
+        assert!(store.job_dir(job.id).exists(), "the directory is kept");
+    }
+
+    #[test]
+    fn recovery_skips_a_corrupt_record_and_keeps_it_on_disk() {
+        let (_dir, store) = store();
+        let project = project();
+        let good = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/good.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        let corrupt = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/bad.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        let path = store.job_dir(corrupt.id).join(JOB_FILE);
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let recovery = store.recover().expect("recover");
+        assert_eq!(recovery.jobs.len(), 1);
+        assert_eq!(recovery.jobs[0].id, good.id);
+        assert_eq!(recovery.skipped.len(), 1);
+        assert!(store.job_dir(corrupt.id).exists());
+        assert_eq!(store.list().unwrap().len(), 1, "list also skips it");
+    }
+
+    #[test]
+    fn removing_a_job_deletes_its_directory() {
+        let (_dir, store) = store();
+        let job = store
+            .create(
+                &project(),
+                1,
+                PathBuf::from("/tmp/rm.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        assert!(store.job_dir(job.id).exists());
+        store.remove(job.id).expect("remove");
+        assert!(!store.job_dir(job.id).exists());
+        assert!(store.get(job.id).unwrap().is_none());
+        assert!(matches!(
+            store.remove(job.id).expect_err("already gone"),
+            JobError::NotFound(_)
+        ));
     }
 
     #[test]

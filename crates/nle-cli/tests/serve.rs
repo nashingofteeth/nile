@@ -206,6 +206,41 @@ fn job_cli_submits_and_lists_through_the_socket() {
     let stderr = String::from_utf8_lossy(&show.stderr);
     assert!(stderr.contains("not found"), "{stderr}");
 
+    // Wait for the real render, then remove the terminal record.
+    let mut state = nle_core::JobState::Queued;
+    for _ in 0..600 {
+        let job = {
+            let stream = UnixStream::connect(&socket).expect("connect");
+            let write = stream.try_clone().expect("clone");
+            let mut client = nle_protocol::Client::new(BufReader::new(stream), write);
+            client.job(1).expect("job.get")
+        };
+        state = job.state;
+        if state.is_terminal() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(state.is_terminal(), "job finished: {state:?}");
+    let rm = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "rm", "1"])
+        .output()
+        .expect("job rm");
+    assert!(rm.status.success(), "{rm:?}");
+    let stdout = String::from_utf8_lossy(&rm.stdout);
+    assert!(stdout.contains("removed #1"), "{stdout}");
+    let gone = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "show", "1"])
+        .output()
+        .expect("job show after rm");
+    assert!(!gone.status.success(), "the removed id is gone");
+    assert!(
+        String::from_utf8_lossy(&gone.stderr).contains("not found"),
+        "{gone:?}"
+    );
+
     // Submit is a snapshot: the live project was not touched.
     let hello = {
         let stream = UnixStream::connect(&socket).expect("connect");

@@ -47,24 +47,44 @@ use crate::session::{Session, playhead};
 /// Serve the project over the per-project Unix socket, or stdin/stdout when
 /// `--stdio` is set. The socket is the default so a TUI and an agent can
 /// share one writer; the stdio mode is for pipes and tests.
+///
+/// Socket mode binds and locks **before** the handler exists, so a second
+/// server cannot recover jobs or start a dispatcher just to fail at bind.
+/// `--stdio` is deliberately unguarded: it has no singleton gate, and callers
+/// (tests, pipes) are responsible for using separate projects.
 pub(crate) fn cmd_serve(project_path: &Path, stdio: bool) -> Result<()> {
-    let mut session = Session::load(project_path)?;
-    session.set_actor(Actor::Agent("nile-serve".into()));
-    let jobs = JobQueue::start(project_path).context("open the job queue")?;
-    let handler = ServeHandler {
-        session,
-        events: Vec::new(),
-        poisoned: None,
-        jobs,
-    };
     if stdio {
+        let handler = build_handler(project_path)?;
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut server = Server::new(stdin.lock(), stdout.lock(), handler);
         server.serve().context("serve the project protocol")?;
         return Ok(());
     }
-    serve_socket(project_path, handler)
+    #[cfg(unix)]
+    {
+        let bound = bind_socket(project_path)?;
+        let handler = build_handler(project_path)?;
+        serve_bound(bound, handler)
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("socket serving is Unix-only; use --stdio")
+    }
+}
+
+/// Load the session and start its queue. Only called once the socket is ours
+/// (or immediately for `--stdio`).
+fn build_handler(project_path: &Path) -> Result<ServeHandler> {
+    let mut session = Session::load(project_path)?;
+    session.set_actor(Actor::Agent("nile-serve".into()));
+    let jobs = JobQueue::start(project_path).context("open the job queue")?;
+    Ok(ServeHandler {
+        session,
+        events: Vec::new(),
+        poisoned: None,
+        jobs,
+    })
 }
 
 #[cfg(unix)]
@@ -254,7 +274,15 @@ impl<S: Read> Read for FrameDeadline<S> {
 }
 
 #[cfg(unix)]
-fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
+struct BoundSocket {
+    listener: std::os::unix::net::UnixListener,
+    /// Removes the socket/lock on drop, including a handler-build failure.
+    _socket: SocketGuard,
+    _lock: LockGuard,
+}
+
+#[cfg(unix)]
+fn bind_socket(project_path: &Path) -> Result<BoundSocket> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
@@ -266,7 +294,7 @@ fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).context("create the project state directory")?;
-    let _lock = acquire_lock(project_path, &socket, &lock)?;
+    let lock = acquire_lock(project_path, &socket, &lock)?;
     // With the lock held, an unconnectable socket is stale and safe to
     // replace; a live one belongs to an older/foreign server.
     match UnixStream::connect(&socket) {
@@ -286,24 +314,27 @@ fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
         Err(e) => return Err(e).context("check the project socket"),
     }
     let listener = UnixListener::bind(&socket).context("bind the project socket")?;
-    let _guard = SocketGuard(socket.clone());
+    let guard = SocketGuard(socket.clone());
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
         .context("set socket permissions")?;
     say_err!("serving {} on {}", project_path.display(), socket.display());
+    Ok(BoundSocket {
+        listener,
+        _socket: guard,
+        _lock: lock,
+    })
+}
 
+#[cfg(unix)]
+fn serve_bound(bound: BoundSocket, handler: ServeHandler) -> Result<()> {
     let shared = Arc::new(Mutex::new(handler));
-    for stream in listener.incoming() {
+    for stream in bound.listener.incoming() {
         match stream {
             Ok(stream) => spawn_connection(Arc::clone(&shared), stream),
             Err(e) => log::line(&format!("project socket accept failed: {e}")),
         }
     }
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn serve_socket(_project_path: &Path, _handler: ServeHandler) -> Result<()> {
-    anyhow::bail!("socket serving is Unix-only; use --stdio")
 }
 
 #[cfg(unix)]
@@ -438,6 +469,7 @@ impl Handler for ServeHandler {
             Call::JobList => self.job_list(),
             Call::JobGet { id } => self.job_get(*id),
             Call::JobCancel { id } => self.job_cancel(*id),
+            Call::JobRemove { id } => self.job_remove(*id),
         }
     }
 
@@ -571,6 +603,12 @@ impl ServeHandler {
 
     fn job_cancel(&self, id: u64) -> Result<Reply, RpcError> {
         Ok(Reply::Job(self.jobs.cancel(id).map_err(queue_rpc)?))
+    }
+
+    /// Retention: delete a terminal job's record + snapshot. The removed
+    /// record is returned so a client can report what went away.
+    fn job_remove(&self, id: u64) -> Result<Reply, RpcError> {
+        Ok(Reply::Job(self.jobs.remove(id).map_err(queue_rpc)?))
     }
 
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {
@@ -1152,6 +1190,70 @@ mod tests {
         assert!(error.message.contains("not found"));
         let error = handler.job_cancel(99).expect_err("unknown");
         assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
+        let error = handler.job_remove(99).expect_err("unknown");
+        assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn removing_a_terminal_job_deletes_it_and_refuses_a_queued_one() {
+        let (dir, mut handler) = handler_with_runner(quick_runner());
+        let output = dir.path().join("remove.mp4");
+        let created = handler
+            .job_submit(
+                handler.session.revision(),
+                &output,
+                handler.session.project().active_id(),
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect("submit");
+        let Reply::Job(job) = created else {
+            panic!("expected a job");
+        };
+        let done = wait_done(&handler, job.id);
+        assert!(done.state.is_terminal());
+        let Reply::Job(removed) = handler.job_remove(job.id).expect("remove") else {
+            panic!("expected a job");
+        };
+        assert_eq!(removed.id, job.id);
+        let store = nle_core::JobStore::at(handler.session.path());
+        assert!(!store.job_dir(job.id).exists());
+        assert!(handler.jobs.get(job.id).is_err(), "the record is gone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_bind_refuses_before_recovering_jobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let project = Project::new();
+        project.save(&path).expect("save");
+        let first = bind_socket(&path).expect("first bind");
+
+        // A leftover `running` record is only touched by `JobQueue::start`;
+        // the refused second server must not reach it.
+        let store = nle_core::JobStore::at(&path);
+        let mut job = store
+            .create(
+                &project,
+                1,
+                dir.path().join("running.mp4"),
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect("create");
+        job.state = nle_core::JobState::Running;
+        store.update(&job).expect("update");
+
+        let error = match bind_socket(&path) {
+            Ok(_) => panic!("a second bind must refuse"),
+            Err(e) => e,
+        };
+        assert!(error.to_string().contains("already serving"), "{error}");
+        assert_eq!(
+            store.get(job.id).unwrap().unwrap().state,
+            nle_core::JobState::Running,
+            "the failed server did not recover the queue"
+        );
+        drop(first);
     }
 
     #[test]

@@ -428,6 +428,15 @@ impl<R: BufRead, W: Write> Client<R, W> {
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }
+
+    /// Delete a terminal job's record and snapshot; returns the record that
+    /// was removed. A queued/running or unknown job is a server error.
+    pub fn remove_job(&mut self, id: u64) -> Result<JobRecord, ClientError> {
+        match self.call(Call::JobRemove { id })? {
+            Reply::Job(job) => Ok(job),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
 }
 
 fn outcome(reply: Result<Reply, ClientError>) -> Result<Outcome, ClientError> {

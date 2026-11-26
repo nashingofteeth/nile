@@ -146,6 +146,9 @@ wire_catalog! {
         /// Cancel a queued job, or kill the running export. A terminal job is
         /// invalid params.
         JobCancel { id: u64 } = "job.cancel";
+        /// Delete a **terminal** job's record and snapshot. Queued/running
+        /// jobs are refused; the removed record is returned.
+        JobRemove { id: u64 } = "job.remove";
     }
 }
 
@@ -307,7 +310,10 @@ impl Reply {
                 .map_err(|e| RpcError::internal(format!("preview is not serializable: {e}"))),
             (
                 Reply::Job(job),
-                Call::JobSubmit { .. } | Call::JobGet { .. } | Call::JobCancel { .. },
+                Call::JobSubmit { .. }
+                | Call::JobGet { .. }
+                | Call::JobCancel { .. }
+                | Call::JobRemove { .. },
             ) => serde_json::to_value(job)
                 .map_err(|e| RpcError::internal(format!("job is not serializable: {e}"))),
             (Reply::Jobs(jobs), Call::JobList) => serde_json::to_value(jobs)
@@ -344,9 +350,10 @@ impl Reply {
             Call::AnalysisAdd { .. } => serde_json::from_value(result).map(Reply::Analysis),
             Call::PlayheadSet { .. } => serde_json::from_value(result).map(Reply::Playhead),
             Call::ActionPreview { .. } => serde_json::from_value(result).map(Reply::Preview),
-            Call::JobSubmit { .. } | Call::JobGet { .. } | Call::JobCancel { .. } => {
-                serde_json::from_value(result).map(Reply::Job)
-            }
+            Call::JobSubmit { .. }
+            | Call::JobGet { .. }
+            | Call::JobCancel { .. }
+            | Call::JobRemove { .. } => serde_json::from_value(result).map(Reply::Job),
             Call::JobList => serde_json::from_value(result).map(Reply::Jobs),
             Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {
                 serde_json::from_value(result).map(Reply::Outcome)
@@ -551,7 +558,3 @@ impl JobList {
         Self { revision, jobs }
     }
 }
-
-/// Re-exported so a client can match `JobRecord.state` without also depending
-/// on the model crate's module path.
-pub use nle_core::jobs::{JobProgress as JobProgressState, JobState as JobRecordState};

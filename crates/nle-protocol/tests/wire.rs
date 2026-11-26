@@ -257,6 +257,12 @@ impl Handler for Fake {
                     1,
                 )))
             }
+            Call::JobRemove { id } => Ok(Reply::Job(record(
+                *id,
+                JobState::Done,
+                &PathBuf::from("/media/job.mp4"),
+                1,
+            ))),
         }
     }
 
@@ -412,6 +418,7 @@ fn all_calls() -> Vec<Call> {
         Call::JobList,
         Call::JobGet { id: 3 },
         Call::JobCancel { id: 4 },
+        Call::JobRemove { id: 5 },
     ]
 }
 
@@ -805,6 +812,20 @@ fn golden_job_submit_request_and_round_trip() {
             "params": {"id": 4, "state": "cancelled"}
         })
     );
+    // Retention: removing a terminal job is an id-only call returning the
+    // removed record, not a unit reply.
+    let remove = Call::JobRemove { id: 5 };
+    let request = Request::new(
+        Id::from(1u64),
+        remove.method(),
+        remove.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"job.remove","params":{"id":5}}"#
+    );
+    let (reply, _) = exchange(&mut Fake::new(7), remove);
+    assert!(matches!(reply, Ok(Reply::Job(ref job)) if job.id == 5));
 }
 
 #[test]
