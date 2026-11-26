@@ -154,6 +154,49 @@ fn x_cancels_the_selected_job_through_the_server() {
 }
 
 #[test]
+fn opening_jobs_does_not_put_key_hints_in_the_message() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("t.json");
+    let project = asset_project();
+    project.save(&path).unwrap();
+    let socket = nle_core::state::session_socket_path(&path);
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let jobs = vec![
+        job(1, JobState::Queued, 0, 100, None),
+        job(2, JobState::Queued, 0, 100, None),
+    ];
+    let serve = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let reader = stream.try_clone().unwrap();
+        let handler = FakeJobs {
+            project,
+            jobs,
+            cancelled: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut server = Server::new(BufReader::new(reader), stream, handler);
+        let _ = server.serve();
+    });
+
+    let mut app = App::with_session(Session::open(&path).expect("remote session"));
+    super::super::jobs::open_jobs(&mut app);
+    assert_eq!(
+        app.message, "jobs: 2",
+        "the notice reports the queue size, not the keys"
+    );
+    let hints = super::super::panels::hints_for(&app);
+    assert!(
+        hints
+            .iter()
+            .any(|line| line.contains("x cancel") && line.contains("q close")),
+        "hints_for still renders the panel keys: {hints:?}"
+    );
+
+    drop(app);
+    let _ = serve.join();
+}
+
+#[test]
 fn opening_jobs_from_the_pool_hands_the_monitor_back() {
     let mut app = App::new(asset_project(), temp_project_path("jobs-pool"));
     open_pool_mode(&mut app, 0);
