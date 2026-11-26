@@ -413,12 +413,12 @@ pub(crate) fn detect_command(app: &mut App, f: &mut action::Flags) -> Option<Str
 }
 
 /// `:edl-import FILE --media DIR [--fps R] [--src-offset TC] [--map
-/// REEL=PATH] [--group NAME=FILE,FILE] [--force]` — build a project from a
-/// CMX3600 EDL (the CLI's `import-edl`); the open project reloads when it
-/// lands.
+/// REEL=PATH] [--group NAME=FILE,FILE] [--append] [--track N] [--force]` —
+/// build a project from a CMX3600 EDL (the CLI's `import-edl`); the open
+/// project reloads when it lands.
 pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
     const USAGE: &str = "usage: :edl-import FILE --media DIR [--fps R] [--src-offset TC] \
-         [--map REEL=PATH] [--group NAME=FILE,FILE] [--force]";
+         [--map REEL=PATH] [--group NAME=FILE,FILE] [--append] [--track N] [--force]";
     let file = match f.positional() {
         Some(p) => PathBuf::from(p),
         None => return Some(USAGE.to_string()),
@@ -433,9 +433,20 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
         .unwrap_or_else(|| "00:00:00:00".to_string());
     let map = f.take_all("map");
     let group = f.take_all("group");
+    let append = f.take_bool("append");
+    let track = flag_usize(f, "track").ok().flatten();
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
+    }
+    if append && force {
+        return Some(
+            "--append and --force are mutually exclusive: --append adds to the existing project, --force replaces it"
+                .to_string(),
+        );
+    }
+    if track.is_some() && !append {
+        return Some("--track needs --append".to_string());
     }
     let groups = match crate::cmd::import::parse_group_specs(&group) {
         Ok(groups) => groups,
@@ -455,6 +466,8 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
             src_offset: &src_offset,
             maps: &map,
             groups: &groups,
+            append,
+            track,
             force,
         })
         .map_err(|e| e.to_string())
@@ -470,12 +483,12 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
 }
 
 /// `:otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW]
-/// [--group NAME=FILE,FILE] [--force]` — build a project from an
-/// OpenTimelineIO timeline (the CLI's `import-otio`); the open project
-/// reloads when it lands.
+/// [--group NAME=FILE,FILE] [--append] [--track N] [--force]` — build a
+/// project from an OpenTimelineIO timeline (the CLI's `import-otio`); the
+/// open project reloads when it lands.
 pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
     const USAGE: &str = "usage: :otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW] \
-         [--group NAME=FILE,FILE] [--force]";
+         [--group NAME=FILE,FILE] [--append] [--track N] [--force]";
     let file = match f.positional() {
         Some(p) => PathBuf::from(p),
         None => return Some(USAGE.to_string()),
@@ -484,9 +497,20 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
     let fps = f.take("fps");
     let remap = f.take_all("remap");
     let group = f.take_all("group");
+    let append = f.take_bool("append");
+    let track = flag_usize(f, "track").ok().flatten();
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
+    }
+    if append && force {
+        return Some(
+            "--append and --force are mutually exclusive: --append adds to the existing project, --force replaces it"
+                .to_string(),
+        );
+    }
+    if track.is_some() && !append {
+        return Some("--track needs --append".to_string());
     }
     let groups = match crate::cmd::import::parse_group_specs(&group) {
         Ok(groups) => groups,
@@ -505,6 +529,8 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
             fps: fps.as_deref(),
             remaps: &remap,
             groups: &groups,
+            append,
+            track,
             force,
         })
         .map_err(|e| e.to_string())

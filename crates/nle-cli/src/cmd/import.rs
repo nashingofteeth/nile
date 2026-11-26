@@ -12,10 +12,11 @@ use nle_core::edl::{self, EdlEvent};
 use nle_core::otio;
 use nle_core::otio::OtioItem;
 use nle_core::time::{parse_timecode, timecode_to_frames};
-use nle_core::timeline::{Segment, TrackKind};
+use nle_core::timeline::{Segment, Timeline, TrackKind};
 use nle_core::{Document, Project, VideoSettings, frame_of};
 use nle_ffmpeg::probe;
 
+use super::detect::{append_spans, next_clip_id};
 use super::project::{save_and_reset_history, secs_f64};
 use super::{CommandReport, asset_summary};
 use crate::{parse_fps_arg, say};
@@ -221,6 +222,103 @@ fn add_group_parts(project: &mut Project, spec: &GroupSpec, paths: &[PathBuf]) -
     // with `to_string`).
     let parts = project.group_parts(paths)?;
     Ok(project.add_group(&spec.name, parts)?)
+}
+
+/// Add a built import to the existing sequence at its end.
+///
+/// Each incoming track keeps its kind: the first video track goes to
+/// `video_track` (default: the first video track), later video tracks and
+/// audio tracks land on the next existing track of that kind, or on a new one
+/// when the project has none to spare. Every target is padded to the common
+/// `start` with a gap (`append_spans` coalesces it with a leading gap), so
+/// tracks stay aligned instead of starting at their own ends. Clip ids are
+/// renumbered from the project's next free id: the builders number from 1,
+/// which would collide with existing clips.
+fn append_timeline(
+    project: &mut Project,
+    mut incoming: Timeline,
+    video_track: Option<usize>,
+) -> Result<()> {
+    let start = project.timeline.end();
+    let mut next_id = next_clip_id(project);
+    for track in &mut incoming.tracks {
+        for segment in &mut track.segments {
+            match segment {
+                Segment::Clip(clip) => {
+                    clip.id = next_id;
+                    next_id += 1;
+                }
+                Segment::Transition(tr) => {
+                    tr.id = next_id;
+                    next_id += 1;
+                }
+                Segment::Gap(_) => {}
+            }
+        }
+    }
+
+    let target_video = match video_track {
+        Some(n) => {
+            let i = super::cli_index(n, "--track").map_err(anyhow::Error::msg)?;
+            let track = project
+                .timeline
+                .track(i)
+                .with_context(|| format!("no track #{n}"))?;
+            if track.kind != TrackKind::Video {
+                bail!("track #{n} is not a video track");
+            }
+            i
+        }
+        None => project
+            .timeline
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .context("project has no video track")?,
+    };
+
+    let mut audios = 0usize;
+    let mut last_video: Option<usize> = None;
+    for track in incoming.tracks {
+        // An audio-only EDL still carries the model's empty base video track;
+        // there is no material to append from it.
+        if track.segments.is_empty() {
+            continue;
+        }
+        let ti = match track.kind {
+            TrackKind::Video => {
+                let target = match last_video {
+                    None => target_video,
+                    // Later video tracks go to the next existing video track
+                    // after the previous target, never back onto it.
+                    Some(prev) => project
+                        .timeline
+                        .tracks
+                        .iter()
+                        .enumerate()
+                        .find(|(i, t)| *i > prev && t.kind == TrackKind::Video)
+                        .map(|(i, _)| i)
+                        .unwrap_or_else(|| project.timeline.add_track(TrackKind::Video)),
+                };
+                last_video = Some(target);
+                target
+            }
+            TrackKind::Audio => {
+                let existing = project
+                    .timeline
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.kind == TrackKind::Audio)
+                    .nth(audios)
+                    .map(|(i, _)| i);
+                audios += 1;
+                existing.unwrap_or_else(|| project.timeline.add_track(TrackKind::Audio))
+            }
+        };
+        append_spans(project, ti, start, track.segments);
+    }
+    Ok(())
 }
 
 /// Expand `~`/`~/…` without a shell. `~user` is left alone: resolving
@@ -439,6 +537,8 @@ pub(crate) struct EdlImport<'a> {
     pub src_offset: &'a str,
     pub maps: &'a [String],
     pub groups: &'a [GroupSpec],
+    pub append: bool,
+    pub track: Option<usize>,
     pub force: bool,
 }
 
@@ -456,14 +556,31 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
         src_offset,
         maps,
         groups,
+        append,
+        track,
         force,
     } = args;
-    if project_path.exists() && !force {
+    if append && force {
         bail!(
-            "{} already exists (use --force to overwrite)",
-            project_path.display()
+            "--append and --force are mutually exclusive: --append adds to the existing project, --force replaces it"
         );
     }
+    let mut project = if append {
+        Project::load(project_path).with_context(|| {
+            format!(
+                "--append needs an existing project at {}",
+                project_path.display()
+            )
+        })?
+    } else {
+        if project_path.exists() && !force {
+            bail!(
+                "{} already exists (use --force to overwrite, or --append)",
+                project_path.display()
+            );
+        }
+        Project::new()
+    };
     let text = std::fs::read_to_string(edl_path)
         .with_context(|| format!("reading {}", edl_path.display()))?;
     let doc = edl::parse(&text).with_context(|| format!("parsing {}", edl_path.display()))?;
@@ -471,7 +588,6 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
     // Probe + pool every media file, deduped by path. `pool_media_dir`
     // validates the whole scan first (the pool is stored as UTF-8), so a bad
     // name refuses the import before any file is probed.
-    let mut project = Project::new();
     let add = |project: &mut Project, p: &Path| -> Result<PathBuf> {
         let canonical = p
             .canonicalize()
@@ -519,26 +635,53 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
             .filter(|e| edl::channel_has(&e.channel, 'V'))
             .find_map(|e| resolve_reel(&project, &map, e))
             .and_then(|id| project.asset(id));
-        let fps = match fps_arg {
-            Some(s) => parse_fps_arg(s)?,
-            None => first_asset
+        let infer = || {
+            first_asset
                 .and_then(|a| a.fps())
                 .or_else(|| project.media.iter().find_map(|a| a.fps()))
-                .ok_or_else(|| anyhow::anyhow!("no frame rate known — pass --fps"))?,
+                .ok_or_else(|| anyhow::anyhow!("no frame rate known — pass --fps"))
+        };
+        let fps = match (append, project.fps, fps_arg) {
+            // An append build must land on the sequence's own grid: a
+            // different rate silently bends every record timecode and the
+            // appended block drifts off the frame grid.
+            (true, Some(project_fps), Some(arg)) => {
+                let requested = parse_fps_arg(arg)?;
+                if requested != project_fps {
+                    bail!(
+                        "--append keeps the project's frame rate ({}/{}); --fps {arg:?} would rebuild the grid",
+                        project_fps.numer(),
+                        project_fps.denom()
+                    );
+                }
+                project_fps
+            }
+            (true, Some(project_fps), None) => project_fps,
+            (_, _, Some(arg)) => parse_fps_arg(arg)?,
+            (_, _, None) => infer()?,
         };
         let size = first_asset
             .and_then(|a| a.video_size())
             .or_else(|| project.media.iter().find_map(|a| a.video_size()));
         (fps, size)
     };
-    project.fps = Some(fps);
-    project.video = size.map(|(width, height)| VideoSettings { width, height });
+    if project.fps.is_none() {
+        project.fps = Some(fps);
+    }
+    if project.video.is_none() {
+        project.video = size.map(|(width, height)| VideoSettings { width, height });
+    }
 
     let offset_frames = timecode_to_frames(parse_timecode(src_offset)?, fps, doc.drop_frame);
     let timeline = edl::build(&doc, fps, offset_frames, &|ev| {
         resolve_reel(&project, &map, ev)
-    })?;
-    project.timeline = timeline;
+    })
+    .with_context(|| format!("building timeline from {}", edl_path.display()))?;
+    if append {
+        append_timeline(&mut project, timeline, track)?;
+    } else {
+        project.timeline = timeline;
+    }
     // A non-cut event (a dissolve, wipe, key) was imported as a cut: say so,
     // rather than silently dropping what the EDL asked for.
     for w in &doc.warnings {
@@ -552,9 +695,11 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
     }
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
+    let action = if append { "appended" } else { "imported" };
     let mut report = CommandReport::new(format!(
-        "✓ {} — {} event(s) → {} track(s), {} asset(s)",
+        "✓ {} — {} {} event(s) → {} track(s), {} asset(s)",
         project_path.display(),
+        action,
         doc.events.len(),
         project.timeline.tracks.len(),
         project.media.len()
@@ -657,6 +802,8 @@ pub(crate) struct OtioImport<'a> {
     pub fps: Option<&'a str>,
     pub remaps: &'a [String],
     pub groups: &'a [GroupSpec],
+    pub append: bool,
+    pub track: Option<usize>,
     pub force: bool,
 }
 
@@ -673,19 +820,35 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
         fps: fps_arg,
         remaps,
         groups,
+        append,
+        track,
         force,
     } = args;
-    if project_path.exists() && !force {
+    if append && force {
         bail!(
-            "{} already exists (use --force to overwrite)",
-            project_path.display()
+            "--append and --force are mutually exclusive: --append adds to the existing project, --force replaces it"
         );
     }
+    let mut project = if append {
+        Project::load(project_path).with_context(|| {
+            format!(
+                "--append needs an existing project at {}",
+                project_path.display()
+            )
+        })?
+    } else {
+        if project_path.exists() && !force {
+            bail!(
+                "{} already exists (use --force to overwrite, or --append)",
+                project_path.display()
+            );
+        }
+        Project::new()
+    };
     let text = std::fs::read_to_string(otio_path)
         .with_context(|| format!("reading {}", otio_path.display()))?;
     let doc = otio::parse(&text).with_context(|| format!("parsing {}", otio_path.display()))?;
 
-    let mut project = Project::new();
     let mut scan_notes = Vec::new();
     if let Some(dir) = media_dir {
         let (_, notes) = pool_media_dir(&mut project, dir)?;
@@ -729,34 +892,63 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
             let canonical = located
                 .canonicalize()
                 .with_context(|| format!("clip {:?}: {} not found", c.name, located.display()))?;
+            // Append starts from a populated pool: reuse an asset already
+            // there rather than re-probing (and possibly adding a second
+            // entry for the same path).
+            if let Some(asset) = project.asset_by_path(&canonical) {
+                by_path.insert(c.path.clone(), asset.id);
+                continue;
+            }
             let report = probe(&canonical)?;
             let (id, _) = project.add_asset(canonical, report);
             by_path.insert(c.path.clone(), id);
         }
     }
 
-    let fps = match fps_arg {
-        Some(s) => parse_fps_arg(s)?,
-        None => doc.fps,
+    let fps = match (append, project.fps, fps_arg) {
+        // As with EDL append, the existing sequence's grid wins; a
+        // conflicting `--fps` would quantize the same spans differently.
+        (true, Some(project_fps), Some(arg)) => {
+            let requested = parse_fps_arg(arg)?;
+            if requested != project_fps {
+                bail!(
+                    "--append keeps the project's frame rate ({}/{}); --fps {arg:?} would rebuild the grid",
+                    project_fps.numer(),
+                    project_fps.denom()
+                );
+            }
+            project_fps
+        }
+        (true, Some(project_fps), None) => project_fps,
+        (_, _, Some(arg)) => parse_fps_arg(arg)?,
+        (_, _, None) => doc.fps,
     };
-    project.fps = Some(fps);
-    project.video = doc
-        .tracks
-        .iter()
-        .filter(|t| t.kind == TrackKind::Video)
-        .flat_map(|t| &t.items)
-        .find_map(|item| match item {
-            OtioItem::Clip(c) => by_path
-                .get(&c.path)
-                .and_then(|id| project.asset(*id))
-                .and_then(|a| a.video_size())
-                .map(|(width, height)| VideoSettings { width, height }),
-            OtioItem::Gap(_) => None,
-        });
+    if project.fps.is_none() {
+        project.fps = Some(fps);
+    }
+    if project.video.is_none() {
+        project.video = doc
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Video)
+            .flat_map(|t| &t.items)
+            .find_map(|item| match item {
+                OtioItem::Clip(c) => by_path
+                    .get(&c.path)
+                    .and_then(|id| project.asset(*id))
+                    .and_then(|a| a.video_size())
+                    .map(|(width, height)| VideoSettings { width, height }),
+                OtioItem::Gap(_) => None,
+            });
+    }
 
     let timeline = otio::build(&doc, &|p| by_path.get(p).copied())
         .with_context(|| format!("building timeline from {}", otio_path.display()))?;
-    project.timeline = timeline;
+    if append {
+        append_timeline(&mut project, timeline, track)?;
+    } else {
+        project.timeline = timeline;
+    }
     // Keep every clip inside its media and on the frame grid.
     let clamp_notes = edit::clamp_project(&mut project);
     project.validate()?;
@@ -774,9 +966,11 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
         .flat_map(|t| t.segments.iter())
         .filter(|s| matches!(s, Segment::Clip(_)))
         .count();
+    let action = if append { "appended" } else { "imported" };
     report.summary = format!(
-        "✓ {} — {} track(s), {} asset(s), {} clip(s)",
+        "✓ {} — {} {} track(s), {} asset(s), {} clip(s)",
         project_path.display(),
+        action,
         project.timeline.tracks.len(),
         project.media.len(),
         clips
