@@ -235,14 +235,18 @@ Packed bytes never travel on the wire — only paths.
   "peak_millionths":421000}]}`. `start` is the source time of sample 0 of the
   packed payload; each window's `start` is a per-channel sample offset from
   it. Amplitudes are millionths of full scale (`1_000_000` = full s16), never
-  floats. Windows tile the payload: the first starts at 0, each next starts
+  floats. Both RMS and peak **aggregate every channel** in the window into one
+  scalar: there is no per-channel breakdown. Windows tile the payload: the
+  first starts at 0, each next starts
   where the previous ended, every window but the last is exactly
   `window_samples` long, and only the final one may be shorter. `validate`
   refuses a hole, an overlong or empty window, RMS above peak, a peak over
   `1_000_000`, and a zero rate/channels/window. Adoption also cross-checks
   `start`/rate/channels/`window_samples` against the request and the window
   total against `meta.samples`, so a truncated result is refused rather than
-  read as a shorter sample.
+  read as a shorter sample. `cmd_analyze_audio` refuses a window shape over
+  `MAX_AUDIO_WINDOWS` (250 000) **before** sampling, naming the count and
+  suggesting a longer `--window` or shorter `--duration`.
 - **`shutdown` is the third method.** Ids are 1/2/3 for hello/analyze/
   shutdown; the analyzer answers `{"id":3,"ok":{"shutdown":true}}` and exits.
   A bad line after the handshake gets its own error line and the loop

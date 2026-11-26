@@ -450,6 +450,9 @@ pub const BOX_MIN_SIDE: u32 = 1;
 /// samples it covers. Windows tile the packed payload: the first starts at 0,
 /// each next starts where the previous ended, and only the last may be shorter
 /// than `window_samples`.
+///
+/// Both amplitudes aggregate **every channel** in the window into one scalar;
+/// there is no per-channel breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioWindowLevel {
     pub start: u64,
