@@ -29,6 +29,8 @@ mod thumbnails;
 // Waveform peaks back the timeline's audio row; `prune` is used headless.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod waveform;
+// The analysis sidecar host and the hidden mean-luma analyzer child.
+mod analysis;
 
 // Declared after the macros: a child module only sees a macro_rules! that
 // precedes the `mod` declaration.
@@ -466,6 +468,9 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Internal: the mean-luma analyzer child `nile analysis analyze` spawns
+    #[command(hide = true)]
+    AnalysisAnalyzer,
     /// Detect the cuts in a rendered file and rebuild an editable timeline
     DetectEdits {
         /// The rendered/edited video to analyze
@@ -792,6 +797,27 @@ enum AnalysisCmd {
         /// JSON file: { "words": [ { "text", "start", "end" } ] }
         file: PathBuf,
     },
+    /// Sample an asset and run the bundled mean-luma analyzer
+    Analyze {
+        /// Asset id (from `nile media ls`)
+        #[arg(long)]
+        asset: u32,
+        /// Source start (seconds or timecode; default 0)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        start: Option<String>,
+        /// Source window length (default: from --start to the asset's end)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        duration: Option<String>,
+        /// Sampling rate (default: the asset's frame rate)
+        #[arg(long, value_name = "RATE")]
+        fps: Option<String>,
+        /// Sample width in pixels (default 64; pass with --height)
+        #[arg(long)]
+        width: Option<u32>,
+        /// Sample height in pixels (default 36; pass with --width)
+        #[arg(long)]
+        height: Option<u32>,
+    },
 }
 
 /// Media-group subcommands.
@@ -955,6 +981,14 @@ fn main() -> Result<()> {
         }
         return cmd_report(file, *json);
     }
+    // The analyzer child has no project: it reads the packed sample paths the
+    // parent put on its stdin, so dispatch before project resolution.
+    if let Cmd::AnalysisAnalyzer = &cli.command {
+        if cli.project.is_some() {
+            anyhow::bail!("analysis-analyzer is an internal child command; --project is not used");
+        }
+        return analysis::run_analyzer().map_err(Into::into);
+    }
     let project = match cli.project.clone() {
         Some(project) => project,
         None => cmd::project::resolve_default_project(&cwd)?,
@@ -1019,7 +1053,31 @@ fn main() -> Result<()> {
         Cmd::Analysis {
             action: AnalysisCmd::Import { asset, file },
         } => return cmd::analysis::cmd_import(&project, *asset, file),
+        Cmd::Analysis {
+            action:
+                AnalysisCmd::Analyze {
+                    asset,
+                    start,
+                    duration,
+                    fps,
+                    width,
+                    height,
+                },
+        } => {
+            return cmd::analysis::cmd_analyze(
+                &project,
+                cmd::analysis::AnalyzeArgs {
+                    asset: *asset,
+                    start: start.as_deref(),
+                    duration: duration.as_deref(),
+                    fps: fps.as_deref(),
+                    width: *width,
+                    height: *height,
+                },
+            );
+        }
         Cmd::Report { .. } => unreachable!("handled before project resolution"),
+        Cmd::AnalysisAnalyzer => unreachable!("handled before project resolution"),
         Cmd::ImportEdl {
             file,
             media,

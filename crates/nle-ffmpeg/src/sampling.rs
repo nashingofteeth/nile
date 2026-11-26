@@ -43,7 +43,7 @@ use thiserror::Error;
 /// Bump when the *meaning* of a sample changes (a different pixel format, a
 /// different resampler, a different truncation rule). Old entries are then
 /// unreachable instead of being served as if they were the new thing.
-const SAMPLE_VERSION: u32 = 1;
+pub const SAMPLE_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum SampleError {
@@ -268,10 +268,51 @@ impl AudioSample {
     }
 }
 
+/// The identity and paths of the cache entry a sample came from.
+///
+/// A sidecar analyzes a packed file, not a stream, so it needs the entry's
+/// [`SampleMeta`] and raw path. The `key` is what the analyzer echoes back;
+/// the host uses it to check the product was computed from the sample it
+/// requested, never from a different cache entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleEntry {
+    key: String,
+    params: String,
+    version: u32,
+    data: PathBuf,
+    meta: PathBuf,
+}
+
+impl SampleEntry {
+    /// The 16-hex entry key (the `<key>.raw`/`<key>.json` stem).
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The 16-hex spec fingerprint, independent of the source identity.
+    pub fn params(&self) -> &str {
+        &self.params
+    }
+
+    /// The `SAMPLE_VERSION` the entry was written with.
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// The packed payload.
+    pub fn data_path(&self) -> &Path {
+        &self.data
+    }
+
+    /// The metadata sidecar (the entry's commit marker).
+    pub fn meta_path(&self) -> &Path {
+        &self.meta
+    }
+}
+
 /// A content-addressed store for packed samples. The caller picks the root;
-/// `nile-cli` will point it at `.nile/<stem>/cache/analysis` (disposable
-/// recomputable data), not `.nile/<stem>/analysis` (analysis state), once the
-/// sidecar contract lands.
+/// `nile-cli` points it at `.nile/<stem>/cache/analysis` (disposable
+/// recomputable data), not `.nile/<stem>/analysis` (analysis state).
 #[derive(Debug, Clone)]
 pub struct SampleCache {
     root: PathBuf,
@@ -289,21 +330,42 @@ impl SampleCache {
     /// Sample `spec`, or load the cached result when the source and spec are
     /// unchanged. A missing source can still be answered from the cache.
     pub fn frames(&self, spec: &FrameSpec) -> Result<FrameSample, SampleError> {
+        self.frames_entry(spec).map(|(sample, _)| sample)
+    }
+
+    /// [`SampleCache::frames`], plus the identity and paths of the entry it
+    /// read (or just wrote). An out-of-process analyzer is handed these paths:
+    /// packed bytes never travel on a wire, only paths.
+    pub fn frames_entry(
+        &self,
+        spec: &FrameSpec,
+    ) -> Result<(FrameSample, SampleEntry), SampleError> {
         spec.validate()?;
         let params = frame_params(spec);
         let key = source_key(&spec.source);
         if let Some(id) = source_identity(&spec.source) {
             let entry = entry_key(params, &key.component, &id);
             if let Some(sample) = self.load_frames(entry, params, &key, spec) {
-                return Ok(sample);
+                return Ok((sample, self.entry_info(entry, params)));
             }
             let sample = sample_frames(spec)?;
             self.store_frames(entry, params, &key, &id, spec, &sample)?;
-            Ok(sample)
-        } else if let Some(sample) = self.offline_frames(params, &key, spec) {
-            Ok(sample)
+            Ok((sample, self.entry_info(entry, params)))
+        } else if let Some((entry, sample)) = self.offline_frames(params, &key, spec) {
+            Ok((sample, self.entry_info(entry, params)))
         } else {
             Err(SampleError::MissingFile(spec.source.display().to_string()))
+        }
+    }
+
+    fn entry_info(&self, entry: u64, params: u64) -> SampleEntry {
+        let (data, meta) = entry_paths(&self.root, entry);
+        SampleEntry {
+            key: hex(entry),
+            params: hex(params),
+            version: SAMPLE_VERSION,
+            data,
+            meta,
         }
     }
 
@@ -336,7 +398,7 @@ impl SampleCache {
         spec: &FrameSpec,
     ) -> Option<FrameSample> {
         let (meta, raw) = self.load_entry(entry, params, key)?;
-        let EntryData::Frames {
+        let SampleData::Frames {
             width,
             height,
             frames,
@@ -364,7 +426,7 @@ impl SampleCache {
         spec: &AudioSpec,
     ) -> Option<AudioSample> {
         let (meta, raw) = self.load_entry(entry, params, key)?;
-        let EntryData::Audio {
+        let SampleData::Audio {
             sample_rate,
             channels,
             samples,
@@ -387,10 +449,15 @@ impl SampleCache {
     /// is filed under and that the packed file has the length the metadata
     /// claims. Any mismatch is a miss: re-sampling is cheaper than debugging a
     /// truncated buffer.
-    fn load_entry(&self, entry: u64, params: u64, key: &SourceKey) -> Option<(EntryMeta, Vec<u8>)> {
+    fn load_entry(
+        &self,
+        entry: u64,
+        params: u64,
+        key: &SourceKey,
+    ) -> Option<(SampleMeta, Vec<u8>)> {
         let (raw_path, meta_path) = entry_paths(&self.root, entry);
         let bytes = std::fs::read(&meta_path).ok()?;
-        let meta: EntryMeta = serde_json::from_slice(&bytes).ok()?;
+        let meta: SampleMeta = serde_json::from_slice(&bytes).ok()?;
         if meta.version != SAMPLE_VERSION
             || meta.params != hex(params)
             || meta.key != hex(entry)
@@ -410,14 +477,19 @@ impl SampleCache {
         params: u64,
         key: &SourceKey,
         spec: &FrameSpec,
-    ) -> Option<FrameSample> {
-        self.find_offline(params, key, |data| matches!(data, EntryData::Frames { .. }))
-            .into_iter()
-            .find_map(|entry| self.load_frames(entry, params, key, spec))
+    ) -> Option<(u64, FrameSample)> {
+        self.find_offline(params, key, |data| {
+            matches!(data, SampleData::Frames { .. })
+        })
+        .into_iter()
+        .find_map(|entry| {
+            self.load_frames(entry, params, key, spec)
+                .map(|sample| (entry, sample))
+        })
     }
 
     fn offline_audio(&self, params: u64, key: &SourceKey, spec: &AudioSpec) -> Option<AudioSample> {
-        self.find_offline(params, key, |data| matches!(data, EntryData::Audio { .. }))
+        self.find_offline(params, key, |data| matches!(data, SampleData::Audio { .. }))
             .into_iter()
             .find_map(|entry| self.load_audio(entry, params, key, spec))
     }
@@ -429,7 +501,7 @@ impl SampleCache {
         &self,
         params: u64,
         key: &SourceKey,
-        kind: impl Fn(&EntryData) -> bool,
+        kind: impl Fn(&SampleData) -> bool,
     ) -> Vec<u64> {
         let wanted = hex(params);
         let mut found: Vec<(u64, u64, u32)> = Vec::new();
@@ -453,7 +525,7 @@ impl SampleCache {
             let Ok(bytes) = std::fs::read(dir_entry.path()) else {
                 continue;
             };
-            let Ok(meta) = serde_json::from_slice::<EntryMeta>(&bytes) else {
+            let Ok(meta) = serde_json::from_slice::<SampleMeta>(&bytes) else {
                 continue;
             };
             if meta.version != SAMPLE_VERSION
@@ -482,13 +554,13 @@ impl SampleCache {
         spec: &FrameSpec,
         sample: &FrameSample,
     ) -> Result<(), SampleError> {
-        let meta = EntryMeta::new(
+        let meta = SampleMeta::new(
             params,
             key,
             id,
             entry,
             sample.rgb().len(),
-            EntryData::Frames {
+            SampleData::Frames {
                 width: spec.width,
                 height: spec.height,
                 frames: sample.frame_count() as u64,
@@ -506,13 +578,13 @@ impl SampleCache {
         spec: &AudioSpec,
         sample: &AudioSample,
     ) -> Result<(), SampleError> {
-        let meta = EntryMeta::new(
+        let meta = SampleMeta::new(
             params,
             key,
             id,
             entry,
             sample.pcm().len(),
-            EntryData::Audio {
+            SampleData::Audio {
                 sample_rate: spec.sample_rate,
                 channels: spec.channels,
                 samples: sample.samples() as u64,
@@ -523,7 +595,7 @@ impl SampleCache {
 
     /// Raw first, metadata last: metadata is the commit marker, so a crash
     /// between the writes leaves an entry that simply misses.
-    fn store_entry(&self, entry: u64, meta: &EntryMeta, raw: &[u8]) -> Result<(), SampleError> {
+    fn store_entry(&self, entry: u64, meta: &SampleMeta, raw: &[u8]) -> Result<(), SampleError> {
         let stem = hex(entry);
         write_atomic(&self.root, &format!("{stem}.raw"), raw)?;
         let json = serde_json::to_vec(meta).map_err(|e| SampleError::CacheEncode(e.to_string()))?;
@@ -544,7 +616,7 @@ struct SourceKey {
 }
 
 impl SourceKey {
-    fn matches(&self, meta: &EntryMeta) -> bool {
+    fn matches(&self, meta: &SampleMeta) -> bool {
         meta.source == self.component.to_string_lossy().as_ref()
             || meta.source_arg == self.arg.to_string_lossy().as_ref()
     }
@@ -722,24 +794,28 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), SampleError>
 /// The metadata sidecar. It carries everything `load_entry` needs to reject a
 /// stale or truncated entry, plus the spec fingerprint (`params`) and both
 /// source spellings for the offline lookup.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct EntryMeta {
-    version: u32,
-    params: String,
-    source: String,
-    source_arg: String,
-    source_size: u64,
-    source_mtime_secs: u64,
-    source_mtime_nanos: u32,
-    key: String,
-    bytes: u64,
+///
+/// Public because an out-of-process analyzer reads this file first: it is
+/// authoritative for the sample's shape, and its recorded source signature is
+/// what a product records for later staleness checks.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SampleMeta {
+    pub version: u32,
+    pub params: String,
+    pub source: String,
+    pub source_arg: String,
+    pub source_size: u64,
+    pub source_mtime_secs: u64,
+    pub source_mtime_nanos: u32,
+    pub key: String,
+    pub bytes: u64,
     #[serde(flatten)]
-    data: EntryData,
+    pub data: SampleData,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-enum EntryData {
+pub enum SampleData {
     Frames {
         width: u32,
         height: u32,
@@ -752,14 +828,14 @@ enum EntryData {
     },
 }
 
-impl EntryMeta {
+impl SampleMeta {
     fn new(
         params: u64,
         key: &SourceKey,
         id: &SourceId,
         entry: u64,
         bytes: usize,
-        data: EntryData,
+        data: SampleData,
     ) -> Self {
         Self {
             version: SAMPLE_VERSION,
@@ -1045,6 +1121,39 @@ mod tests {
         // lossy by a couple of levels, hence the tolerance).
         let [r, g, b] = sample.pixel(0, 16, 12).unwrap();
         assert!(r > 200 && g < 60 && b < 60, "not red: {r},{g},{b}");
+    }
+
+    /// The sidecar host needs the entry it just sampled: the key names the
+    /// packed file, and the metadata carries the source signature a product
+    /// records. A hit and a miss must describe the same entry.
+    #[test]
+    fn frames_entry_names_the_packed_sample_and_its_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = video(dir.path(), "red");
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let spec = frame_spec(&source);
+        let (first, entry) = cache.frames_entry(&spec).unwrap();
+        assert_eq!(entry.version(), SAMPLE_VERSION);
+        assert_eq!(entry.key().len(), 16);
+        assert_eq!(entry.params().len(), 16);
+        assert_eq!(
+            entry.data_path(),
+            cache.root().join(format!("{}.raw", entry.key()))
+        );
+        assert_eq!(
+            entry.meta_path(),
+            cache.root().join(format!("{}.json", entry.key()))
+        );
+        let meta: SampleMeta = serde_json::from_slice(&std::fs::read(entry.meta_path()).unwrap())
+            .expect("the entry's metadata");
+        assert_eq!(meta.key, entry.key());
+        assert_eq!(meta.params, entry.params());
+        assert_eq!(meta.bytes, first.rgb().len() as u64);
+
+        // A hit is the same entry, sampled again.
+        let (again, hit) = cache.frames_entry(&spec).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(hit, entry);
     }
 
     #[test]

@@ -30,7 +30,11 @@ pub use action::{
     RegisterEntry, Target, TransitionLen, load_register, load_register_without_migration,
     register_path, run_action, save_register, track_label,
 };
-pub use analysis::{AnalysisError, Transcript, TranscriptInput, TranscriptStore, Word};
+pub use analysis::{
+    AnalysisError, AnalysisProduct, AnalyzerInfo, Freshness, ProductError, ProductResult,
+    ProductSample, ProductStore, SourceSignature, Transcript, TranscriptInput, TranscriptStore,
+    Word,
+};
 pub use annotation::{Anchor, Annotation, AnnotationKind, AnnotationStatus, ClipPoint, SourceRef};
 pub use detect::{Span, reconstruct};
 pub use document::{BatchOutcome, Document, PreviewOutcome};
