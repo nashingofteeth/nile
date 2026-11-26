@@ -4,9 +4,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Fail before the long gate: the final demo step rebuilds demo-sandbox/.
+./scripts/refuse-live-session demo-sandbox/nile.json
+
 cargo fmt --all --check                      # formatting is enforced
 if command -v shellcheck >/dev/null; then    # CI always has it
-  shellcheck scripts/check.sh scripts/install.sh demo.sh
+  shellcheck scripts/check.sh scripts/install.sh scripts/refuse-live-session demo.sh
 else
   echo "shellcheck not installed — skipping (CI runs it)" >&2
 fi

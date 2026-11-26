@@ -5,8 +5,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-N="${CARGO_TARGET_DIR:-$PWD/target}/release/nile"
+# Rebuilding demo-sandbox below wipes its project and state. Refuse while a
+# `nile serve` (or a TUI attached to it) owns it: only that path has a
+# serve.lock; a standalone TUI is not detected.
 DIR=demo-sandbox
+./scripts/refuse-live-session "$DIR/nile.json"
+
+N="${CARGO_TARGET_DIR:-$PWD/target}/release/nile"
 mkdir -p "$DIR"
 cd "$DIR"
 # Each run starts from the same single demo, and check fixtures never linger.

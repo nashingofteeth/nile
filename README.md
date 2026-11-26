@@ -93,9 +93,10 @@ visual-mode and viewport diagnostics. A longer tail keeps zoom/pan meaningful.
 
 Media generation is cached by `demo-sandbox/.demo-media`. Regression fixtures
 run under `demo-sandbox/checks/` and are removed on success, so the sandbox
-always ends with one demo project. Add new feature coverage there rather than
-creating another demo project or another top-level export. Maintenance notes:
-[docs/demo.md](docs/demo.md).
+always ends with one demo project. A run refuses while a live `nile serve` (or
+a TUI attached to it) owns that project — quit the session first. Add new
+feature coverage there rather than creating another demo project or another
+top-level export. Maintenance notes: [docs/demo.md](docs/demo.md).
 
 ## TUI
 

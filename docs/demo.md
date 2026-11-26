@@ -20,6 +20,12 @@ export.
   shell hand-off, pool, undo/register, robustness, and TUI diagnostics. The
   script removes this directory on success, so the sandbox ends with one demo.
 
+`demo.sh` and `scripts/check.sh` refuse to start while
+`demo-sandbox/nile.json` has a live `nile serve` owner; a TUI attached to it
+counts. The guard (`scripts/refuse-live-session`) reads the PID in
+`.nile/nile/serve.lock`; a dead PID is a stale lock and does not block. Quit
+the TUI/server before running the gate.
+
 ## Updating coverage
 
 Add new feature checks to the existing `demo.sh` flow, preferably under
