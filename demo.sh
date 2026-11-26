@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # Rebuilding demo-sandbox below wipes its project and state. Refuse while a
-# serve/TUI session owns it instead of pulling the files out from underneath.
+# `nile serve` (or a TUI attached to it) owns it: only that path has a
+# serve.lock; a standalone TUI is not detected.
 DIR=demo-sandbox
 ./scripts/refuse-live-session "$DIR/nile.json"
 

@@ -71,7 +71,20 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Shell scripts
-        run: shellcheck scripts/check.sh scripts/install.sh demo.sh
+        run: shellcheck scripts/check.sh scripts/install.sh scripts/refuse-live-session demo.sh
+
+      - name: Live-session guard
+        run: |
+          sandbox=$(mktemp -d)
+          trap 'rm -rf "$sandbox"' EXIT
+          : > "$sandbox/nile.json"
+          ./scripts/refuse-live-session "$sandbox/nile.json"
+          mkdir -p "$sandbox/.nile/nile"
+          printf '%s\n' "$$" > "$sandbox/.nile/nile/serve.lock"
+          if ./scripts/refuse-live-session "$sandbox/nile.json"; then
+            echo "a live serve.lock did not refuse" >&2
+            exit 1
+          fi
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -143,7 +156,20 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Shell scripts
-        run: shellcheck scripts/check.sh scripts/install.sh demo.sh
+        run: shellcheck scripts/check.sh scripts/install.sh scripts/refuse-live-session demo.sh
+
+      - name: Live-session guard
+        run: |
+          sandbox=$(mktemp -d)
+          trap 'rm -rf "$sandbox"' EXIT
+          : > "$sandbox/nile.json"
+          ./scripts/refuse-live-session "$sandbox/nile.json"
+          mkdir -p "$sandbox/.nile/nile"
+          printf '%s\n' "$$" > "$sandbox/.nile/nile/serve.lock"
+          if ./scripts/refuse-live-session "$sandbox/nile.json"; then
+            echo "a live serve.lock did not refuse" >&2
+            exit 1
+          fi
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
