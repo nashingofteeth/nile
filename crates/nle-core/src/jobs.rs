@@ -18,6 +18,14 @@
 //! ffmpeg child is gone and silently retrying could overwrite a deliverable a
 //! human already inspected. Terminal states (`done`, `failed`, `cancelled`,
 //! `interrupted`) are final.
+//!
+//! ## Retention and crash temps
+//!
+//! [`prune_plan`] is a pure plan over **terminal** records (the queue executes
+//! it, so `nile serve` stays the one writer). [`JobStore::sweep_temps`] runs
+//! at startup: it deletes only the exact [`partial_path`] a terminal record
+//! names, never a glob, so a live export's temp and an unexplained file are
+//! both left alone.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -33,6 +41,15 @@ use crate::state;
 pub const JOB_VERSION: u32 = 1;
 pub const JOB_FILE: &str = "job.json";
 pub const SNAPSHOT_FILE: &str = "project.json";
+
+/// The high-water mark for job ids. It lives beside the job directories so
+/// removing (or pruning) the highest id cannot make `next_id` recycle it: a
+/// stale client's `job.get 3` must not find a newer job.
+const NEXT_ID_FILE: &str = ".next-id";
+
+/// Seconds in a retention day (`--older-than`). A day is a calendar day of
+/// 86 400 seconds; job timestamps are epoch seconds, so age is wall-clock.
+pub const DAY_SECS: u64 = 86_400;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
@@ -255,15 +272,18 @@ impl JobStore {
         self.job_dir(id).join(SNAPSHOT_FILE)
     }
 
-    /// Highest existing id, or 0. Ids are never reused: a stale client's
-    /// `job.get 3` must not find a newer job.
+    /// The next unused id: one past the highest directory **and** one past the
+    /// persisted high-water mark, whichever is greater. Ids are never reused:
+    /// a stale client's `job.get 3` must not find a newer job. The directory
+    /// scan alone is not enough, because `remove`/`prune` can delete the
+    /// highest id.
     fn next_id(&self) -> Result<u64, JobError> {
+        let mut next = self.stored_next_id().unwrap_or(1);
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(1),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(next),
             Err(e) => return Err(JobError::io(&self.dir, e)),
         };
-        let mut max = 0;
         for entry in entries {
             let entry = entry.map_err(|e| JobError::io(&self.dir, e))?;
             if let Some(id) = entry
@@ -271,10 +291,28 @@ impl JobStore {
                 .to_str()
                 .and_then(|n| n.parse::<u64>().ok())
             {
-                max = max.max(id);
+                next = next.max(id + 1);
             }
         }
-        Ok(max + 1)
+        Ok(next)
+    }
+
+    fn stored_next_id(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.dir.join(NEXT_ID_FILE)).ok()?;
+        text.trim().parse::<u64>().ok().filter(|id| *id > 0)
+    }
+
+    /// Persist the high-water mark before the record is written: a crash
+    /// between the two skips an id (harmless) instead of recycling one.
+    fn write_next_id(&self, next: u64) -> Result<(), JobError> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| JobError::io(&self.dir, e))?;
+        let path = self.dir.join(NEXT_ID_FILE);
+        let mut tmp =
+            tempfile::NamedTempFile::new_in(&self.dir).map_err(|e| JobError::io(&self.dir, e))?;
+        writeln!(tmp, "{next}").map_err(|e| JobError::io(&path, e))?;
+        tmp.persist(&path)
+            .map_err(|e| JobError::io(&path, e.error))?;
+        Ok(())
     }
 
     /// Capture the project and queue a new job. The snapshot is written before
@@ -291,6 +329,7 @@ impl JobStore {
             return Err(JobError::Sequence(sequence));
         }
         let id = self.next_id()?;
+        self.write_next_id(id + 1)?;
         let dir = self.job_dir(id);
         std::fs::create_dir_all(&dir).map_err(|e| JobError::io(&dir, e))?;
         let snapshot = PathBuf::from(SNAPSHOT_FILE);
@@ -442,6 +481,96 @@ impl JobStore {
             source: std::io::Error::other(e.to_string()),
         })
     }
+
+    /// Startup sweep: delete hidden render temps a crash left behind.
+    ///
+    /// A temp is only deleted when it is exactly [`partial_path`] of a
+    /// **terminal** record. The renderer renames or removes that path before
+    /// the terminal record is written, so one still on disk cannot belong to a
+    /// live export; a queued/running record is never considered. The path set
+    /// comes from the records, not a glob, so no unexplained file is removed
+    /// (a temp whose record was already deleted stays for a human). A path that
+    /// is also some record's deliverable is skipped even if the names collide.
+    pub fn sweep_temps(&self, jobs: &[JobRecord]) -> TempSweep {
+        let mut sweep = TempSweep::default();
+        for job in jobs.iter().filter(|job| job.state.is_terminal()) {
+            let temp = partial_path(&job.output, job.id);
+            if jobs.iter().any(|other| other.output == temp) {
+                continue;
+            }
+            match std::fs::remove_file(&temp) {
+                Ok(()) => sweep.removed.push(temp),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => sweep.failed.push((temp, e)),
+            }
+        }
+        sweep
+    }
+}
+
+/// What [`JobStore::sweep_temps`] found.
+#[derive(Debug, Default)]
+pub struct TempSweep {
+    /// Stale temps that were deleted.
+    pub removed: Vec<PathBuf>,
+    /// Stale temps that could not be deleted, with the reason.
+    pub failed: Vec<(PathBuf, std::io::Error)>,
+}
+
+/// The hidden temp path the renderer writes before the atomic rename.
+///
+/// It keeps the output's extension (ffmpeg picks the muxer from it) and lives
+/// beside the output so the final rename stays on one filesystem. This is the
+/// one spelling the executor and the startup sweep share; a different shape
+/// here would make a crash leftover invisible to the sweep.
+pub fn partial_path(output: &Path, id: u64) -> PathBuf {
+    let name = output
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out.mp4".to_string());
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => (stem, ext),
+        _ => (name.as_str(), "mp4"),
+    };
+    output.with_file_name(format!(".{stem}.job{id}.{ext}"))
+}
+
+/// Which terminal jobs a retention pass removes, oldest first.
+///
+/// Retention order is the time a job **finished**, or its creation time for a
+/// record that never started, with the id as the tiebreak (ids are monotonic,
+/// so equal timestamps keep submission order). The newest `keep` terminal jobs
+/// are always retained; beyond those, `older_than_days` (when set) further
+/// requires the same timestamp to be older than `now - days`, so a fresh job
+/// is never pruned just because `keep` is small. Queued and running jobs are
+/// not candidates at all.
+pub fn prune_plan(
+    jobs: &[JobRecord],
+    keep: usize,
+    older_than_days: Option<u64>,
+    now: u64,
+) -> Vec<u64> {
+    let mut terminal: Vec<&JobRecord> = jobs.iter().filter(|job| job.state.is_terminal()).collect();
+    terminal.sort_by_key(|job| {
+        (
+            std::cmp::Reverse(retention_time(job)),
+            std::cmp::Reverse(job.id),
+        )
+    });
+    let cutoff = older_than_days.map(|days| now.saturating_sub(days.saturating_mul(DAY_SECS)));
+    terminal
+        .into_iter()
+        .skip(keep)
+        .filter(|job| cutoff.is_none_or(|cutoff| retention_time(job) < cutoff))
+        // The plan is oldest first: the natural order to report deletions.
+        .rev()
+        .map(|job| job.id)
+        .collect()
+}
+
+/// The timestamp a job is aged by: its finish if it ran, else its creation.
+fn retention_time(job: &JobRecord) -> u64 {
+    job.finished_at.unwrap_or(job.created_at)
 }
 
 /// Seconds since the epoch; 0 if the clock is before it (never panics).
@@ -657,6 +786,252 @@ mod tests {
             store.remove(job.id).expect_err("already gone"),
             JobError::NotFound(_)
         ));
+    }
+
+    /// Create a job, then stamp the fields retention reads.
+    fn aged(
+        store: &JobStore,
+        project: &Project,
+        state: JobState,
+        created_at: u64,
+        finished_at: Option<u64>,
+    ) -> JobRecord {
+        let mut job = store
+            .create(
+                project,
+                1,
+                PathBuf::from(format!("/tmp/{created_at}.mp4")),
+                JobExport::default(),
+            )
+            .expect("create");
+        job.state = state;
+        job.created_at = created_at;
+        job.finished_at = finished_at;
+        store.update(&job).expect("update");
+        job
+    }
+
+    #[test]
+    fn retention_prunes_only_terminal_jobs_beyond_the_keep_count() {
+        let (_dir, store) = store();
+        let project = project();
+        let oldest_done = aged(&store, &project, JobState::Done, 100, Some(110));
+        let queued = aged(&store, &project, JobState::Queued, 200, None);
+        let running = aged(&store, &project, JobState::Running, 300, None);
+        let failed = aged(&store, &project, JobState::Failed, 400, Some(420));
+        let newest_done = aged(&store, &project, JobState::Cancelled, 500, Some(510));
+        let jobs = vec![
+            oldest_done.clone(),
+            queued.clone(),
+            running.clone(),
+            failed.clone(),
+            newest_done.clone(),
+        ];
+
+        // Newest terminal first: cancelled (id 5), failed (id 4), done (id 1).
+        assert_eq!(prune_plan(&jobs, 2, None, 1_000), vec![oldest_done.id]);
+        assert_eq!(
+            prune_plan(&jobs, 1, None, 1_000),
+            vec![oldest_done.id, failed.id]
+        );
+        assert_eq!(
+            prune_plan(&jobs, 0, None, 1_000),
+            vec![oldest_done.id, failed.id, newest_done.id],
+            "oldest first"
+        );
+
+        // A live job is not a candidate however small `keep` is.
+        for keep in 0..=3 {
+            let pruned = prune_plan(&jobs, keep, None, 1_000);
+            assert!(
+                !pruned.contains(&queued.id),
+                "queued job pruned: {pruned:?}"
+            );
+            assert!(
+                !pruned.contains(&running.id),
+                "running job pruned: {pruned:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retention_age_uses_the_finish_time_then_creation_and_keeps_the_newest() {
+        let now = 100 * DAY_SECS;
+        let (_dir, store) = store();
+        let project = project();
+        let ten_days = aged(
+            &store,
+            &project,
+            JobState::Done,
+            now - 40 * DAY_SECS,
+            Some(now - 10 * DAY_SECS),
+        );
+        let thirty_days = aged(
+            &store,
+            &project,
+            JobState::Failed,
+            now - 30 * DAY_SECS,
+            None,
+        );
+        let one_day = aged(
+            &store,
+            &project,
+            JobState::Cancelled,
+            now - 90 * DAY_SECS,
+            Some(now - DAY_SECS),
+        );
+        let jobs = vec![ten_days.clone(), thirty_days.clone(), one_day.clone()];
+
+        // `keep` protects the newest terminal job; age prunes the rest.
+        assert_eq!(
+            prune_plan(&jobs, 1, Some(7), now),
+            vec![thirty_days.id, ten_days.id]
+        );
+        // An age-only window never prunes inside the keep window.
+        assert_eq!(prune_plan(&jobs, 3, Some(7), now), Vec::<u64>::new());
+        // A job that never started is aged by its creation time.
+        assert_eq!(prune_plan(&jobs, 0, Some(20), now), vec![thirty_days.id]);
+        // Zero days means "strictly older than now", oldest first.
+        assert_eq!(
+            prune_plan(&jobs, 0, Some(0), now),
+            vec![thirty_days.id, ten_days.id, one_day.id]
+        );
+    }
+
+    #[test]
+    fn equal_retention_times_break_the_tie_by_id() {
+        let now = 1_000;
+        let (_dir, store) = store();
+        let project = project();
+        let first = aged(&store, &project, JobState::Done, 100, Some(900));
+        let second = aged(&store, &project, JobState::Done, 100, Some(900));
+        let jobs = vec![first.clone(), second.clone()];
+        assert_eq!(prune_plan(&jobs, 1, None, now), vec![first.id]);
+        assert_eq!(prune_plan(&jobs, 0, None, now), vec![first.id, second.id]);
+    }
+
+    #[test]
+    fn the_startup_sweep_removes_only_stale_render_temps() {
+        let (dir, store) = store();
+        let project = project();
+        let renders = dir.path().join("renders");
+        std::fs::create_dir_all(&renders).expect("renders dir");
+        let output = |name: &str| renders.join(name);
+
+        let done = store
+            .create(&project, 1, output("done.mp4"), JobExport::default())
+            .expect("create");
+        let mut done = done;
+        done.state = JobState::Done;
+        store.update(&done).expect("update");
+        let queued = store
+            .create(&project, 1, output("queued.mp4"), JobExport::default())
+            .expect("create");
+        let running = store
+            .create(&project, 1, output("running.mp4"), JobExport::default())
+            .expect("create");
+        let mut running = running;
+        running.state = JobState::Running;
+        store.update(&running).expect("update");
+
+        let done_temp = partial_path(&done.output, done.id);
+        let queued_temp = partial_path(&queued.output, queued.id);
+        let running_temp = partial_path(&running.output, running.id);
+        std::fs::write(&done_temp, b"crashed render").unwrap();
+        std::fs::write(&queued_temp, b"queued").unwrap();
+        std::fs::write(&running_temp, b"live").unwrap();
+        std::fs::write(&done.output, b"deliverable").unwrap();
+        let unexplained = renders.join(".unknown.job99.mp4");
+        std::fs::write(&unexplained, b"no record names me").unwrap();
+        let not_a_temp = renders.join(".notes.txt");
+        std::fs::write(&not_a_temp, b"keep").unwrap();
+
+        let sweep = store.sweep_temps(&[done.clone(), queued.clone(), running.clone()]);
+        assert_eq!(sweep.removed, vec![done_temp.clone()]);
+        assert!(sweep.failed.is_empty(), "{:?}", sweep.failed);
+        assert!(!done_temp.exists(), "a terminal temp is removed");
+        assert!(queued_temp.exists(), "a queued temp is untouched");
+        assert!(running_temp.exists(), "a running temp is untouched");
+        assert!(done.output.exists(), "the deliverable is untouched");
+        assert!(unexplained.exists(), "no record explains it, so keep it");
+        assert!(not_a_temp.exists());
+    }
+
+    #[test]
+    fn the_sweep_never_deletes_a_path_that_is_another_records_output() {
+        let (dir, store) = store();
+        let mut project = project();
+        project.fps = Some(Seconds::from_integer(30));
+        let first = store
+            .create(
+                &project,
+                1,
+                dir.path().join("out.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        let mut first = first;
+        first.state = JobState::Done;
+        store.update(&first).expect("update");
+        // A hand-made collision: the second job delivers exactly the first
+        // job's hidden temp name.
+        let collision = partial_path(&first.output, first.id);
+        let second = store
+            .create(&project, 1, collision.clone(), JobExport::default())
+            .expect("create");
+        std::fs::write(&collision, b"a real deliverable").unwrap();
+
+        let sweep = store.sweep_temps(&[first, second]);
+        assert!(sweep.removed.is_empty(), "{:?}", sweep.removed);
+        assert!(
+            collision.exists(),
+            "another record's output is a deliverable"
+        );
+    }
+
+    #[test]
+    fn removing_the_highest_id_does_not_recycle_it() {
+        let (_dir, store) = store();
+        let project = project();
+        let first = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/one.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        assert_eq!(first.id, 1);
+        store.remove(first.id).expect("remove");
+        let second = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/two.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        assert_eq!(second.id, 2, "a removed id is not reused");
+        store.remove(second.id).expect("remove");
+        let third = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/three.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        assert_eq!(third.id, 3);
+    }
+
+    #[test]
+    fn partial_path_keeps_the_extension_and_is_hidden() {
+        let out = Path::new("/tmp/show.mp4");
+        assert_eq!(partial_path(out, 7), Path::new("/tmp/.show.job7.mp4"));
+        assert_eq!(
+            partial_path(Path::new("/tmp/noext"), 2).extension(),
+            Some("mp4".as_ref())
+        );
     }
 
     #[test]
