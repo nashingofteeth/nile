@@ -9,13 +9,15 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use self::fx::{form_hint, render_fx, render_transition_form};
 use self::info::render_info;
+use self::jobs::render_jobs;
 use self::pool::render_pool;
 use self::status::render_status;
 use self::timeline::{filmstrip_rows, render_timeline, track_has_audio};
-use super::{App, Mode, fx_state, is_fx, is_pool, pool_strip_active};
+use super::{App, Mode, fx_state, is_fx, is_jobs, is_pool, pool_strip_active};
 
 pub(super) mod fx;
 pub(super) mod info;
+pub(super) mod jobs;
 pub(super) mod pool;
 pub(super) mod status;
 pub(super) mod timeline;
@@ -76,6 +78,8 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
         render_fx(f, info, app);
     } else if matches!(app.mode, Mode::Transition(_)) {
         render_transition_form(f, info, app);
+    } else if is_jobs(app) {
+        render_jobs(f, info, app);
     } else {
         render_info(f, info, app);
     }
@@ -150,7 +154,7 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
             "edits   :split :trim-in|out :delete :yank :paste :gap :extend :speed",
             "history :undo :redo · :track add|rm · :sequence use N",
             "media   :import PATH|DIR · :add FILE · :media ls · :media rm N",
-            "more    :show :seek :purge :detect :edl-import :otio-import :export",
+            "more    :show :seek :purge :detect :edl-import :otio-import :export :jobs",
         ];
     }
     if matches!(app.mode, Mode::Visual(_)) {
@@ -196,6 +200,13 @@ pub(crate) fn hints_for(app: &App) -> Vec<&'static str> {
             "effects — rows apply in order at export; the monitor re-renders",
             "j/k select · 1-9 edit · d drop · D clear all · u undo · Ctrl-r redo",
             "c/s/e/o add/edit crop/scale/eq/offset · x transition · q close",
+        ];
+    }
+    if is_jobs(app) {
+        return vec![
+            "jobs — durable renders owned by nile serve",
+            "j/k or ↑↓ select · x cancel · o/enter report path · r reload · q close",
+            "submit: nile job submit -o FILE [--preset …] [--sequence N]",
         ];
     }
     vec![

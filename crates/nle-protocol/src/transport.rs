@@ -17,12 +17,13 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use nle_core::analysis::Word;
+use nle_core::jobs::{JobExport, JobRecord};
 use nle_core::{Action, AudioSettings, CheckReport, Project, Seconds, VideoSettings};
 use serde_json::Value;
 
 use crate::call::{
-    AnalysisHash, AnnotationList, Call, Hello, MediaList, Outcome, PlayheadReply, Preview, Reply,
-    SequenceList, SequenceReply,
+    AnalysisHash, AnnotationList, Call, Hello, JobList, MediaList, Outcome, PlayheadReply, Preview,
+    Reply, SequenceList, SequenceReply,
 };
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
@@ -380,6 +381,59 @@ impl<R: BufRead, W: Write> Client<R, W> {
     ) -> Result<AnalysisHash, ClientError> {
         match self.call(Call::AnalysisAdd { asset, words })? {
             Reply::Analysis(hash) => Ok(hash),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    /// Queue a durable export of `sequence` at `base_revision`. The server
+    /// snapshots the project, so later edits do not change this render.
+    pub fn submit_job(
+        &mut self,
+        base_revision: u64,
+        output: PathBuf,
+        sequence: u32,
+        export: JobExport,
+    ) -> Result<JobRecord, ClientError> {
+        match self.call(Call::JobSubmit {
+            base_revision,
+            output,
+            sequence,
+            export,
+        })? {
+            Reply::Job(job) => Ok(job),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn jobs(&mut self) -> Result<JobList, ClientError> {
+        match self.call(Call::JobList)? {
+            Reply::Jobs(jobs) => Ok(jobs),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    pub fn job(&mut self, id: u64) -> Result<JobRecord, ClientError> {
+        match self.call(Call::JobGet { id })? {
+            Reply::Job(job) => Ok(job),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    /// Cancel a queued job or kill the running export. Returns the record as
+    /// of the call; a running job may still report `running` until its child
+    /// has died.
+    pub fn cancel_job(&mut self, id: u64) -> Result<JobRecord, ClientError> {
+        match self.call(Call::JobCancel { id })? {
+            Reply::Job(job) => Ok(job),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    /// Delete a terminal job's record and snapshot; returns the record that
+    /// was removed. A queued/running or unknown job is a server error.
+    pub fn remove_job(&mut self, id: u64) -> Result<JobRecord, ClientError> {
+        match self.call(Call::JobRemove { id })? {
+            Reply::Job(job) => Ok(job),
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }

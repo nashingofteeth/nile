@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use nle_core::analysis::Word;
+use nle_core::jobs::{JobExport, JobRecord};
 use nle_core::{
     Action, Annotation, AudioSettings, CheckReport, Project, ProjectDiff, Seconds, Sequence,
     VideoSettings,
@@ -127,6 +128,27 @@ wire_catalog! {
             asset: u32,
             words: Vec<Word>,
         } = "analysis.add";
+        /// Queue a durable export. The server snapshots the project at
+        /// `base_revision` and renders that snapshot; the live document may
+        /// move on. `output` must be absolute (the server's cwd is its own).
+        JobSubmit {
+            base_revision: u64,
+            output: PathBuf,
+            /// The sequence the snapshot renders.
+            sequence: u32,
+            #[serde(default)]
+            export: JobExport,
+        } = "job.submit";
+        /// Every durable job, oldest first, plus the live project revision.
+        JobList = "job.list";
+        /// One job by id.
+        JobGet { id: u64 } = "job.get";
+        /// Cancel a queued job, or kill the running export. A terminal job is
+        /// invalid params.
+        JobCancel { id: u64 } = "job.cancel";
+        /// Delete a **terminal** job's record and snapshot. Queued/running
+        /// jobs are refused; the removed record is returned.
+        JobRemove { id: u64 } = "job.remove";
     }
 }
 
@@ -225,6 +247,8 @@ pub enum Reply {
     Analysis(AnalysisHash),
     Preview(Preview),
     Playhead(PlayheadReply),
+    Job(JobRecord),
+    Jobs(JobList),
 }
 
 impl Reply {
@@ -242,6 +266,8 @@ impl Reply {
             Reply::Analysis(_) => "analysis",
             Reply::Preview(_) => "preview",
             Reply::Playhead(_) => "playhead",
+            Reply::Job(_) => "job",
+            Reply::Jobs(_) => "jobs",
         }
     }
 
@@ -283,6 +309,16 @@ impl Reply {
             (Reply::Preview(preview), Call::ActionPreview { .. }) => serde_json::to_value(preview)
                 .map_err(|e| RpcError::internal(format!("preview is not serializable: {e}"))),
             (
+                Reply::Job(job),
+                Call::JobSubmit { .. }
+                | Call::JobGet { .. }
+                | Call::JobCancel { .. }
+                | Call::JobRemove { .. },
+            ) => serde_json::to_value(job)
+                .map_err(|e| RpcError::internal(format!("job is not serializable: {e}"))),
+            (Reply::Jobs(jobs), Call::JobList) => serde_json::to_value(jobs)
+                .map_err(|e| RpcError::internal(format!("job list is not serializable: {e}"))),
+            (
                 Reply::Outcome(outcome),
                 Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. },
             ) => serde_json::to_value(outcome)
@@ -314,6 +350,11 @@ impl Reply {
             Call::AnalysisAdd { .. } => serde_json::from_value(result).map(Reply::Analysis),
             Call::PlayheadSet { .. } => serde_json::from_value(result).map(Reply::Playhead),
             Call::ActionPreview { .. } => serde_json::from_value(result).map(Reply::Preview),
+            Call::JobSubmit { .. }
+            | Call::JobGet { .. }
+            | Call::JobCancel { .. }
+            | Call::JobRemove { .. } => serde_json::from_value(result).map(Reply::Job),
+            Call::JobList => serde_json::from_value(result).map(Reply::Jobs),
             Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {
                 serde_json::from_value(result).map(Reply::Outcome)
             }
@@ -502,4 +543,18 @@ pub struct PlayheadReply {
     pub depth: u64,
     #[serde(with = "nle_core::time::rational_ser")]
     pub at: Seconds,
+}
+
+/// `job.list` result. Jobs are server state, not model state: `revision` is
+/// the live project revision purely so a client can correlate the two.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobList {
+    pub revision: u64,
+    pub jobs: Vec<JobRecord>,
+}
+
+impl JobList {
+    pub fn new(revision: u64, jobs: Vec<JobRecord>) -> Self {
+        Self { revision, jobs }
+    }
 }

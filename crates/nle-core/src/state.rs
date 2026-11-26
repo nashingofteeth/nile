@@ -49,6 +49,11 @@ pub fn cache_dir(project_path: &Path) -> PathBuf {
     state_dir(project_path).join("cache")
 }
 
+/// Durable render jobs and their project snapshots.
+pub fn jobs_dir(project_path: &Path) -> PathBuf {
+    state_dir(project_path).join("jobs")
+}
+
 /// Unix socket the live protocol server listens on. `sun_path` caps the whole
 /// path at roughly 108 bytes on Linux, so a very deep project tree fails at
 /// bind with a clear "file name too long" error.

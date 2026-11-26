@@ -36,32 +36,55 @@ use nle_core::{
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
-    AnalysisHash, AnnotationList, Call, Event, Handler, Hello, MediaAsset, MediaList, MediaUsage,
-    Outcome as WireOutcome, PlayheadReply, Preview, Reply, RpcError, SequenceList, SequenceReply,
-    SequenceSummary, Server,
+    AnalysisHash, AnnotationList, Call, Event, Handler, Hello, JobList, MediaAsset, MediaList,
+    MediaUsage, Outcome as WireOutcome, PlayheadReply, Preview, Reply, RpcError, SequenceList,
+    SequenceReply, SequenceSummary, Server,
 };
 
+use crate::jobs::{JobQueue, QueueError};
 use crate::session::{Session, playhead};
 
 /// Serve the project over the per-project Unix socket, or stdin/stdout when
 /// `--stdio` is set. The socket is the default so a TUI and an agent can
 /// share one writer; the stdio mode is for pipes and tests.
+///
+/// Socket mode binds and locks **before** the handler exists, so a second
+/// server cannot recover jobs or start a dispatcher just to fail at bind.
+/// `--stdio` is deliberately unguarded: it has no singleton gate, and callers
+/// (tests, pipes) are responsible for using separate projects.
 pub(crate) fn cmd_serve(project_path: &Path, stdio: bool) -> Result<()> {
-    let mut session = Session::load(project_path)?;
-    session.set_actor(Actor::Agent("nile-serve".into()));
-    let handler = ServeHandler {
-        session,
-        events: Vec::new(),
-        poisoned: None,
-    };
     if stdio {
+        let handler = build_handler(project_path)?;
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut server = Server::new(stdin.lock(), stdout.lock(), handler);
         server.serve().context("serve the project protocol")?;
         return Ok(());
     }
-    serve_socket(project_path, handler)
+    #[cfg(unix)]
+    {
+        let bound = bind_socket(project_path)?;
+        let handler = build_handler(project_path)?;
+        serve_bound(bound, handler)
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("socket serving is Unix-only; use --stdio")
+    }
+}
+
+/// Load the session and start its queue. Only called once the socket is ours
+/// (or immediately for `--stdio`).
+fn build_handler(project_path: &Path) -> Result<ServeHandler> {
+    let mut session = Session::load(project_path)?;
+    session.set_actor(Actor::Agent("nile-serve".into()));
+    let jobs = JobQueue::start(project_path).context("open the job queue")?;
+    Ok(ServeHandler {
+        session,
+        events: Vec::new(),
+        poisoned: None,
+        jobs,
+    })
 }
 
 #[cfg(unix)]
@@ -251,7 +274,15 @@ impl<S: Read> Read for FrameDeadline<S> {
 }
 
 #[cfg(unix)]
-fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
+struct BoundSocket {
+    listener: std::os::unix::net::UnixListener,
+    /// Removes the socket/lock on drop, including a handler-build failure.
+    _socket: SocketGuard,
+    _lock: LockGuard,
+}
+
+#[cfg(unix)]
+fn bind_socket(project_path: &Path) -> Result<BoundSocket> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
@@ -263,7 +294,7 @@ fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).context("create the project state directory")?;
-    let _lock = acquire_lock(project_path, &socket, &lock)?;
+    let lock = acquire_lock(project_path, &socket, &lock)?;
     // With the lock held, an unconnectable socket is stale and safe to
     // replace; a live one belongs to an older/foreign server.
     match UnixStream::connect(&socket) {
@@ -283,24 +314,27 @@ fn serve_socket(project_path: &Path, handler: ServeHandler) -> Result<()> {
         Err(e) => return Err(e).context("check the project socket"),
     }
     let listener = UnixListener::bind(&socket).context("bind the project socket")?;
-    let _guard = SocketGuard(socket.clone());
+    let guard = SocketGuard(socket.clone());
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
         .context("set socket permissions")?;
     say_err!("serving {} on {}", project_path.display(), socket.display());
+    Ok(BoundSocket {
+        listener,
+        _socket: guard,
+        _lock: lock,
+    })
+}
 
+#[cfg(unix)]
+fn serve_bound(bound: BoundSocket, handler: ServeHandler) -> Result<()> {
     let shared = Arc::new(Mutex::new(handler));
-    for stream in listener.incoming() {
+    for stream in bound.listener.incoming() {
         match stream {
             Ok(stream) => spawn_connection(Arc::clone(&shared), stream),
             Err(e) => log::line(&format!("project socket accept failed: {e}")),
         }
     }
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn serve_socket(_project_path: &Path, _handler: ServeHandler) -> Result<()> {
-    anyhow::bail!("socket serving is Unix-only; use --stdio")
 }
 
 #[cfg(unix)]
@@ -374,6 +408,9 @@ pub(crate) struct ServeHandler {
     pub(crate) session: Session,
     pub(crate) events: Vec<Event>,
     pub(crate) poisoned: Option<String>,
+    /// The durable job queue this server owns. `nile serve` is the only
+    /// process that writes it, so no file lock is needed here.
+    pub(crate) jobs: std::sync::Arc<JobQueue>,
 }
 
 impl Handler for ServeHandler {
@@ -423,11 +460,26 @@ impl Handler for ServeHandler {
                 id,
             } => self.annotation_check(report, *sequence, id),
             Call::AnalysisAdd { asset, words } => self.analysis_add(*asset, words.clone()),
+            Call::JobSubmit {
+                base_revision,
+                output,
+                sequence,
+                export,
+            } => self.job_submit(*base_revision, output, *sequence, export.clone()),
+            Call::JobList => self.job_list(),
+            Call::JobGet { id } => self.job_get(*id),
+            Call::JobCancel { id } => self.job_cancel(*id),
+            Call::JobRemove { id } => self.job_remove(*id),
         }
     }
 
     fn take_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.events)
+        // The queue's worker emits progress between calls; merge those into
+        // this call's reply. An error reply drops them (the Server contract),
+        // but `job.list` re-reads the durable state, so nothing is lost.
+        let mut events = std::mem::take(&mut self.events);
+        events.extend(self.jobs.take_events());
+        events
     }
 }
 
@@ -501,6 +553,62 @@ impl ServeHandler {
             .import(&transcript)
             .map_err(analysis_error)?;
         Ok(Reply::Analysis(AnalysisHash { hash }))
+    }
+
+    /// Queue an export of the project **as it is now**. CAS guards that the
+    /// client named the revision it saw; the snapshot is written before the
+    /// record, so an edit after submit cannot change this render.
+    fn job_submit(
+        &mut self,
+        base_revision: u64,
+        output: &Path,
+        sequence: u32,
+        export: nle_core::jobs::JobExport,
+    ) -> Result<Reply, RpcError> {
+        self.check_revision(base_revision)?;
+        let output = crate::cmd::import::expand_tilde(output);
+        if !output.is_absolute() {
+            return Err(RpcError::invalid_params(
+                "job output must be absolute (the server's cwd may differ from the client's)",
+            ));
+        }
+        if self.session.project().sequence(sequence).is_none() {
+            return Err(RpcError::invalid_params(format!(
+                "sequence #{sequence} not found"
+            )));
+        }
+        if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty())
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Err(RpcError::internal(format!(
+                "create {}: {e}",
+                parent.display()
+            )));
+        }
+        let job = self
+            .jobs
+            .submit(self.session.project(), sequence, output, export)
+            .map_err(queue_rpc)?;
+        Ok(Reply::Job(job))
+    }
+
+    fn job_list(&self) -> Result<Reply, RpcError> {
+        let jobs = self.jobs.list().map_err(queue_rpc)?;
+        Ok(Reply::Jobs(JobList::new(self.session.revision(), jobs)))
+    }
+
+    fn job_get(&self, id: u64) -> Result<Reply, RpcError> {
+        Ok(Reply::Job(self.jobs.get(id).map_err(queue_rpc)?))
+    }
+
+    fn job_cancel(&self, id: u64) -> Result<Reply, RpcError> {
+        Ok(Reply::Job(self.jobs.cancel(id).map_err(queue_rpc)?))
+    }
+
+    /// Retention: delete a terminal job's record + snapshot. The removed
+    /// record is returned so a client can report what went away.
+    fn job_remove(&self, id: u64) -> Result<Reply, RpcError> {
+        Ok(Reply::Job(self.jobs.remove(id).map_err(queue_rpc)?))
     }
 
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {
@@ -894,6 +1002,15 @@ fn media_asset(project: &Project, asset: &Asset) -> MediaAsset {
     }
 }
 
+/// A store failure is the server's; an unknown/terminal job id is the
+/// caller's (the same split as `media.add` and `annotation.check`).
+fn queue_rpc(error: QueueError) -> RpcError {
+    match error {
+        QueueError::Invalid(message) => RpcError::invalid_params(message),
+        QueueError::Store(e) => RpcError::internal(e.to_string()),
+    }
+}
+
 fn edit_rpc(error: EditError) -> RpcError {
     match &error {
         EditError::NothingToUndo | EditError::NothingToRedo => {
@@ -927,10 +1044,12 @@ mod tests {
         project.fps = Some(Seconds::from_integer(30));
         project.save(&path).expect("save");
         let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start(&path).expect("queue");
         ServeHandler {
             session,
             events: Vec::new(),
             poisoned: None,
+            jobs,
         }
     }
 
@@ -958,6 +1077,185 @@ mod tests {
         assert_eq!(h.frame_seconds(15), Seconds::new(1, 2));
     }
 
+    fn handler_with_runner(
+        run: std::sync::Arc<crate::jobs::JobRunner>,
+    ) -> (tempfile::TempDir, ServeHandler) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(Seconds::from_integer(30));
+        project.save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start_with(&path, run).expect("queue");
+        let handler = ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: None,
+            jobs,
+        };
+        (dir, handler)
+    }
+
+    fn quick_runner() -> std::sync::Arc<crate::jobs::JobRunner> {
+        std::sync::Arc::new(|_store, _job, _cancel, _progress| Ok(None))
+    }
+
+    fn wait_done(handler: &ServeHandler, id: u64) -> nle_core::JobRecord {
+        for _ in 0..200 {
+            let job = handler.jobs.get(id).expect("get");
+            if job.state.is_terminal() {
+                return job;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("job #{id} never reached a terminal state");
+    }
+
+    #[test]
+    fn a_job_submit_snapshots_the_project_and_reports_progress() {
+        let (dir, mut handler) = handler_with_runner(quick_runner());
+        let output = dir.path().join("out.mp4");
+        let revision = handler.session.revision();
+        let active = handler.session.project().active_id();
+        let reply = handler
+            .job_submit(
+                revision,
+                &output,
+                active,
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect("submit");
+        let Reply::Job(queued) = reply else {
+            panic!("expected a job");
+        };
+        assert_eq!(queued.state, nle_core::JobState::Queued);
+        assert_eq!(queued.revision, revision);
+        let store = nle_core::JobStore::at(handler.session.path());
+        let snapshot = store.load_snapshot(&queued).expect("snapshot");
+        assert_eq!(snapshot.revision, revision);
+        assert_eq!(snapshot.active_id(), active);
+
+        let done = wait_done(&handler, queued.id);
+        assert_eq!(done.state, nle_core::JobState::Done);
+        let events = handler.take_events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::JobChanged {
+                    id,
+                    state: nle_core::JobState::Done,
+                    ..
+                } if *id == queued.id
+            )),
+            "the terminal event is emitted: {events:?}"
+        );
+
+        let Reply::Jobs(list) = handler.job_list().expect("list") else {
+            panic!("expected jobs");
+        };
+        assert_eq!(list.jobs.len(), 1);
+        assert_eq!(list.jobs[0].id, queued.id);
+    }
+
+    #[test]
+    fn job_submit_is_compare_and_swap_and_needs_an_absolute_output() {
+        let (dir, mut handler) = handler_with_runner(quick_runner());
+        let error = handler
+            .job_submit(
+                handler.session.revision() + 1,
+                &dir.path().join("out.mp4"),
+                1,
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect_err("stale revision");
+        assert_eq!(error.code, nle_protocol::REVISION_CONFLICT);
+
+        let error = handler
+            .job_submit(
+                handler.session.revision(),
+                Path::new("relative.mp4"),
+                1,
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect_err("relative output");
+        assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
+        assert!(error.message.contains("absolute"));
+    }
+
+    #[test]
+    fn unknown_job_ids_are_invalid_params() {
+        let (_dir, handler) = handler_with_runner(quick_runner());
+        let error = handler.job_get(99).expect_err("unknown");
+        assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
+        assert!(error.message.contains("not found"));
+        let error = handler.job_cancel(99).expect_err("unknown");
+        assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
+        let error = handler.job_remove(99).expect_err("unknown");
+        assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn removing_a_terminal_job_deletes_it_and_refuses_a_queued_one() {
+        let (dir, mut handler) = handler_with_runner(quick_runner());
+        let output = dir.path().join("remove.mp4");
+        let created = handler
+            .job_submit(
+                handler.session.revision(),
+                &output,
+                handler.session.project().active_id(),
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect("submit");
+        let Reply::Job(job) = created else {
+            panic!("expected a job");
+        };
+        let done = wait_done(&handler, job.id);
+        assert!(done.state.is_terminal());
+        let Reply::Job(removed) = handler.job_remove(job.id).expect("remove") else {
+            panic!("expected a job");
+        };
+        assert_eq!(removed.id, job.id);
+        let store = nle_core::JobStore::at(handler.session.path());
+        assert!(!store.job_dir(job.id).exists());
+        assert!(handler.jobs.get(job.id).is_err(), "the record is gone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_bind_refuses_before_recovering_jobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let project = Project::new();
+        project.save(&path).expect("save");
+        let first = bind_socket(&path).expect("first bind");
+
+        // A leftover `running` record is only touched by `JobQueue::start`;
+        // the refused second server must not reach it.
+        let store = nle_core::JobStore::at(&path);
+        let mut job = store
+            .create(
+                &project,
+                1,
+                dir.path().join("running.mp4"),
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect("create");
+        job.state = nle_core::JobState::Running;
+        store.update(&job).expect("update");
+
+        let error = match bind_socket(&path) {
+            Ok(_) => panic!("a second bind must refuse"),
+            Err(e) => e,
+        };
+        assert!(error.to_string().contains("already serving"), "{error}");
+        assert_eq!(
+            store.get(job.id).unwrap().unwrap().state,
+            nle_core::JobState::Running,
+            "the failed server did not recover the queue"
+        );
+        drop(first);
+    }
+
     #[test]
     fn a_save_failure_poisons_mutations() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -965,10 +1263,12 @@ mod tests {
         Project::new().save(&path).expect("save");
         let session = Session::load(&path).expect("load");
         drop(dir); // the project directory is gone, so the next save fails
+        let jobs = JobQueue::start(&path).expect("queue");
         let mut handler = ServeHandler {
             session,
             events: Vec::new(),
             poisoned: None,
+            jobs,
         };
 
         let error = handler

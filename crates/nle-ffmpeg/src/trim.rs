@@ -105,6 +105,10 @@ pub enum FfmpegError {
         /// exit status alone tells the user nothing.
         tail: String,
     },
+    /// The caller asked to stop; the child was killed. Not a render failure:
+    /// a job queue turns this into `cancelled`, not `failed`.
+    #[error("ffmpeg was cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Error)]
@@ -231,7 +235,7 @@ pub fn run_ffmpeg(args: &[String]) -> Result<(), FfmpegError> {
 /// the screen — the tail is still captured, so a failure still names the
 /// cause.
 pub fn run_ffmpeg_opt(args: &[String], echo: bool) -> Result<(), FfmpegError> {
-    run_ffmpeg_inner(args, echo, None)
+    run_ffmpeg_inner(args, echo, None, None)
 }
 
 /// Run ffmpeg and report its output position (seconds) as it goes.
@@ -245,16 +249,37 @@ pub fn run_ffmpeg_progress(
     echo: bool,
     progress: &mut dyn FnMut(f64),
 ) -> Result<(), FfmpegError> {
-    run_ffmpeg_inner(args, echo, Some(progress))
+    run_ffmpeg_inner(args, echo, Some(progress), None)
+}
+
+/// [`run_ffmpeg_progress`] that stops the child when `cancel` turns true.
+/// The kill happens on the caller's polling thread; the stderr reader is
+/// joined, so no thread is left behind and the caller can safely rename or
+/// delete the partial output.
+pub fn run_ffmpeg_progress_cancel(
+    args: &[String],
+    echo: bool,
+    progress: &mut dyn FnMut(f64),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), FfmpegError> {
+    run_ffmpeg_inner(args, echo, Some(progress), Some(cancel))
 }
 
 fn run_ffmpeg_inner(
     args: &[String],
     echo: bool,
     mut progress: Option<&mut dyn FnMut(f64)>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(), FfmpegError> {
     use std::io::{BufRead, BufReader, Write as _};
     use std::process::Stdio;
+    use std::sync::atomic::Ordering;
+
+    // A job can be cancelled while it waits in the queue; don't spawn ffmpeg
+    // just to kill it.
+    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err(FfmpegError::Cancelled);
+    }
 
     const TAIL: usize = 8;
     let mut cmd = Command::new("ffmpeg");
@@ -303,6 +328,12 @@ fn run_ffmpeg_inner(
         rx
     });
     let status = loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(FfmpegError::Cancelled);
+        }
         if let (Some(rx), Some(cb)) = (&progress_rx, progress.as_mut()) {
             while let Ok(t) = rx.try_recv() {
                 (**cb)(t);
@@ -433,6 +464,62 @@ pub fn trim(spec: &TrimSpec) -> Result<(), TrimError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cancel must kill the child, not wait for a 30 s encode to finish.
+    /// The flag is set from another thread, the same way the job worker does
+    /// it; the runner returns `Cancelled` and no ffmpeg is left behind.
+    #[test]
+    fn a_cancel_kills_the_running_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("cancel.mp4");
+        let args = vec![
+            "-y".to_string(),
+            "-f".to_string(),
+            "lavfi".to_string(),
+            "-i".to_string(),
+            "testsrc2=size=3840x2160:rate=60".to_string(),
+            "-t".to_string(),
+            "120".to_string(),
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "veryslow".to_string(),
+            "--".to_string(),
+            out.display().to_string(),
+        ];
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            let mut progress = |_seconds: f64| {};
+            let error = run_ffmpeg_progress_cancel(&args, false, &mut progress, &cancel)
+                .expect_err("cancelled");
+            assert!(matches!(error, FfmpegError::Cancelled));
+        });
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the child was killed, not awaited"
+        );
+    }
+
+    /// A cancel that arrives before the spawn must not start ffmpeg at all:
+    /// a queued job's cancel races the dispatcher.
+    #[test]
+    fn an_already_cancelled_run_never_spawns() {
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let mut progress = |_seconds: f64| {};
+        let error = run_ffmpeg_progress_cancel(
+            &["--definitely-not-a-real-argument".to_string()],
+            false,
+            &mut progress,
+            &cancel,
+        )
+        .expect_err("cancelled before spawn");
+        assert!(matches!(error, FfmpegError::Cancelled));
+    }
 
     fn spec() -> TrimSpec {
         TrimSpec {

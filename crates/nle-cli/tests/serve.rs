@@ -30,6 +30,230 @@ fn call(serve: &mut common::Serve, id: u64, method: &str, params: Option<Value>)
 }
 
 #[test]
+fn job_submit_renders_the_snapshot_and_retains_the_report() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = {
+        let mut client = serve.client();
+        client.hello().expect("hello")
+    };
+    let output = sandbox.file("job-out.mp4");
+    let job = {
+        let mut client = serve.client();
+        client
+            .submit_job(
+                hello.revision,
+                output.clone(),
+                1,
+                nle_core::jobs::JobExport {
+                    preset: nle_core::ExportPreset::Balanced,
+                    crf: Some(30),
+                    encoder_preset: None,
+                },
+            )
+            .expect("submit")
+    };
+    assert_eq!(job.state, nle_core::JobState::Queued);
+    assert_eq!(job.revision, hello.revision, "the snapshot's revision");
+
+    // The export is a real ffmpeg run on a worker. Poll the durable record
+    // until it leaves the queue; progress events may arrive in between and are
+    // buffered by the typed client.
+    let mut done = job.clone();
+    for _ in 0..600 {
+        if done.state.is_terminal() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        done = {
+            let mut client = serve.client();
+            client.job(job.id).expect("job.get")
+        };
+    }
+    assert_eq!(done.state, nle_core::JobState::Done, "{done:?}");
+    assert_eq!(done.revision, hello.revision);
+    assert!(output.exists(), "the deliverable exists");
+    let report = done.report.expect("a retained report");
+    assert!(report.exists(), "report {}", report.display());
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).expect("read report"))
+            .expect("report JSON");
+    assert_eq!(report["revision"], hello.revision);
+    assert_eq!(report["sequence"], 1);
+
+    // The list and get agree, and an unknown id is invalid params.
+    let list = {
+        let mut client = serve.client();
+        client.jobs().expect("job.list")
+    };
+    assert_eq!(list.jobs.len(), 1);
+    assert_eq!(list.jobs[0].id, job.id);
+    let missing = call(&mut serve, 99, "job.get", Some(json!({"id": 99})));
+    assert_eq!(missing["error"]["code"], -32602);
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn job_submit_cas_refuses_a_stale_revision() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let out = sandbox.file("stale.mp4").display().to_string();
+    let stale = call(
+        &mut serve,
+        2,
+        "job.submit",
+        Some(json!({
+            "base_revision": revision.saturating_sub(1),
+            "output": out,
+            "sequence": 1
+        })),
+    );
+    assert_eq!(stale["error"]["code"], -32001);
+    let list = call(&mut serve, 3, "job.list", None);
+    assert!(list["result"]["jobs"].as_array().unwrap().is_empty());
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[cfg(unix)]
+#[test]
+fn job_cli_submits_and_lists_through_the_socket() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct Guard(Option<Child>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let socket = nle_core::state::session_socket_path(&sandbox.file(P));
+    let mut server = Guard(Some(
+        Command::new(env!("CARGO_BIN_EXE_nile"))
+            .current_dir(sandbox.path())
+            .args(["--project", P, "serve"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn nile serve"),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&socket).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "server never bound {}",
+            socket.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let out = sandbox.file("cli-job.mp4");
+    let before = {
+        let stream = UnixStream::connect(&socket).expect("connect");
+        let write = stream.try_clone().expect("clone");
+        let mut client = nle_protocol::Client::new(BufReader::new(stream), write);
+        client.hello().expect("hello").revision
+    };
+    let submit = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args([
+            "--project",
+            P,
+            "job",
+            "submit",
+            "-o",
+            &out.display().to_string(),
+            "--preset",
+            "balanced",
+            "--crf",
+            "30",
+        ])
+        .output()
+        .expect("job submit");
+    assert!(submit.status.success(), "{submit:?}");
+    let stdout = String::from_utf8_lossy(&submit.stdout);
+    assert!(stdout.contains("queued job #1"), "{stdout}");
+
+    let list = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "ls"])
+        .output()
+        .expect("job ls");
+    assert!(list.status.success(), "{list:?}");
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(stdout.contains("#1"), "{stdout}");
+
+    let show = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "show", "99"])
+        .output()
+        .expect("job show");
+    assert!(!show.status.success(), "an unknown id is refused");
+    let stderr = String::from_utf8_lossy(&show.stderr);
+    assert!(stderr.contains("not found"), "{stderr}");
+
+    // Wait for the real render, then remove the terminal record.
+    let mut state = nle_core::JobState::Queued;
+    for _ in 0..600 {
+        let job = {
+            let stream = UnixStream::connect(&socket).expect("connect");
+            let write = stream.try_clone().expect("clone");
+            let mut client = nle_protocol::Client::new(BufReader::new(stream), write);
+            client.job(1).expect("job.get")
+        };
+        state = job.state;
+        if state.is_terminal() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(state.is_terminal(), "job finished: {state:?}");
+    let rm = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "rm", "1"])
+        .output()
+        .expect("job rm");
+    assert!(rm.status.success(), "{rm:?}");
+    let stdout = String::from_utf8_lossy(&rm.stdout);
+    assert!(stdout.contains("removed #1"), "{stdout}");
+    let gone = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "show", "1"])
+        .output()
+        .expect("job show after rm");
+    assert!(!gone.status.success(), "the removed id is gone");
+    assert!(
+        String::from_utf8_lossy(&gone.stderr).contains("not found"),
+        "{gone:?}"
+    );
+
+    // Submit is a snapshot: the live project was not touched.
+    let hello = {
+        let stream = UnixStream::connect(&socket).expect("connect");
+        let write = stream.try_clone().expect("clone");
+        let mut client = nle_protocol::Client::new(BufReader::new(stream), write);
+        client.hello().expect("hello")
+    };
+    assert_eq!(hello.revision, before, "no model write from a job submit");
+    let _ = BufReader::new(UnixStream::connect(&socket).expect("second connect"));
+    drop(server.0.take());
+}
+
+#[test]
 fn protocol_server_round_trip() {
     let sandbox = Sandbox::new();
     sandbox.base();

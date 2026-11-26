@@ -13,18 +13,20 @@ use self::extend::{Side, enter_extend, enter_extend_side, extend_key};
 use self::fx::{
     add_transition, fx_key, open_fx, open_transition_form, transition_form_key, transition_target,
 };
+use self::jobs::jobs_key;
 use self::pool::{open_pool, pool_key};
 use super::actions::{edit_delete, edit_yank, run_action, seek_clip_end};
 use super::motion::{
     cut_points, half_frame, next_clip_start, next_cut, next_gap_start, prev_clip_start, prev_cut,
     prev_gap_start,
 };
-use super::{App, Mode, Pending, is_fx, is_pool};
+use super::{App, Mode, Pending, is_fx, is_jobs, is_pool};
 
 pub(crate) mod command;
 pub(crate) mod complete;
 pub(crate) mod extend;
 pub(crate) mod fx;
+pub(crate) mod jobs;
 pub(crate) mod pool;
 pub(crate) mod visual;
 
@@ -52,6 +54,8 @@ pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         transition_form_key(app, player, key);
     } else if is_fx(app) {
         fx_key(app, player, key);
+    } else if is_jobs(app) {
+        jobs_key(app, player, key);
     } else {
         normal_key(app, player, key);
     }

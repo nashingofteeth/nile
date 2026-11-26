@@ -54,6 +54,7 @@ pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {
         Mode::Pool(_) => "POOL".to_string(),
         Mode::Fx(_) => "EFFECTS".to_string(),
         Mode::Transition(_) => "TRANSITION".to_string(),
+        Mode::Jobs(_) => "JOBS".to_string(),
     };
     let count = app.count.map(|c| format!("{c}")).unwrap_or_default();
 

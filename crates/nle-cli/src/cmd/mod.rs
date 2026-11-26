@@ -24,6 +24,7 @@ pub(crate) mod check;
 pub(crate) mod detect;
 pub(crate) mod export;
 pub(crate) mod import;
+pub(crate) mod job;
 pub(crate) mod media;
 pub(crate) mod project;
 pub(crate) mod schedule;

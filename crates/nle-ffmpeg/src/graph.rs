@@ -25,7 +25,8 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::trim::{
-    Encoder, FfmpegError, device_args, run_ffmpeg_opt, run_ffmpeg_progress, video_encode_args,
+    Encoder, FfmpegError, device_args, run_ffmpeg_opt, run_ffmpeg_progress,
+    run_ffmpeg_progress_cancel, video_encode_args,
 };
 
 pub const AUDIO_RATE: u32 = 48_000;
@@ -1008,14 +1009,14 @@ pub struct ExportSpec {
 
 /// Compile the graph and run the export. Returns the plan on success.
 pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, true, None, None)
+    run_export(project, spec, true, None, None, None)
 }
 
 /// [`export`] for a caller whose stderr is a terminal UI: ffmpeg's chatter
 /// (and our own `$ ffmpeg …` line) is swallowed rather than painted over the
 /// screen. A failure still carries ffmpeg's reason.
 pub fn export_quiet(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, false, None, None)
+    run_export(project, spec, false, None, None, None)
 }
 
 /// Render only the project's mixed audio to `output`. The video branch is
@@ -1056,7 +1057,19 @@ pub fn export_quiet_progress(
     spec: &ExportSpec,
     progress: &mut dyn FnMut(f64),
 ) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, false, Some(progress), None)
+    run_export(project, spec, false, Some(progress), None, None)
+}
+
+/// [`export_quiet_progress`] with a cancellation flag. The child is killed on
+/// the caller's thread, so when this returns `FfmpegError::Cancelled` no
+/// ffmpeg process is still writing the output: the caller can delete it.
+pub fn export_quiet_progress_cancel(
+    project: &Project,
+    spec: &ExportSpec,
+    progress: &mut dyn FnMut(f64),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<ExportPlan, ExportError> {
+    run_export(project, spec, false, Some(progress), None, Some(cancel))
 }
 
 /// Render only `[offset, offset + duration)` of a project (a scheduler chunk).
@@ -1068,7 +1081,7 @@ pub fn export_range_quiet(
     offset: Seconds,
     duration: Seconds,
 ) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, false, None, Some((offset, duration)))
+    run_export(project, spec, false, None, Some((offset, duration)), None)
 }
 
 fn is_mp4(path: &std::path::Path) -> bool {
@@ -1084,6 +1097,7 @@ fn run_export(
     echo: bool,
     mut progress: Option<&mut dyn FnMut(f64)>,
     range: Option<(Seconds, Seconds)>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<ExportPlan, ExportError> {
     let plan = compile_export(project)?;
     let (graph, vout, aout) = match range {
@@ -1141,7 +1155,11 @@ fn run_export(
         eprintln!("$ ffmpeg {}", args.join(" "));
     }
     if let Some(cb) = progress.as_mut() {
-        run_ffmpeg_progress(&args, echo, &mut **cb).map_err(explain_old_ffmpeg)?;
+        match cancel {
+            Some(cancel) => run_ffmpeg_progress_cancel(&args, echo, &mut **cb, cancel)
+                .map_err(explain_old_ffmpeg)?,
+            None => run_ffmpeg_progress(&args, echo, &mut **cb).map_err(explain_old_ffmpeg)?,
+        }
     } else {
         run_ffmpeg_opt(&args, echo).map_err(explain_old_ffmpeg)?;
     }

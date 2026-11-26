@@ -13,7 +13,8 @@ pub mod trim;
 pub use detect::{DetectError, DetectOptions, Detection, detect};
 pub use graph::{
     AudioCodec, CompileError, ExportError, ExportPlan, ExportSpec, compile_export, export,
-    export_audio_quiet, export_quiet, export_quiet_progress, export_range_quiet,
+    export_audio_quiet, export_quiet, export_quiet_progress, export_quiet_progress_cancel,
+    export_range_quiet,
 };
 // Media types live in core; re-exported here for callers that treat
 // this crate as the media facade.

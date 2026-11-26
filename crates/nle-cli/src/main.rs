@@ -35,6 +35,7 @@ mod analysis;
 // Declared after the macros: a child module only sees a macro_rules! that
 // precedes the `mod` declaration.
 mod cmd;
+mod jobs;
 mod serve;
 mod session;
 
@@ -556,6 +557,11 @@ enum Cmd {
         #[arg(long, value_name = "ID")]
         sequence: Option<u32>,
     },
+    /// Durable render jobs on `nile serve` (submit, list, inspect, cancel)
+    Job {
+        #[command(subcommand)]
+        action: JobCmd,
+    },
     /// Interactive editor: TUI dashboard + mpv monitor, vim keys
     #[cfg(feature = "tui")]
     Edit {
@@ -627,6 +633,47 @@ enum Cmd {
         /// Target bitrate for hardware encoders [vaapi/qsv/videotoolbox]
         #[arg(long, default_value = "8M")]
         bitrate: String,
+    },
+}
+
+/// Durable job subcommands. Every one talks to the running server: the queue
+/// and its single writer live there, not in a one-shot process.
+#[derive(Debug, Subcommand)]
+enum JobCmd {
+    /// List jobs, oldest first
+    Ls,
+    /// Print one job as JSON
+    Show {
+        /// Job id (from `nile job ls`)
+        id: u64,
+    },
+    /// Drop a queued job, or kill the running export
+    Cancel {
+        /// Job id (from `nile job ls`)
+        id: u64,
+    },
+    /// Delete a terminal job's record and snapshot
+    Rm {
+        /// Job id (from `nile job ls`)
+        id: u64,
+    },
+    /// Snapshot the project and queue an export
+    Submit {
+        /// Output file (relative paths resolve against the current directory)
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Sequence to render (default: the server's active sequence)
+        #[arg(long, value_name = "ID")]
+        sequence: Option<u32>,
+        /// Quality tier: preview, balanced, max
+        #[arg(long, value_enum, default_value = "balanced")]
+        preset: QualityPreset,
+        /// Override the tier's quality (0-51, lower = better)
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=51))]
+        crf: Option<u8>,
+        /// Override the encoder's own preset (x264 names or SVT-AV1 number)
+        #[arg(long)]
+        encoder_preset: Option<String>,
     },
 }
 
@@ -1078,6 +1125,7 @@ fn main() -> Result<()> {
         }
         Cmd::Report { .. } => unreachable!("handled before project resolution"),
         Cmd::AnalysisAnalyzer => unreachable!("handled before project resolution"),
+        Cmd::Job { action } => return cmd::job::cmd_job(&project, action),
         Cmd::ImportEdl {
             file,
             media,

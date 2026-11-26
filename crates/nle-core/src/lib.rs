@@ -15,6 +15,7 @@ pub mod edl;
 pub mod expect;
 pub mod extend;
 mod group;
+pub mod jobs;
 pub mod media;
 pub mod otio;
 pub mod project;
@@ -54,6 +55,10 @@ pub use extend::{
     Armed, CommitKind, armed_edge, clip_span, commit_batch, gap_span, plan_commit, resolve_armed,
 };
 pub use group::{MediaGroup, MediaPart};
+pub use jobs::{
+    ExportPreset, JOB_VERSION, JobError, JobExport, JobProgress, JobRecord, JobState, JobStore,
+    Recovery,
+};
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
 pub use project::{

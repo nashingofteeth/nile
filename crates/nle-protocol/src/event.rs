@@ -10,6 +10,7 @@
 //! `params`, so a new field cannot drift from a hand-written params builder.
 
 use nle_core::Seconds;
+use nle_core::jobs::{JobProgress, JobState};
 use serde_json::{Value, json};
 
 use crate::rpc::{Notification, RpcError};
@@ -28,6 +29,17 @@ wire_catalog! {
         /// The active sequence (or the sequence list) changed. `revision` is
         /// unchanged for a pure switch and bumped by `sequence.add`.
         SequenceChanged { active: u32, revision: u64 } = "sequence.changed";
+        /// A running job's render position moved. Progress is advisory: a
+        /// dropped event is recovered by `job.get`.
+        JobProgress { id: u64, state: JobState, progress: JobProgress } = "job.progress";
+        /// A job entered a terminal state (done, failed, cancelled or
+        /// interrupted). `report` is set for a completed render.
+        JobChanged {
+            id: u64,
+            state: JobState,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            report: Option<std::path::PathBuf>,
+        } = "job.changed";
     }
 }
 
