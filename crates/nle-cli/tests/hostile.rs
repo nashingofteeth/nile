@@ -1497,7 +1497,52 @@ fn hostile_frame_fields() {
         nle_core::format_seconds(&loaded.playhead),
         nle_core::format_seconds(&loaded.timeline.end())
     );
+    // Edit ops cross the frame grid; at an extreme rate they must refuse
+    // cleanly (exit 1) or land — never panic. `insist` is the invariant.
+    for argv in [
+        &["gap", "--at", "1", "--frames", "1"][..],
+        &["split", "--at", "1.5"][..],
+        &["speed", "1", "200"][..],
+        &["transition", "--at", "3", "--frames", "1"][..],
+        &["yank", "--seg", "0"][..],
+        &["paste", "--at", "1"][..],
+    ] {
+        s.insist("absurd fps edit", P, argv);
+    }
     s.assert_loads("absurd fps", &format!("{shown}\n{saved}"));
+
+    // A clip|clip seam at an extreme rate: the intermediate prefix sum needs
+    // a denominator the exact rational can't hold. The transition must refuse
+    // in `track_shift`, not panic in `Track::start_of`.
+    let t = Sandbox::new();
+    t.local_base();
+    let mut project: serde_json::Value =
+        serde_json::from_str(&t.read(P)).expect("the local base project");
+    absurd_fps(&mut project);
+    t.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+    t.insist(
+        "absurd fps clip-clip transition",
+        P,
+        &["transition", "--at", "2", "--frames", "1"],
+    );
+    t.assert_loads("absurd fps clip-clip transition", "");
+
+    // A tiny positive rate is the inverse extreme: `dur.den * rate.den`
+    // overflows the frame-grid product, so the checked comparison must not
+    // fall back to a raw multiply.
+    s.hostile_base();
+    let mut project: serde_json::Value =
+        serde_json::from_str(&s.read(P)).expect("the base project");
+    project["sequences"][0]["fps"] = json!("1/9223372036854775807");
+    s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+    for argv in [
+        &["speed", "1", "200"][..],
+        &["gap", "--at", "1", "--frames", "1"][..],
+        &["split", "--at", "1.5"][..],
+    ] {
+        s.insist("tiny fps edit", P, argv);
+    }
+    s.assert_loads("tiny fps edits", "");
 }
 
 #[test]
