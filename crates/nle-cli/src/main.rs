@@ -657,6 +657,15 @@ enum JobCmd {
         /// Job id (from `nile job ls`)
         id: u64,
     },
+    /// Delete old terminal job records (queued and running jobs are kept)
+    Prune {
+        /// Keep this many of the newest terminal jobs
+        #[arg(long, value_name = "N")]
+        keep: u64,
+        /// Also require a job to be at least this many days old
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u64>,
+    },
     /// Snapshot the project and queue an export
     Submit {
         /// Output file (relative paths resolve against the current directory)

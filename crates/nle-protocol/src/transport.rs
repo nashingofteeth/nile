@@ -22,8 +22,8 @@ use nle_core::{Action, AudioSettings, CheckReport, Project, Seconds, VideoSettin
 use serde_json::Value;
 
 use crate::call::{
-    AnalysisHash, AnnotationList, Call, Hello, JobList, MediaList, Outcome, PlayheadReply, Preview,
-    Reply, SequenceList, SequenceReply,
+    AnalysisHash, AnnotationList, Call, Hello, JobList, JobPruneReply, MediaList, Outcome,
+    PlayheadReply, Preview, Reply, SequenceList, SequenceReply,
 };
 use crate::error::{ClientError, ServerError};
 use crate::event::Event;
@@ -434,6 +434,23 @@ impl<R: BufRead, W: Write> Client<R, W> {
     pub fn remove_job(&mut self, id: u64) -> Result<JobRecord, ClientError> {
         match self.call(Call::JobRemove { id })? {
             Reply::Job(job) => Ok(job),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
+    /// Retention: keep the newest `keep` terminal jobs and delete the rest
+    /// (further limited to jobs older than `older_than_days`, when set).
+    /// Queued/running jobs are never pruned; the reply names the removed ids.
+    pub fn prune_jobs(
+        &mut self,
+        keep: u64,
+        older_than_days: Option<u64>,
+    ) -> Result<JobPruneReply, ClientError> {
+        match self.call(Call::JobPrune {
+            keep,
+            older_than_days,
+        })? {
+            Reply::Pruned(reply) => Ok(reply),
             other => Err(ClientError::UnexpectedReply(other.kind())),
         }
     }

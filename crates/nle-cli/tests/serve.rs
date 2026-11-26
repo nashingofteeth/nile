@@ -253,6 +253,129 @@ fn job_cli_submits_and_lists_through_the_socket() {
     drop(server.0.take());
 }
 
+#[cfg(unix)]
+#[test]
+fn job_prune_keeps_the_newest_and_deletes_the_rest_through_the_cli() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct Guard(Option<Child>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let sandbox = Sandbox::new();
+    sandbox.base();
+
+    // `--keep` is not optional: a count-less prune would be a surprise.
+    let missing_keep = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "prune"])
+        .output()
+        .expect("job prune without --keep");
+    assert!(!missing_keep.status.success(), "{missing_keep:?}");
+
+    let socket = nle_core::state::session_socket_path(&sandbox.file(P));
+    let mut server = Guard(Some(
+        Command::new(env!("CARGO_BIN_EXE_nile"))
+            .current_dir(sandbox.path())
+            .args(["--project", P, "serve"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn nile serve"),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&socket).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "server never bound {}",
+            socket.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let out = sandbox.file("prune-job.mp4");
+    let submit = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args([
+            "--project",
+            P,
+            "job",
+            "submit",
+            "-o",
+            &out.display().to_string(),
+            "--preset",
+            "preview",
+            "--crf",
+            "30",
+        ])
+        .output()
+        .expect("job submit");
+    assert!(submit.status.success(), "{submit:?}");
+
+    let mut state = nle_core::JobState::Queued;
+    for _ in 0..600 {
+        let job = {
+            let stream = UnixStream::connect(&socket).expect("connect");
+            let write = stream.try_clone().expect("clone");
+            let mut client = nle_protocol::Client::new(BufReader::new(stream), write);
+            client.job(1).expect("job.get")
+        };
+        state = job.state;
+        if state.is_terminal() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(state.is_terminal(), "job finished: {state:?}");
+
+    // The newest terminal job survives `--keep 1`.
+    let kept = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "prune", "--keep", "1"])
+        .output()
+        .expect("job prune keep 1");
+    assert!(kept.status.success(), "{kept:?}");
+    assert!(
+        String::from_utf8_lossy(&kept.stdout).contains("nothing to prune"),
+        "{kept:?}"
+    );
+
+    // Keeping none removes the terminal record and its snapshot, and names it.
+    let pruned = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "prune", "--keep", "0"])
+        .output()
+        .expect("job prune keep 0");
+    assert!(pruned.status.success(), "{pruned:?}");
+    let stdout = String::from_utf8_lossy(&pruned.stdout);
+    assert!(stdout.contains("pruned 1 job(s): #1"), "{stdout}");
+    let job_dir = nle_core::state::jobs_dir(&sandbox.file(P)).join("1");
+    assert!(!job_dir.exists(), "the job directory is gone");
+
+    let gone = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "job", "show", "1"])
+        .output()
+        .expect("job show after prune");
+    assert!(!gone.status.success(), "the pruned id is gone");
+    assert!(
+        String::from_utf8_lossy(&gone.stderr).contains("not found"),
+        "{gone:?}"
+    );
+
+    drop(server.0.take());
+}
+
 #[test]
 fn protocol_server_round_trip() {
     let sandbox = Sandbox::new();

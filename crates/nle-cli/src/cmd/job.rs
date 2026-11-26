@@ -1,4 +1,4 @@
-//! `nile job ls|show|cancel|submit`: the durable queue on `nile serve`.
+//! `nile job ls|show|cancel|rm|prune|submit`: the durable queue on `nile serve`.
 //!
 //! Unlike `nile export` (synchronous, file-based), a job is submitted to the
 //! running server, which snapshots the project and renders it in the
@@ -55,6 +55,23 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
         JobCmd::Rm { id } => {
             let job = client.remove_job(*id).map_err(anyhow::Error::msg)?;
             say!("removed {}", job.summary());
+        }
+        JobCmd::Prune { keep, older_than } => {
+            let pruned = client
+                .prune_jobs(*keep, *older_than)
+                .map_err(anyhow::Error::msg)?;
+            if pruned.removed.is_empty() && pruned.failed.is_empty() {
+                say!("nothing to prune");
+            } else if !pruned.removed.is_empty() {
+                let ids: Vec<String> = pruned.removed.iter().map(|id| format!("#{id}")).collect();
+                say!("pruned {} job(s): {}", pruned.removed.len(), ids.join(" "));
+            }
+            if !pruned.failed.is_empty() {
+                for failure in &pruned.failed {
+                    say!("could not prune #{}: {}", failure.id, failure.error);
+                }
+                anyhow::bail!("{} job(s) could not be pruned", pruned.failed.len());
+            }
         }
         JobCmd::Submit {
             output,

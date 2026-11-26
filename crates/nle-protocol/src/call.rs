@@ -149,6 +149,17 @@ wire_catalog! {
         /// Delete a **terminal** job's record and snapshot. Queued/running
         /// jobs are refused; the removed record is returned.
         JobRemove { id: u64 } = "job.remove";
+        /// Retention: delete terminal jobs beyond the newest `keep` and, when
+        /// `older_than_days` is set, older than that window. Queued/running
+        /// jobs are never candidates. Returns the removed ids, oldest first.
+        JobPrune {
+            /// How many of the newest terminal jobs to retain.
+            keep: u64,
+            /// Also require a job's finish/creation time to be older than
+            /// this many 86 400-second days.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            older_than_days: Option<u64>,
+        } = "job.prune";
     }
 }
 
@@ -249,6 +260,7 @@ pub enum Reply {
     Playhead(PlayheadReply),
     Job(JobRecord),
     Jobs(JobList),
+    Pruned(JobPruneReply),
 }
 
 impl Reply {
@@ -268,6 +280,7 @@ impl Reply {
             Reply::Playhead(_) => "playhead",
             Reply::Job(_) => "job",
             Reply::Jobs(_) => "jobs",
+            Reply::Pruned(_) => "pruned",
         }
     }
 
@@ -318,6 +331,8 @@ impl Reply {
                 .map_err(|e| RpcError::internal(format!("job is not serializable: {e}"))),
             (Reply::Jobs(jobs), Call::JobList) => serde_json::to_value(jobs)
                 .map_err(|e| RpcError::internal(format!("job list is not serializable: {e}"))),
+            (Reply::Pruned(pruned), Call::JobPrune { .. }) => serde_json::to_value(pruned)
+                .map_err(|e| RpcError::internal(format!("prune reply is not serializable: {e}"))),
             (
                 Reply::Outcome(outcome),
                 Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. },
@@ -355,6 +370,7 @@ impl Reply {
             | Call::JobCancel { .. }
             | Call::JobRemove { .. } => serde_json::from_value(result).map(Reply::Job),
             Call::JobList => serde_json::from_value(result).map(Reply::Jobs),
+            Call::JobPrune { .. } => serde_json::from_value(result).map(Reply::Pruned),
             Call::ActionApply { .. } | Call::Undo { .. } | Call::Redo { .. } => {
                 serde_json::from_value(result).map(Reply::Outcome)
             }
@@ -557,4 +573,21 @@ impl JobList {
     pub fn new(revision: u64, jobs: Vec<JobRecord>) -> Self {
         Self { revision, jobs }
     }
+}
+
+/// `job.prune` result: the terminal job ids the server deleted, oldest first,
+/// plus any it could not delete (the pass continues past a failure).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPruneReply {
+    pub removed: Vec<u64>,
+    /// Terminal jobs whose directory could not be deleted, with the reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<JobPruneFailure>,
+}
+
+/// One terminal job a prune pass could not delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPruneFailure {
+    pub id: u64,
+    pub error: String,
 }

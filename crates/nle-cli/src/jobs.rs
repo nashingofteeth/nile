@@ -33,7 +33,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use nle_core::jobs::{JobError, JobExport, JobProgress, JobRecord, JobState, JobStore, now_secs};
+use nle_core::jobs::{
+    JobError, JobExport, JobProgress, JobRecord, JobState, JobStore, now_secs, partial_path,
+};
 use nle_core::{Project, RenderReport, Seconds, secs_f64};
 
 use nle_ffmpeg::FfmpegError;
@@ -81,6 +83,14 @@ struct QueueState {
     events: Vec<Event>,
 }
 
+/// What one retention pass did: the ids deleted (oldest first) and the ones
+/// whose directory could not be deleted. A failure does not stop the pass.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PruneReport {
+    pub removed: Vec<u64>,
+    pub failed: Vec<(u64, String)>,
+}
+
 pub(crate) struct JobQueue {
     store: JobStore,
     state: Mutex<QueueState>,
@@ -105,6 +115,22 @@ impl JobQueue {
         for skipped in &recovery.skipped {
             log::line(&format!(
                 "job queue: skipping unreadable record ({skipped}); directory kept"
+            ));
+        }
+        // Recovery has flipped every `running` record terminal, so its temp is
+        // now provably stale. Queued records were never started (no temp); the
+        // sweep still refuses to touch them by construction.
+        let sweep = store.sweep_temps(&recovery.jobs);
+        for path in &sweep.removed {
+            log::line(&format!(
+                "job queue: removed orphan render temp {}",
+                path.display()
+            ));
+        }
+        for (path, error) in &sweep.failed {
+            log::line(&format!(
+                "job queue: could not remove orphan temp {}: {error}",
+                path.display()
             ));
         }
         let (wake, rx) = mpsc::channel();
@@ -256,6 +282,36 @@ impl JobQueue {
         // poller; drop only this id's queued notifications.
         state.events.retain(|event| event_job_id(event) != Some(id));
         Ok(job)
+    }
+
+    /// Retention: delete terminal jobs beyond the newest `keep` (and, when
+    /// set, older than `older_than_days`). Queued/running jobs are never
+    /// candidates; holding the state lock keeps `begin_next` from promoting a
+    /// queued job between the plan and the deletions, so a job cannot start
+    /// inside a directory being removed.
+    ///
+    /// A failure does not abort the pass: the report names the ids that were
+    /// removed and the ones that were not, so a caller can report both.
+    pub(crate) fn prune(
+        &self,
+        keep: u64,
+        older_than_days: Option<u64>,
+    ) -> Result<PruneReport, QueueError> {
+        let mut state = self.lock();
+        let jobs = self.store.list()?;
+        let keep = usize::try_from(keep).unwrap_or(usize::MAX);
+        let planned = nle_core::jobs::prune_plan(&jobs, keep, older_than_days, now_secs());
+        let mut report = PruneReport::default();
+        for id in planned {
+            match self.store.remove(id) {
+                Ok(()) => {
+                    report.removed.push(id);
+                    state.events.retain(|event| event_job_id(event) != Some(id));
+                }
+                Err(error) => report.failed.push((id, error.to_string())),
+            }
+        }
+        Ok(report)
     }
 
     pub(crate) fn take_events(&self) -> Vec<Event> {
@@ -455,21 +511,6 @@ pub(crate) fn export_options(export: &JobExport) -> ExportOptions {
         encoder_preset: export.encoder_preset.clone(),
         ..Default::default()
     }
-}
-
-/// The hidden temp path the renderer writes before the atomic rename.
-/// It keeps the output's extension (ffmpeg picks the muxer from it) and lives
-/// beside the output so the final rename stays on one filesystem.
-pub(crate) fn partial_path(output: &Path, id: u64) -> PathBuf {
-    let name = output
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "out.mp4".to_string());
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => (stem, ext),
-        _ => (name.as_str(), "mp4"),
-    };
-    output.with_file_name(format!(".{stem}.job{id}.{ext}"))
 }
 
 /// Render one job from its snapshot. Writes a hidden temp file, renames on
@@ -878,6 +919,161 @@ mod tests {
         let _ = wait_done(&queue, 1);
         queue.remove(1).expect("remove done");
         assert!(!store.job_dir(1).exists());
+    }
+
+    #[test]
+    fn prune_removes_terminal_jobs_but_never_running_or_queued() {
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        for n in 0..2 {
+            store
+                .create(
+                    &project,
+                    1,
+                    PathBuf::from(format!("/tmp/prune-{n}.mp4")),
+                    JobExport::default(),
+                )
+                .unwrap();
+        }
+        // A directory without a record is not a job: it is skippable, not
+        // prunable. A non-numeric name keeps the id high-water mark honest.
+        std::fs::create_dir_all(store.dir().join("scratch")).unwrap();
+
+        let (run, started, release, _overlap) = gated_runner();
+        let queue = JobQueue::start_with(&path, run).expect("queue");
+        assert_eq!(wait_for(&started, "running job"), 1);
+        let queued = queue
+            .submit(
+                &project,
+                1,
+                PathBuf::from("/tmp/prune-2.mp4"),
+                JobExport::default(),
+            )
+            .expect("submit");
+        assert_eq!(queued.id, 3);
+        let cancelled = queue.cancel(3).expect("cancel queued");
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        let _ = queue.take_events(); // drop the cancel notification
+
+        // Only the cancelled (terminal) job is a candidate: #1 is running and
+        // #2 is queued, so a keep of zero still spares them.
+        assert_eq!(queue.prune(0, None).expect("prune").removed, vec![3]);
+        assert!(!store.job_dir(3).exists());
+        assert!(store.job_dir(1).exists(), "a running job is kept");
+        assert!(store.job_dir(2).exists(), "a queued job is kept");
+        assert!(
+            store.dir().join("scratch").exists(),
+            "an unrelated dir is kept"
+        );
+        assert!(
+            queue.take_events().is_empty(),
+            "a pruned job's queued events are dropped"
+        );
+        assert!(
+            queue
+                .prune(0, None)
+                .expect("nothing left")
+                .removed
+                .is_empty()
+        );
+
+        // Finish both, then keep the newest terminal job only.
+        release.send(()).unwrap();
+        assert_eq!(wait_done(&queue, 1).state, JobState::Done);
+        assert_eq!(wait_for(&started, "second job"), 2);
+        release.send(()).unwrap();
+        assert_eq!(wait_done(&queue, 2).state, JobState::Done);
+        assert_eq!(queue.prune(1, None).expect("keep newest").removed, vec![1]);
+        assert!(!store.job_dir(1).exists());
+        assert!(store.job_dir(2).exists());
+        // Ids are not recycled after a prune emptied the highest ids.
+        let next = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/prune-next.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        assert_eq!(next.id, 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_reports_a_failed_removal_and_still_removes_the_rest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        let mut jobs = Vec::new();
+        for n in 0..2 {
+            let mut job = store
+                .create(
+                    &project,
+                    1,
+                    PathBuf::from(format!("/tmp/prune-fail-{n}.mp4")),
+                    JobExport::default(),
+                )
+                .unwrap();
+            job.state = JobState::Done;
+            job.finished_at = Some(10 + n);
+            store.update(&job).unwrap();
+            jobs.push(job);
+        }
+        let (run, _started, _release, _overlap) = gated_runner();
+        let queue = JobQueue::start_with(&path, run).expect("queue");
+
+        // A directory the process cannot delete stands in for an I/O failure.
+        // Running as root can still remove it; then there is nothing to assert.
+        let blocked = store.job_dir(jobs[0].id);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let report = queue.prune(0, None).expect("prune");
+        if report.failed.is_empty() {
+            return;
+        }
+        assert_eq!(report.removed, vec![jobs[1].id]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, jobs[0].id);
+        assert!(!report.failed[0].1.is_empty(), "the reason is reported");
+        assert!(blocked.exists(), "a failed removal keeps its directory");
+        assert!(!store.job_dir(jobs[1].id).exists());
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn startup_sweeps_a_crashed_temp_and_spares_live_work() {
+        let (dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        let done = store
+            .create(
+                &project,
+                1,
+                dir.path().join("crashed.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        let mut done = done;
+        done.state = JobState::Done;
+        store.update(&done).unwrap();
+        let crashed = partial_path(&done.output, done.id);
+        std::fs::write(&crashed, b"half a render").unwrap();
+        let queued = store
+            .create(
+                &project,
+                1,
+                dir.path().join("queued.mp4"),
+                JobExport::default(),
+            )
+            .unwrap();
+        let queued_temp = partial_path(&queued.output, queued.id);
+        std::fs::write(&queued_temp, b"not started").unwrap();
+
+        let _queue = JobQueue::start_with(&path, quick_runner()).expect("queue");
+        assert!(!crashed.exists(), "a terminal record's temp is swept");
+        assert!(queued_temp.exists(), "a queued record's temp is kept");
     }
 
     #[test]
