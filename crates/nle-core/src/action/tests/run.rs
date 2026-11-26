@@ -924,6 +924,29 @@ fn purge_is_undoable() {
     assert_eq!(span(&p), Seconds::new(604, 300), "the drift is back");
 }
 
+// A clean project has nothing to repair, so purge must not record an empty
+// track-list change, bump the revision, or offer it to undo.
+#[test]
+fn purge_stumps_noop_records_nothing() {
+    let mut p = fixture();
+    let mut reg = None;
+    let mut h = History::default();
+    let depth = h.depth();
+    let revision = p.revision;
+    let out = run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::PurgeStumps { track: None },
+        0.0,
+    )
+    .unwrap();
+    assert!(!out.changed, "{}", out.desc);
+    assert!(out.desc.contains("purged 0"), "{}", out.desc);
+    assert_eq!(h.depth(), depth, "no entry for a clean project");
+    assert_eq!(p.revision, revision, "no model write");
+}
+
 /// Clip ids are unique across tracks: a clip-addressed action finds its
 /// own track, so `nile speed ID` needs no `--track` (same as
 /// delete/yank/extend).
@@ -977,6 +1000,30 @@ fn a_clip_addressed_action_finds_its_own_track() {
         Seconds::from_integer(1),
         "the audio-track clip was retimed"
     );
+}
+
+// The current rate builds no ops, so the action reports a no-op: the message
+// says unchanged and no dead history step appears.
+#[test]
+fn setting_the_current_speed_reports_no_change() {
+    let mut p = fixture();
+    let mut reg = None;
+    let mut h = History::default();
+    let out = run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::SetSpeed {
+            track: 0,
+            clip: 1,
+            rate: Seconds::from_integer(1),
+        },
+        0.0,
+    )
+    .unwrap();
+    assert!(!out.changed, "{}", out.desc);
+    assert!(out.desc.contains("unchanged"), "{}", out.desc);
+    assert!(!h.can_undo(), "no dead history entry");
 }
 
 #[test]

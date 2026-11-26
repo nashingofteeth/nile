@@ -343,6 +343,28 @@ fn reimporting_a_pooled_asset_records_nothing() {
     );
 }
 
+// Setting the rate a clip already plays changed nothing, so it must record
+// nothing: an entry would consume an undo step and clear the redo stack. The
+// model compares the ops it built, so the frame-grid rounding is respected.
+#[test]
+fn setting_the_current_speed_records_nothing() {
+    let mut p = fixture();
+    let mut h = History::default();
+    // A real edit under the no-op, so the stacks are non-empty and a dead
+    // entry would be visible.
+    let batch = split(&p, 4.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    h.undo(&mut p).unwrap();
+    let depth = h.depth();
+    let revision = p.revision;
+
+    let batch = set_speed(&p, 1, Seconds::from_integer(1)).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    assert_eq!(h.depth(), depth, "no entry for a no-op");
+    assert_eq!(p.revision, revision, "no model write");
+    assert!(h.can_redo(), "the redo stack survives");
+}
+
 // A picker import of several files is one undo step: one `u` removes the
 // whole batch, and one redo puts it back.
 #[test]
