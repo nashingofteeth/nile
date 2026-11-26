@@ -104,7 +104,7 @@ pub enum Expectation {
         subject_id: Option<String>,
         #[serde(default = "default_margin_pct")]
         margin_pct: f64,
-        #[serde(default = "one")]
+        #[serde(default)]
         min_confidence: f64,
         #[serde(default)]
         tolerance_frames: i64,
@@ -1411,11 +1411,17 @@ fn check_subject_in_frame(
             return out;
         };
         let mut selected = 0;
+        let mut matched = 0;
+        let mut highest = 0;
         for detected in sample.boxes.iter().filter(|detected| {
             detected.subject.label == label
                 && subject_id.is_none_or(|id| detected.subject.id.as_deref() == Some(id))
-                && detected.confidence_milli >= min_milli
         }) {
+            matched += 1;
+            highest = highest.max(detected.confidence_milli);
+            if detected.confidence_milli < min_milli {
+                continue;
+            }
             selected += 1;
             let bx = (f64::from(detected.rect.x) / 10_000.0 - window.x) * 100.0 / window.w;
             let by = (f64::from(detected.rect.y) / 10_000.0 - window.y) * 100.0 / window.h;
@@ -1438,11 +1444,21 @@ fn check_subject_in_frame(
             }
         }
         if selected == 0 {
+            let suffix = subject_id.map(|id| format!(" #{id}")).unwrap_or_default();
+            if matched > 0 {
+                return failed(
+                    out,
+                    format!(
+                        "no {label}{suffix} at or above min_confidence {min_confidence:.2} at frame {frame} (source {}); the highest box is {:.2}",
+                        format_seconds(&source),
+                        f64::from(highest) / 1000.0
+                    ),
+                );
+            }
             return failed(
                 out,
                 format!(
-                    "no {label}{} at frame {frame} (source {})",
-                    subject_id.map(|id| format!(" #{id}")).unwrap_or_default(),
+                    "no {label}{suffix} at frame {frame} (source {})",
                     format_seconds(&source)
                 ),
             );
@@ -2532,6 +2548,28 @@ mod tests {
             &stores,
         );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+    }
+
+    #[test]
+    fn subject_in_frame_names_boxes_below_the_threshold() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 400)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 0.5), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        let detail = outcome.detail.unwrap();
+        assert!(detail.contains("min_confidence 0.50"), "{detail}");
+        assert!(detail.contains("highest box is 0.40"), "{detail}");
     }
 
     #[test]

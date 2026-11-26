@@ -626,7 +626,7 @@ fn annotation_expectations_mirror_the_cli_flags() {
             label: "face".into(),
             subject_id: None,
             margin_pct: 5.0,
-            min_confidence: 1.0,
+            min_confidence: 0.0,
             tolerance_frames: 0,
         }
     );

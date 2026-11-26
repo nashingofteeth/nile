@@ -669,7 +669,7 @@ pub fn expect_from_args(a: ExpectArgs) -> Result<Expectation, ParseError> {
             })?,
             subject_id: a.subject_id,
             margin_pct: a.margin_pct.unwrap_or(5.0),
-            min_confidence: a.min_confidence.unwrap_or(1.0),
+            min_confidence: a.min_confidence.unwrap_or(0.0),
             tolerance_frames: tolerance,
         },
         "words_complete" => Expectation::WordsComplete {
