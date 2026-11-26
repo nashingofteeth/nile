@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use nle_core::state;
 use nle_core::time::secs_f64;
 use nle_core::timeline::{Segment, Track, Transition};
-use nle_core::{AudioSettings, Project, Seconds};
+use nle_core::{AudioSettings, Project, Seconds, Sequence};
 
 use nle_ffmpeg::trim::run_ffmpeg_opt;
 use nle_ffmpeg::{Encoder, ExportSpec, export_range_quiet};
@@ -195,9 +195,17 @@ fn chunk_project(project: &Project, chunk: &Chunk) -> Result<Project> {
         .with_context(|| format!("slice {}..{}", fmt(&chunk.pre), fmt(&chunk.post)))?;
     let mut sub = project.clone();
     sub.timeline = timeline;
-    sub.audio = AudioSettings::default();
-    sub.set_playhead(0.0);
+    chunk_inputs(sub.active_sequence_mut());
     Ok(sub)
+}
+
+/// The sequence state a chunk must not see: the playhead is session state and
+/// audio post belongs to the final mux. Chunk graphs and their cache keys share
+/// this so a future whole-programme setting cannot be cleared in one and
+/// forgotten in the other.
+fn chunk_inputs(sequence: &mut Sequence) {
+    sequence.playhead = Seconds::from_integer(0);
+    sequence.audio = AudioSettings::default();
 }
 
 fn render_chunk(
@@ -531,10 +539,9 @@ fn chunk_hash(project: &Project, spec: &ExportSpec, chunk: &Chunk) -> u64 {
     // by the whole project would let a move or edit in another sequence
     // invalidate these chunks.
     let mut sequence = project.active_sequence().clone();
-    sequence.playhead = Seconds::from_integer(0);
     // Chunks are always rendered without audio post (the final mux applies it
     // once), so changing loudness/fades must not invalidate them.
-    sequence.audio = AudioSettings::default();
+    chunk_inputs(&mut sequence);
     project.active_id().hash(&mut h);
     serde_json::to_vec(&sequence)
         .unwrap_or_default()
