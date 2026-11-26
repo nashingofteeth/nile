@@ -107,9 +107,8 @@ impl Handler for FakeJobs {
 
 #[test]
 fn x_cancels_the_selected_job_through_the_server() {
-    let dir = std::env::temp_dir().join(format!("nle-tui-jobs-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("t.json");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("t.json");
     let project = asset_project();
     project.save(&path).unwrap();
     let socket = nle_core::state::session_socket_path(&path);
@@ -142,8 +141,8 @@ fn x_cancels_the_selected_job_through_the_server() {
     app.mode = Mode::Jobs(JobsState { sel: 1 });
     super::super::jobs::cancel_selected(&mut app);
     assert!(
-        app.message.contains("cancelled #2"),
-        "message: {}",
+        app.message.contains("job #2 — cancelled"),
+        "the message reports the returned state: {}",
         app.message
     );
     assert_eq!(*cancelled.lock().unwrap(), vec![2]);
@@ -152,4 +151,47 @@ fn x_cancels_the_selected_job_through_the_server() {
     assert!(matches!(app.mode, Mode::Jobs(_)));
     drop(app);
     let _ = serve.join();
+}
+
+#[test]
+fn opening_jobs_from_the_pool_hands_the_monitor_back() {
+    let mut app = App::new(asset_project(), temp_project_path("jobs-pool"));
+    open_pool_mode(&mut app, 0);
+    app.command_from_pool = true;
+
+    let notice = super::cmd(&mut app, "jobs");
+    assert!(matches!(app.mode, Mode::Jobs(_)), "{notice}");
+    assert!(!app.command_from_pool, "the pool command hand-off is done");
+    assert!(app.reload_requested, "the timeline EDL is rebuilt");
+}
+
+#[test]
+fn a_failed_refresh_still_stamps_the_poll_time() {
+    let mut app = App::new(asset_project(), temp_project_path("jobs-poll"));
+    app.mode = Mode::Jobs(JobsState { sel: 0 });
+    app.jobs_polled = None;
+    let error = super::super::jobs::refresh_jobs(&mut app).expect_err("no server");
+    assert!(error.contains("nile serve"), "{error}");
+    assert!(
+        app.jobs_polled.is_some(),
+        "a failure waits the throttle window too"
+    );
+}
+
+#[test]
+fn the_panel_scrolls_to_keep_the_selection_visible() {
+    let mut app = App::new(asset_project(), temp_project_path("jobs-scroll"));
+    app.mode = Mode::Jobs(JobsState { sel: 15 });
+    app.jobs = (1..=20)
+        .map(|id| job(id, JobState::Cancelled, 0, 100, None))
+        .collect();
+    let mut term = Terminal::new(TestBackend::new(50, 8)).unwrap();
+    term.draw(|f| render_jobs(f, f.area(), &app)).unwrap();
+    let buf = term.backend().buffer();
+    let text: String = (0..8u16)
+        .map(|y| (0..50u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("#16"), "the selected row is visible:\n{text}");
+    assert!(!text.contains("#1 "), "the list scrolled:\n{text}");
 }

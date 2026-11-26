@@ -129,7 +129,10 @@ pub(crate) fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<S
         }
         "add" => add_command(app, player, &mut f),
         "jobs" => {
-            // The panel owns its notice; returning None keeps it.
+            // Leaving the pool must hand the monitor back to the timeline,
+            // exactly like any other command typed there. The panel owns its
+            // notice; returning None keeps it.
+            leave_pool_command(app, player);
             open_jobs(app);
             None
         }

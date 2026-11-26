@@ -703,11 +703,13 @@ pub(crate) fn preview_failed(app: &mut App, why: &str) {
 /// Re-read the server queue now and clamp the panel cursor. Opening `:jobs`
 /// calls this once so the panel never shows a stale empty list.
 pub(crate) fn refresh_jobs(app: &mut App) -> Result<(), String> {
+    // Stamp every attempt: a failed poll must wait the same throttle window,
+    // or a down server is retried on every 50 ms tick.
+    app.jobs_polled = Some(Instant::now());
     match app.project.jobs() {
         Ok(jobs) => {
             app.jobs = jobs;
             app.jobs_error = None;
-            app.jobs_polled = Some(Instant::now());
             if let Mode::Jobs(state) = &mut app.mode {
                 state.sel = state.sel.min(app.jobs.len().saturating_sub(1));
             }
@@ -747,10 +749,13 @@ pub(crate) fn cancel_selected(app: &mut App) {
     };
     match app.project.cancel_job(job.id) {
         Ok(job) => {
-            app.set_message(&format!("cancelled {}", job.summary()));
+            // Report the state the server sent back, not an assumed
+            // "cancelled": a running job answers `running` until its child is
+            // reaped.
+            app.set_message(&format!("job #{} — {}", job.id, job.state.label()));
             let _ = refresh_jobs(app);
         }
-        Err(e) => app.fail(&format!("cancel job #{}: {e}", job.id)),
+        Err(e) => app.fail(&e.to_string()),
     }
 }
 

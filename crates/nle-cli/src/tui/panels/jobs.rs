@@ -34,6 +34,14 @@ pub(crate) fn render_jobs(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let sel = jobs_sel(app).unwrap_or(0);
+    // Keep the selected row on screen in a short panel; the list can be
+    // longer than the info area.
+    let height = inner.height as usize;
+    let scroll = if height == 0 {
+        0
+    } else {
+        sel.saturating_sub(height.saturating_sub(1))
+    };
     let rows: Vec<Line> = app
         .jobs
         .iter()
@@ -73,7 +81,10 @@ pub(crate) fn render_jobs(f: &mut Frame, area: Rect, app: &App) {
             Line::from(Span::styled(text, style))
         })
         .collect();
-    f.render_widget(Paragraph::new(rows), inner);
+    f.render_widget(
+        Paragraph::new(rows).scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
 }
 
 fn short(text: &str, max: usize) -> String {
