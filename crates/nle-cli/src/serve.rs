@@ -14,14 +14,11 @@
 //! stderr.
 
 use std::io;
-#[cfg(unix)]
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
-#[cfg(unix)]
 use std::thread;
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -55,10 +52,25 @@ use crate::session::{Session, playhead};
 pub(crate) fn cmd_serve(project_path: &Path, stdio: bool) -> Result<()> {
     if stdio {
         let handler = build_handler(project_path)?;
-        let stdin = io::stdin();
         let stdout = io::stdout();
-        let mut server = Server::new(stdin.lock(), stdout.lock(), handler);
-        server.serve().context("serve the project protocol")?;
+        // Same partial-frame policy as a socket connection: the pump makes
+        // stdin pollable, so a frame with no newline cannot wedge the process.
+        let reader = BufReader::new(FrameDeadline::new(
+            StdinPump::spawn(),
+            PARTIAL_FRAME_DEADLINE,
+            FRAME_POLL,
+        ));
+        let mut server = Server::new(reader, stdout.lock(), handler);
+        match server.serve() {
+            Ok(()) => {}
+            Err(nle_protocol::ServerError::Io(e)) if e.kind() == io::ErrorKind::TimedOut => {
+                log::line(&format!(
+                    "stdio connection closed: partial frame exceeded \
+                     {PARTIAL_FRAME_DEADLINE:?} without a newline"
+                ));
+            }
+            Err(e) => return Err(e).context("serve the project protocol"),
+        }
         return Ok(());
     }
     #[cfg(unix)]
@@ -177,12 +189,10 @@ fn acquire_lock(project_path: &Path, socket: &Path, lock: &Path) -> Result<LockG
 }
 
 /// Default grace period between the first byte of a frame and its newline.
-#[cfg(unix)]
 const PARTIAL_FRAME_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Socket read timeout. The adapter wakes this often to poll for the partial
+/// Read timeout. The adapter wakes this often to poll for the partial
 /// deadline; it is not an idle timeout.
-#[cfg(unix)]
 const FRAME_POLL: Duration = Duration::from_millis(100);
 
 /// A `Read` adapter that leaves idle connections alone but gives up on a
@@ -203,7 +213,6 @@ const FRAME_POLL: Duration = Duration::from_millis(100);
 /// The inner reader is a type parameter so tests can script reads instead of
 /// waiting on a real peer. `new` takes both durations so tests use tens of
 /// milliseconds.
-#[cfg(unix)]
 struct FrameDeadline<S> {
     inner: S,
     deadline: Duration,
@@ -212,7 +221,6 @@ struct FrameDeadline<S> {
     partial_since: Option<Instant>,
 }
 
-#[cfg(unix)]
 impl<S> FrameDeadline<S> {
     fn new(inner: S, deadline: Duration, poll: Duration) -> Self {
         Self {
@@ -254,7 +262,6 @@ impl<S> FrameDeadline<S> {
     }
 }
 
-#[cfg(unix)]
 impl<S: Read> Read for FrameDeadline<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
@@ -283,6 +290,75 @@ impl<S: Read> Read for FrameDeadline<S> {
                     thread::sleep(self.poll);
                 }
                 Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+/// A pollable stdin. `Stdin` has no `set_read_timeout`, so a helper thread owns
+/// the blocking read and forwards each non-empty chunk over a one-slot channel;
+/// an empty channel is `WouldBlock` and a closed one is EOF. That lets
+/// [`FrameDeadline`] apply the same partial-frame policy to `--stdio` as to a
+/// socket without ever letting an idle pipe wedge the process.
+struct StdinPump {
+    chunks: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    eof: bool,
+}
+
+impl StdinPump {
+    fn spawn() -> Self {
+        let (tx, chunks) = std::sync::mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let stdin = io::stdin();
+            let mut stdin = stdin.lock();
+            let mut buf = [0u8; 8192];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        if tx.send(Ok(buf[..read].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            chunks,
+            pending: Vec::new(),
+            eof: false,
+        }
+    }
+}
+
+impl Read for StdinPump {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if !self.pending.is_empty() {
+                let read = buf.len().min(self.pending.len());
+                buf[..read].copy_from_slice(&self.pending[..read]);
+                self.pending.drain(..read);
+                return Ok(read);
+            }
+            if self.eof {
+                return Ok(0);
+            }
+            match self.chunks.try_recv() {
+                Ok(Ok(chunk)) => self.pending = chunk,
+                Ok(Err(e)) => return Err(e),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.eof = true,
             }
         }
     }
