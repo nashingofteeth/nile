@@ -3,13 +3,14 @@
 Read before adding frame/audio sampling, an analyzer sidecar, or a CV-backed
 expectation. The **sampler** lives in `crates/nle-ffmpeg/src/sampling.rs`
 (`FrameSpec`/`AudioSpec`, `SampleCache`, RGB24/PCM); the **sidecar host and
-bundled mean-luma analyzer** live in `crates/nle-cli/src/analysis.rs`, with
-products in `crates/nle-core/src/analysis.rs` (`ProductStore`, `a1-`
-addresses). Frame times/indices landed; audio analysis and CV checks are still
-pending. Precedents: `crates/nle-cli/src/proxy.rs` (`RENDER_VERSION`,
-tmp+rename, `prune_at`), `crates/nle-cli/src/filmstrip.rs`/`thumbnails.rs`
-(`asset.path` + size + mtime key; filmstrip also the source span and
-dimensions) and the transcript store (`t1-` addresses).
+bundled analyzers** live in `crates/nle-cli/src/analysis.rs`, with products
+in `crates/nle-core/src/analysis.rs` (`ProductStore`, `a1-` addresses, the
+`subject_boxes` result). Frame times/indices and subject boxes landed; audio
+analysis is still pending. Precedents: `crates/nle-cli/src/proxy.rs`
+(`RENDER_VERSION`, tmp+rename, `prune_at`),
+`crates/nle-cli/src/filmstrip.rs`/`thumbnails.rs` (`asset.path` + size + mtime
+key; filmstrip also the source span and dimensions) and the transcript store
+(`t1-` addresses).
 
 ## Purpose and where it lands
 
@@ -135,18 +136,22 @@ JSON-RPC envelope. stderr is unstructured log text and is never parsed. A
 control line is capped at 1 MiB; a longer line is fatal, not truncated.
 Packed bytes never travel on the wire — only paths.
 
-- **Handshake.** Host: `{"id":1,"method":"hello","protocol":1}`; analyzer:
-  `{"id":1,"ok":{"protocol":1}}`. A mismatch refuses to run.
+- **Handshake.** Host: `{"id":1,"method":"hello","protocol":2}`; analyzer:
+  `{"id":1,"ok":{"protocol":2,"analyzer":{"name","version"},
+  "tasks":["mean_luma","subject_boxes"]}}`. A protocol mismatch refuses to
+  run, and so does asking for a task the analyzer did not advertise (before
+  sampling, so an unsupported detector never decodes a window).
 - **Request.** `analyze` carries `input` (`kind`, `sample` — the cache key —
   plus the absolute `data` and `meta` paths), `request` (tagged by `mode`: a
   grid's `start`/`duration`/`fps`, or an index request's `rate`/`indices`, plus
   `width`/`height`; an audio window would use `sample_rate`/`channels`),
-  `stage` (a host-made temp directory under `cache/analysis/`), and `limits`.
-  A mode may not carry the other mode's fields. `meta` is authoritative for
-  shape, the request is the window, and the analyzer cross-checks the two —
-  including `times` and `indices`. Ids are positive, unique and increasing per
-  child; every path is absolute (the child's cwd is not the client's) and the
-  analyzer refuses a relative one.
+  `task` (tagged by `kind`: `mean_luma`, or `subject_boxes` with `labels` and
+  `floor_milli`), `stage` (a host-made temp directory under
+  `cache/analysis/`), and `limits`. A mode may not carry the other mode's
+  fields. `meta` is authoritative for shape, the request is the window, and
+  the analyzer cross-checks the two — including `times` and `indices`. Ids are
+  positive, unique and increasing per child; every path is absolute (the
+  child's cwd is not the client's) and the analyzer refuses a relative one.
 - **Response.** Exactly one line per request, same `id`, `ok` or `error`
   (codes `bad_request`, `unsupported`, `io`, `corrupt_input`, `internal`).
   `ok` reports the product `hash` and the file name inside `stage`; the host
@@ -159,9 +164,11 @@ Packed bytes never travel on the wire — only paths.
  "meta":"/p/.nile/nile/cache/analysis/7a3c….json"},
  "request":{"mode":"grid","start":"0/1","duration":"1/2","fps":"2/1",
  "width":32,"height":24},
+ "task":{"kind":"mean_luma"},
  "stage":"/p/.nile/nile/cache/analysis/staging/1234-7"}
-{"id":3,"method":"analyze", … "request":{"mode":"indices","rate":"30000/1001",
- "indices":[0,7,29],"width":16,"height":12}, …}
+{"id":3,"method":"analyze", … "request":{"mode":"grid","start":"0/1",
+ "duration":"2/1","fps":"2/1","width":32,"height":24},
+ "task":{"kind":"subject_boxes","labels":["face"],"floor_milli":200}, …}
 {"id":2,"ok":{"hash":"a1-…","stage":"product.json"}}
 {"id":2,"error":{"code":"bad_request","message":"relative path"}}
 ```
@@ -193,6 +200,20 @@ Packed bytes never travel on the wire — only paths.
   `AnalysisProduct::freshness` compares the recorded signature with the live
   file and answers `Fresh`/`Stale`/`Offline`; `is_compatible` owns the
   product/sampler version check.
+- **Subject product shape.** The same envelope with
+  `"result":{"kind":"subject_boxes","grid":{"start","fps","width","height"},
+  "labels":["face"],"floor_milli":200,"frames":[{"index":0,"boxes":[
+  {"subject":{"label":"face","id":"spk-2"},
+  "rect":{"x":312500,"y":333333,"w":125000,"h":166667},
+  "confidence_milli":940}]}]}`. Coordinates are integers in millionths of
+  the **sampled** picture (`1_000_000` = one side), so they survive the
+  sampler's `scale`; `grid` says which source times the frames describe.
+  Frames are in presentation order with `frames[i].index == i`; boxes are
+  sorted by `(label, id, confidence desc, x, y, w, h)`, and `validate`
+  refuses unsorted bytes, a label not in `labels`, a zero-side/out-of-picture
+  box, a confidence below `floor_milli`, or a frame index that is not its
+  position. Adoption additionally cross-checks `grid` against the request and
+  `frames.len()` against `meta.frames`.
 - **`shutdown` is the third method.** Ids are 1/2/3 for hello/analyze/
   shutdown; the analyzer answers `{"id":3,"ok":{"shutdown":true}}` and exits.
   A bad line after the handshake gets its own error line and the loop
@@ -224,11 +245,54 @@ Packed bytes never travel on the wire — only paths.
   unverifiable; `evaluate` stays pure and never runs an analyzer.
 - **The contract is proved before any ML:** a hidden `nile analysis-analyzer`
   subcommand in the same binary (`#[command(hide = true)]`, not a second
-  installed bin) computes per-frame mean luma from the packed RGB24 and
-  writes a product into `stage`. `behaviour.rs` drives `nile analysis
-  analyze` through `env!("CARGO_BIN_EXE_nile")`, so the process boundary —
-  not a function call — is what the test pins. ML replaces it outside the
-  workspace; `nile` links nothing new.
+  installed bin) computes per-frame mean luma or deterministic colour-region
+  boxes from the packed RGB24 and writes a product into `stage`. The colour
+  detector only understands `red`/`green`/`blue`/`white`/`black`; it is a test
+  double for the process boundary, not a face detector. `behaviour.rs` drives
+  `nile analysis analyze`/`detect` through `env!("CARGO_BIN_EXE_nile")`, so
+  the process boundary — not a function call — is what the test pins.
+  `nile analysis detect --analyzer /abs/path` (or `NILE_ANALYZER`) runs a real
+  detector; there is no PATH search and no project-file detector setting. ML
+  replaces the child outside the workspace; `nile` links nothing new.
+- **A detector is an executable, not a link.** The external path is explicit
+  and absolute; the host never resolves one from `nile.json`, the media
+  folder or `PATH`. The product records the detector identity it wrote, so a
+  detector upgrade needs a new run and a new `a1-…` address rather than
+  silently changing an old check.
+
+## Subject-in-frame evaluation
+
+`Expectation::SubjectInFrame` names a product address, the pooled `asset` and
+a detector `label` (optionally one `subject_id`). It is a source product
+check, never a sample of the composited render:
+
+1. The anchor resolves to output frames `[f0, f1)` exactly like every other
+   check; a truncated export fails.
+2. For each frame, `RenderReport::locate` gives `(clip, asset, source)`.
+   A different asset on screen and a black frame **fail**; a blend frame is
+   **unverifiable** (there is no single source picture).
+3. `clip.timeline_offset_of(source)` maps source → clip-relative timeline,
+   then `crop_segments`/`window_at` gives the visible crop window (the same
+   base→first-key ramp the exporter uses). `scale`/`offset` are
+   **unverifiable** because the visible window is not modelled yet.
+4. `SampleGrid::index_at(source)` floors exactly in `i128`; a source time
+   before the grid or past its packed frames is **unverifiable**, never a
+   guessed frame.
+5. Every box of the label (and `subject_id`, when set) with
+   `confidence_milli >= round(min_confidence × 1000)` must have its whole
+   rect inside the crop window after `margin_pct`. A label with no box at a
+   covered frame **fails** — this check asserts presence, unlike
+   `words_complete`'s vacuous empty-span pass. If the product's retention
+   floor is above the check's threshold the answer is **unverifiable** (the
+   product cannot say "absent" below its own floor).
+
+A missing/corrupt product, a product for another source, a non-`subject_boxes`
+result, a label the product did not detect, an incompatible
+`SAMPLE_VERSION`/`PRODUCT_VERSION`, and a stale source are all unverifiable
+with a specific detail. An offline source still evaluates: the grid and source
+signature are recorded in the product. `evaluate`/`evaluate_with` take an
+`AnalysisStores` bundle (transcripts + products); the report-only `evaluate`
+uses empty stores, so it stays pure.
 
 ## Security and failure rules
 
@@ -289,7 +353,7 @@ Live in `sampling.rs`:
   index requests.
 
 Landed with the sidecar/analyzer:
-- The hidden mean-luma analyzer → `a1-…` product via `stage`, with address
+- The hidden analyzer → `a1-…` product via `stage`, with address
   re-hash and sample/source/times cross-checks; `behaviour.rs` also removes the
   source and re-runs to prove the offline sample hit.
 - A malformed line, oversized line, relative path and escaping stage name are
@@ -303,3 +367,20 @@ Landed with the sidecar/analyzer:
   `staging/<pid>-<seq>/` directories (dry run included), leaves a young entry,
   and never touches `analysis/products/`; `cache prune` prints the `analysis`
   line. A pruned sample re-extracts.
+
+Landed with subject detection:
+- **Schema:** subject boxes validate their grid, frame order, sorted labels
+  and boxes, non-zero in-picture rects, the confidence floor, the exact
+  `SampleGrid::index_at` floor at 29.97, and `sort_detected_boxes`.
+- **Process:** the bundled `subject_boxes` task turns a known colour run into
+  the exact millionth rect; typed `task` wire forms; an unsupported label is
+  `unsupported`, not a silent empty result. `require_result_shape` refuses a
+  grid that disagrees with the request or a frame count that disagrees with
+  `meta.frames`.
+- **Evaluation:** synthetic `SubjectInFrame` products cover inside/outside
+  margin, a crop window, no box, another asset, black, blend, `scale`,
+  grid coverage, incompatible/stale/missing products, label/instance and
+  confidence filtering.
+- **End to end:** `behaviour.rs` runs `nile analysis detect --label red`, then
+  `annotation add --expect subject-in-frame` and `annotation check` on a real
+  export; a crop that excludes the box flips the check to fail.
