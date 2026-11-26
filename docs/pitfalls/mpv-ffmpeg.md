@@ -63,9 +63,14 @@ just no longer drags the audio clock with it.
 - **No audio stream, no audio post.** A video-only programme is padded with
   silence, and `loudnorm` maps digital silence to NaN (the AAC encoder then
   refuses it), so `has_audio_material` gates the chain: the export still
-  carries its AAC silence track but applies no normalize/fade. A *silent*
-  audio stream is not detected (that would need decoding); it is the one case
-  `loudnorm` can still reject.
+  carries its AAC silence track but applies no normalize/fade.
+- **A present-but-silent stream is scrubbed, not detected.** The probe only
+  knows a stream exists, so silence still reaches `loudnorm`, which measures
+  -inf and emits NaN/±inf samples. The normalize branch appends
+  `SILENCE_GUARD` (`aeval` maps non-finite samples to zero, then `aformat`
+  restores `fltp`/48 kHz/stereo) before any fade — NaN × 0 is still NaN. The
+  export succeeds with silence instead of failing; no second decode pass. A
+  fades-only chain is safe on silence and gets no guard.
 - **Chunks defer audio post to the final mux.** A chunk graph renders plain
   PCM with `sub.audio` cleared, and the chunk hash ignores the settings, so a
   loudness/fade change reuses the chunks. `concat` then decodes the joined PCM

@@ -1905,6 +1905,41 @@ fn normalizing_a_video_only_programme_exports_silence() {
 }
 
 #[test]
+fn normalizing_a_present_but_silent_stream_exports_silence() {
+    // The stream exists, so `has_audio_material` lets the chain through and
+    // `loudnorm` measures -inf: its output is NaN, which the AAC encoder
+    // rejects. The chain scrubs non-finite samples back to zero, so both the
+    // single graph and the chunked final mux succeed with silence.
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "silent.mp4"]);
+    s.ok(&["add", "silent.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["add", "silent.mp4", "--at", "2", "--in", "0", "--out", "2"]);
+    s.ok(&[
+        "sequence",
+        "audio",
+        "--normalize",
+        "--fade-in",
+        "0.5",
+        "--fade-out",
+        "0.5",
+    ]);
+    s.ok(&["export", "-o", "single.mp4"]);
+    let out = s.ok(&["export", "-o", "chunked.mp4", "--parallel", "2"]);
+    assert!(out.contains("2-way"), "scheduler was not used: {out}");
+    for file in ["single.mp4", "chunked.mp4"] {
+        s.assert_dur(file, 4.0, "the silent programme length");
+        assert_eq!(s.audio_streams(file), ["aac"], "{file}: one encode");
+        assert_eq!(s.audio_sample_rate(file), 48_000, "{file}: 48 kHz");
+        let level = s.audio_mean_volume(file, 1.0, 0.5);
+        assert!(
+            level < -60.0,
+            "{file}: a silent stream must stay silent: {level:.1} dB"
+        );
+    }
+}
+
+#[test]
 fn speech_fades_shape_the_head_and_tail() {
     let s = Sandbox::new();
     s.ok(&["init", "--force"]);
