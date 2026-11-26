@@ -60,11 +60,17 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
             let pruned = client
                 .prune_jobs(*keep, *older_than)
                 .map_err(anyhow::Error::msg)?;
-            if pruned.removed.is_empty() {
+            if pruned.removed.is_empty() && pruned.failed.is_empty() {
                 say!("nothing to prune");
-            } else {
+            } else if !pruned.removed.is_empty() {
                 let ids: Vec<String> = pruned.removed.iter().map(|id| format!("#{id}")).collect();
                 say!("pruned {} job(s): {}", pruned.removed.len(), ids.join(" "));
+            }
+            if !pruned.failed.is_empty() {
+                for failure in &pruned.failed {
+                    say!("could not prune #{}: {}", failure.id, failure.error);
+                }
+                anyhow::bail!("{} job(s) could not be pruned", pruned.failed.len());
             }
         }
         JobCmd::Submit {

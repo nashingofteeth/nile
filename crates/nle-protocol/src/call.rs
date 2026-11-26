@@ -575,8 +575,19 @@ impl JobList {
     }
 }
 
-/// `job.prune` result: the terminal job ids the server deleted, oldest first.
+/// `job.prune` result: the terminal job ids the server deleted, oldest first,
+/// plus any it could not delete (the pass continues past a failure).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobPruneReply {
     pub removed: Vec<u64>,
+    /// Terminal jobs whose directory could not be deleted, with the reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<JobPruneFailure>,
+}
+
+/// One terminal job a prune pass could not delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPruneFailure {
+    pub id: u64,
+    pub error: String,
 }

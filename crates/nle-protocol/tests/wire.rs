@@ -14,10 +14,10 @@ use nle_core::{
 };
 use nle_protocol::{
     AnalysisHash, AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR,
-    INVALID_PARAMS, INVALID_REQUEST, Id, JobList, JobPruneReply, METHOD_NOT_FOUND, MediaAsset,
-    MediaList, MediaUsage, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply,
-    Preview, REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError, SequenceList,
-    SequenceReply, SequenceSummary, Server,
+    INVALID_PARAMS, INVALID_REQUEST, Id, JobList, JobPruneFailure, JobPruneReply, METHOD_NOT_FOUND,
+    MediaAsset, MediaList, MediaUsage, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION,
+    PlayheadReply, Preview, REVISION_CONFLICT, Reply, Request, Response, RevisionConflict,
+    RpcError, SequenceList, SequenceReply, SequenceSummary, Server,
 };
 use serde_json::{Value, json};
 
@@ -265,6 +265,7 @@ impl Handler for Fake {
             ))),
             Call::JobPrune { keep, .. } => Ok(Reply::Pruned(JobPruneReply {
                 removed: vec![*keep, *keep + 1],
+                failed: Vec::new(),
             })),
         }
     }
@@ -877,6 +878,35 @@ fn golden_job_prune_request_and_typed_helper() {
     let mut client = Client::new(Cursor::new(output), Vec::new());
     let pruned = client.prune_jobs(3, Some(1)).expect("job prune");
     assert_eq!(pruned.removed, vec![3, 4]);
+    assert!(pruned.failed.is_empty());
+
+    // A partial pass keeps its removed ids and names the failure; an empty
+    // failure list is omitted from the wire form.
+    let reply = JobPruneReply {
+        removed: vec![1, 2],
+        failed: vec![JobPruneFailure {
+            id: 3,
+            error: "permission denied".into(),
+        }],
+    };
+    let value = serde_json::to_value(&reply).expect("serialize reply");
+    assert_eq!(
+        value,
+        json!({
+            "removed": [1, 2],
+            "failed": [{"id": 3, "error": "permission denied"}]
+        })
+    );
+    let decoded: JobPruneReply = serde_json::from_value(value).expect("decode reply");
+    assert_eq!(decoded, reply);
+    assert_eq!(
+        serde_json::to_value(JobPruneReply {
+            removed: vec![1],
+            failed: Vec::new(),
+        })
+        .expect("serialize clean reply"),
+        json!({"removed": [1]})
+    );
 }
 
 #[test]

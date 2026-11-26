@@ -616,10 +616,18 @@ impl ServeHandler {
     }
 
     /// Retention across jobs: the queue owns the plan (terminal only), so a
-    /// stale client cannot name a running job here.
+    /// stale client cannot name a running job here. A failed directory is
+    /// reported alongside the ids that were removed, not as a lost result.
     fn job_prune(&self, keep: u64, older_than_days: Option<u64>) -> Result<Reply, RpcError> {
-        let removed = self.jobs.prune(keep, older_than_days).map_err(queue_rpc)?;
-        Ok(Reply::Pruned(nle_protocol::JobPruneReply { removed }))
+        let report = self.jobs.prune(keep, older_than_days).map_err(queue_rpc)?;
+        Ok(Reply::Pruned(nle_protocol::JobPruneReply {
+            removed: report.removed,
+            failed: report
+                .failed
+                .into_iter()
+                .map(|(id, error)| nle_protocol::JobPruneFailure { id, error })
+                .collect(),
+        }))
     }
 
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {
@@ -1301,6 +1309,7 @@ mod tests {
             panic!("expected a prune reply");
         };
         assert_eq!(reply.removed, vec![cancelled.id]);
+        assert!(reply.failed.is_empty());
         assert!(!store.job_dir(cancelled.id).exists());
         assert!(store.job_dir(running.id).exists());
         assert!(store.job_dir(queued.id).exists());

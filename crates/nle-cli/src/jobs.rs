@@ -83,6 +83,14 @@ struct QueueState {
     events: Vec<Event>,
 }
 
+/// What one retention pass did: the ids deleted (oldest first) and the ones
+/// whose directory could not be deleted. A failure does not stop the pass.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PruneReport {
+    pub removed: Vec<u64>,
+    pub failed: Vec<(u64, String)>,
+}
+
 pub(crate) struct JobQueue {
     store: JobStore,
     state: Mutex<QueueState>,
@@ -277,26 +285,33 @@ impl JobQueue {
     }
 
     /// Retention: delete terminal jobs beyond the newest `keep` (and, when
-    /// set, older than `older_than_days`). Returns the removed ids oldest
-    /// first. Queued/running jobs are never candidates; holding the state lock
-    /// keeps `begin_next` from promoting a queued job between the plan and the
-    /// deletions, so a job cannot start inside a directory being removed.
+    /// set, older than `older_than_days`). Queued/running jobs are never
+    /// candidates; holding the state lock keeps `begin_next` from promoting a
+    /// queued job between the plan and the deletions, so a job cannot start
+    /// inside a directory being removed.
+    ///
+    /// A failure does not abort the pass: the report names the ids that were
+    /// removed and the ones that were not, so a caller can report both.
     pub(crate) fn prune(
         &self,
         keep: u64,
         older_than_days: Option<u64>,
-    ) -> Result<Vec<u64>, QueueError> {
+    ) -> Result<PruneReport, QueueError> {
         let mut state = self.lock();
         let jobs = self.store.list()?;
         let keep = usize::try_from(keep).unwrap_or(usize::MAX);
-        let removed = nle_core::jobs::prune_plan(&jobs, keep, older_than_days, now_secs());
-        for id in &removed {
-            self.store.remove(*id)?;
-            state
-                .events
-                .retain(|event| event_job_id(event) != Some(*id));
+        let planned = nle_core::jobs::prune_plan(&jobs, keep, older_than_days, now_secs());
+        let mut report = PruneReport::default();
+        for id in planned {
+            match self.store.remove(id) {
+                Ok(()) => {
+                    report.removed.push(id);
+                    state.events.retain(|event| event_job_id(event) != Some(id));
+                }
+                Err(error) => report.failed.push((id, error.to_string())),
+            }
         }
-        Ok(removed)
+        Ok(report)
     }
 
     pub(crate) fn take_events(&self) -> Vec<Event> {
@@ -943,7 +958,7 @@ mod tests {
 
         // Only the cancelled (terminal) job is a candidate: #1 is running and
         // #2 is queued, so a keep of zero still spares them.
-        assert_eq!(queue.prune(0, None).expect("prune"), vec![3]);
+        assert_eq!(queue.prune(0, None).expect("prune").removed, vec![3]);
         assert!(!store.job_dir(3).exists());
         assert!(store.job_dir(1).exists(), "a running job is kept");
         assert!(store.job_dir(2).exists(), "a queued job is kept");
@@ -955,7 +970,13 @@ mod tests {
             queue.take_events().is_empty(),
             "a pruned job's queued events are dropped"
         );
-        assert!(queue.prune(0, None).expect("nothing left").is_empty());
+        assert!(
+            queue
+                .prune(0, None)
+                .expect("nothing left")
+                .removed
+                .is_empty()
+        );
 
         // Finish both, then keep the newest terminal job only.
         release.send(()).unwrap();
@@ -963,7 +984,7 @@ mod tests {
         assert_eq!(wait_for(&started, "second job"), 2);
         release.send(()).unwrap();
         assert_eq!(wait_done(&queue, 2).state, JobState::Done);
-        assert_eq!(queue.prune(1, None).expect("keep newest"), vec![1]);
+        assert_eq!(queue.prune(1, None).expect("keep newest").removed, vec![1]);
         assert!(!store.job_dir(1).exists());
         assert!(store.job_dir(2).exists());
         // Ids are not recycled after a prune emptied the highest ids.
@@ -976,6 +997,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(next.id, 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_reports_a_failed_removal_and_still_removes_the_rest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        let mut jobs = Vec::new();
+        for n in 0..2 {
+            let mut job = store
+                .create(
+                    &project,
+                    1,
+                    PathBuf::from(format!("/tmp/prune-fail-{n}.mp4")),
+                    JobExport::default(),
+                )
+                .unwrap();
+            job.state = JobState::Done;
+            job.finished_at = Some(10 + n);
+            store.update(&job).unwrap();
+            jobs.push(job);
+        }
+        let (run, _started, _release, _overlap) = gated_runner();
+        let queue = JobQueue::start_with(&path, run).expect("queue");
+
+        // A directory the process cannot delete stands in for an I/O failure.
+        // Running as root can still remove it; then there is nothing to assert.
+        let blocked = store.job_dir(jobs[0].id);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let report = queue.prune(0, None).expect("prune");
+        if report.failed.is_empty() {
+            return;
+        }
+        assert_eq!(report.removed, vec![jobs[1].id]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, jobs[0].id);
+        assert!(!report.failed[0].1.is_empty(), "the reason is reported");
+        assert!(blocked.exists(), "a failed removal keeps its directory");
+        assert!(!store.job_dir(jobs[1].id).exists());
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
