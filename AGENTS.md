@@ -209,6 +209,9 @@ plainly; never claim a pass you did not observe.
   to the timeline length, video layers `overlay` bottom→top (upper gaps
   `black@0.0`/`yuva420p`), audio `amix`es, and muted tracks drop out. A video
   track plus an audio one takes the multi-track path (fast = no audio).
+- **Jobs are server state.** `nile serve` owns `.nile/<stem>/jobs/<id>/`
+  (`job.json` + snapshot), renders the snapshot under a CAS submit, never
+  resumes `running`, and only `rm`s terminal jobs (`cargo test -p nile jobs`).
 
 ## Editing and TUI conventions
 

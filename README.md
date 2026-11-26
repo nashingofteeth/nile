@@ -546,6 +546,7 @@ video/
         ├── analysis/
         │   ├── transcripts/  # content-addressed transcript words (t1-…)
         │   └── products/     # analyzer outputs (a1-…)
+        ├── jobs/          # durable render jobs (id/job.json + snapshot)
         └── cache/
             ├── analysis/      # packed frame/audio samples (disposable)
             ├── proxy/         # rendered video proxies
