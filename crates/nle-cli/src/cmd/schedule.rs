@@ -24,6 +24,7 @@ use nle_core::time::secs_f64;
 use nle_core::timeline::{Segment, Track, Transition};
 use nle_core::{AudioSettings, Project, Seconds, Sequence};
 
+use nle_ffmpeg::local_path_arg;
 use nle_ffmpeg::trim::run_ffmpeg_opt;
 use nle_ffmpeg::{Encoder, ExportSpec, export_range_quiet};
 
@@ -315,7 +316,7 @@ fn concat(
         args.push("+faststart".into());
     }
     args.push("--".into());
-    args.push(output.display().to_string());
+    args.push(local_path_arg(output));
     run_ffmpeg_opt(&args, !quiet).context("mux export chunks")?;
     Ok(())
 }

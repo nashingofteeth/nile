@@ -13,6 +13,8 @@ use std::process::Command;
 use nle_core::{Seconds, format_seconds};
 use thiserror::Error;
 
+use crate::paths::local_path_arg;
+
 /// The default VAAPI render node when `/dev/dri` cannot be read.
 const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
@@ -449,7 +451,7 @@ pub fn build_args(spec: &TrimSpec) -> Result<Vec<String>, TrimError> {
     // be misread as an option. (Inputs via `-i` are safe — option values
     // are consumed literally — but the trailing OUTPUT is positional.)
     a.push("--".into());
-    a.push(spec.output.display().to_string());
+    a.push(local_path_arg(&spec.output));
     Ok(a)
 }
 
@@ -545,6 +547,15 @@ mod tests {
         // `--` guards the positional output against option-injection
         assert_eq!(args.last().map(String::as_str), Some("out.mp4"));
         assert_eq!(args[args.len() - 2], "--");
+    }
+
+    #[test]
+    fn a_colon_output_stays_behind_the_option_terminator() {
+        let mut s = spec();
+        s.output = "a:b.mp4".into();
+        let args = build_args(&s).unwrap();
+        assert_eq!(args[args.len() - 2], "--");
+        assert_eq!(args.last().map(String::as_str), Some("./a:b.mp4"));
     }
 
     #[test]

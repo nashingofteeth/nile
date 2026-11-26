@@ -10,6 +10,8 @@ use std::process::Command;
 use nle_core::media::RawProbe;
 use thiserror::Error;
 
+use crate::paths::local_path_arg;
+
 #[derive(Debug, Error)]
 pub enum ProbeError {
     #[error("no such file: {0}")]
@@ -37,7 +39,7 @@ pub fn frame_count(path: &Path) -> Option<i64> {
             .args(["-v", "error", "-select_streams", "v:0"])
             .args(args)
             .arg("--")
-            .arg(path)
+            .arg(local_path_arg(path))
             .output()
             .ok()?;
         if !out.status.success() {
@@ -111,7 +113,7 @@ fn run_probe(path: &Path, args: &[&str]) -> Result<Vec<u8>, ProbeError> {
         .args(["-v", "error"])
         .args(args)
         .arg("--")
-        .arg(path)
+        .arg(local_path_arg(path))
         .output()?;
     if !out.status.success() {
         return Err(ProbeError::Failed {
@@ -167,7 +169,7 @@ pub fn probe(path: &Path) -> Result<RawProbe, ProbeError> {
             "-show_streams",
         ])
         .arg("--")
-        .arg(path)
+        .arg(local_path_arg(path))
         .output()?;
     if !out.status.success() {
         return Err(ProbeError::Failed {

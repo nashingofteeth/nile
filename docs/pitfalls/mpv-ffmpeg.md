@@ -83,6 +83,16 @@ just no longer drags the audio clock with it.
   seam to hide); `ensure_audio_master` still returns `None` when no source
   has an audio stream.
 
+## Paths
+
+- `--` stops option parsing, not ffmpeg's URL parser: a relative path whose
+  first component contains `:` (`a:b.mp4`) is read as protocol `a` and fails
+  with "Protocol not found". Pass positional ffmpeg/ffprobe paths through
+  `local_path_arg` (`nle-ffmpeg/src/paths.rs`), which prefixes `./` only when
+  needed; absolute and `sub/a:b.mp4` paths stay unchanged. Guards:
+  `a_protocol_like_path_is_rendered_as_a_local_file`, and the end-to-end
+  `a_relative_export_name_with_a_colon_renders`.
+
 ## Filter-graph gotchas
 
 - `crop`/`scale` are masks: they keep the canvas and pad `black@0` on
