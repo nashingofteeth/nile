@@ -1911,6 +1911,10 @@ fn normalizing_a_present_but_silent_stream_exports_silence() {
     // rejects. The chain scrubs non-finite samples back to zero, so both the
     // single graph and the chunked final mux succeed with silence.
     let s = Sandbox::new();
+    assert!(
+        s.has_audio("silent.mp4"),
+        "the fixture must carry an audio stream"
+    );
     s.ok(&["init", "--force"]);
     s.ok(&["import", "silent.mp4"]);
     s.ok(&["add", "silent.mp4", "--in", "0", "--out", "2"]);

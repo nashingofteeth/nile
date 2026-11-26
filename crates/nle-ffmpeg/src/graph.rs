@@ -42,9 +42,13 @@ pub const LOUDNORM_FILTER: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 /// NaN). `aeval` is per-sample; `aformat` restores the planar float format the
 /// encoder wants. The mix is always stereo (`AUDIO_LAYOUT`), so there are two
 /// channel expressions.
-const SILENCE_GUARD: &str = "aeval=exprs='if(isnan(val(0))+isinf(val(0)),0,val(0))\
+fn silence_guard() -> String {
+    format!(
+        "aeval=exprs='if(isnan(val(0))+isinf(val(0)),0,val(0))\
 |if(isnan(val(1))+isinf(val(1)),0,val(1))',\
-aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+aformat=sample_fmts=fltp:sample_rates={AUDIO_RATE}:channel_layouts={AUDIO_LAYOUT}"
+    )
+}
 
 #[derive(Debug, Error)]
 pub enum CompileError {
@@ -229,7 +233,7 @@ fn has_audio_material(project: &Project) -> bool {
 
 /// The sequence's audio-post filters, appended to the final mixed chain.
 /// Empty when the sequence opts out — the classic graph stays byte-identical.
-/// Normalize is followed by the silence guard (see `SILENCE_GUARD`); fades are
+/// Normalize is followed by the silence guard (see `silence_guard`); fades are
 /// clamped to the programme length, so `st` is never negative even when a
 /// setting outlives the clip it was set for.
 fn audio_post_chain(audio: &AudioSettings, duration: Seconds, audible: bool) -> String {
@@ -248,7 +252,7 @@ fn audio_post_chain(audio: &AudioSettings, duration: Seconds, audible: bool) -> 
         // only sees the stream), so scrub its non-finite output to silence
         // before the fades; otherwise the AAC encoder rejects the export.
         chain.push(',');
-        chain.push_str(SILENCE_GUARD);
+        chain.push_str(&silence_guard());
     }
     let zero = Seconds::from_integer(0);
     let total = secs_f64(&duration).max(0.0);

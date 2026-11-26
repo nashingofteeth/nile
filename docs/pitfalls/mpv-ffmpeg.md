@@ -67,7 +67,7 @@ just no longer drags the audio clock with it.
 - **A present-but-silent stream is scrubbed, not detected.** The probe only
   knows a stream exists, so silence still reaches `loudnorm`, which measures
   -inf and emits NaN/±inf samples. The normalize branch appends
-  `SILENCE_GUARD` (`aeval` maps non-finite samples to zero, then `aformat`
+  `silence_guard()` (`aeval` maps non-finite samples to zero, then `aformat`
   restores `fltp`/48 kHz/stereo) before any fade — NaN × 0 is still NaN. The
   export succeeds with silence instead of failing; no second decode pass. A
   fades-only chain is safe on silence and gets no guard.
