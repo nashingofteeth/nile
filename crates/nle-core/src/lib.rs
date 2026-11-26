@@ -32,9 +32,9 @@ pub use action::{
     register_path, run_action, save_register, track_label,
 };
 pub use analysis::{
-    AnalysisError, AnalysisProduct, AnalyzerInfo, Freshness, ProductError, ProductResult,
-    ProductSample, ProductStore, SourceSignature, Transcript, TranscriptInput, TranscriptStore,
-    Word,
+    AnalysisError, AnalysisProduct, AnalysisStores, AnalyzerInfo, BoxRect, DetectedBox, FrameBoxes,
+    Freshness, ProductError, ProductResult, ProductSample, ProductStore, SampleGrid,
+    SourceSignature, SubjectKey, Transcript, TranscriptInput, TranscriptStore, Word,
 };
 pub use annotation::{Anchor, Annotation, AnnotationKind, AnnotationStatus, ClipPoint, SourceRef};
 pub use detect::{Span, reconstruct};

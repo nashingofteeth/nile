@@ -68,8 +68,9 @@ pub const MAX_HISTORY: usize = 100;
 /// v18 adds grouped changes (one undo step for a batch of actions);
 /// v19 adds media-group creation/removal; v20 adds annotations; v21 scopes
 /// timeline annotations into track changes; v22 stores crop as a window;
-/// v23 adds crop keyframes; v24 adds sequence audio-post settings.
-pub const HISTORY_VERSION: u32 = 24;
+/// v23 adds crop keyframes; v24 adds sequence audio-post settings; v25 adds
+/// the subject-box analysis check payload.
+pub const HISTORY_VERSION: u32 = 25;
 
 #[derive(Debug, Error)]
 pub enum EditError {

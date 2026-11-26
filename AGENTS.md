@@ -214,6 +214,13 @@ plainly; never claim a pass you did not observe.
   resumes `running`, and only `rm`s/prunes terminal jobs; a startup sweep
   deletes only a terminal record's exact hidden temp (`cargo test -p nile jobs`).
 
+## CV checks
+
+- **CV products are source products.** `subject-in-frame` maps each output
+  frame through the report to `(clip, source)`, then the product grid and the
+  clip's crop. Never sample the composited render; `Scale`/`Offset` and blend
+  frames are unverifiable (`nle-core/src/expect.rs`, `analysis.rs`).
+
 ## Editing and TUI conventions
 
 - **One action catalog, four front-ends.** Every timeline edit is an `Action`

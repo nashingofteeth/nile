@@ -44,7 +44,7 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   one. It takes a **timeline** anchor only — a render span is what gets
   judged — so adding one on a source anchor and loading such a file both fail
   `Project::validate_annotation`.
-- **Six checks, one grammar.** `--expect` on the CLI and `:annotation add`
+- **Seven checks, one grammar.** `--expect` on the CLI and `:annotation add`
   builds the same `ExpectArgs` through `expect_from_args`; the CLI spelling is
   dashed, the model/wire spelling snake_case.
   - `cam --asset N | --group N` (exactly one) `[--tolerance-frames N]`
@@ -54,6 +54,19 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
     `--no-hold-size`, keeps its size.
   - `work-in-frame [--margin P]`: every crop keeps P% of the picture on all
     four sides (default 5).
+  - `subject-in-frame --asset N --product a1-… --label NAME [--subject-id ID]
+    [--margin P] [--min-confidence F] [--tolerance-frames N]`: every detected
+    box of that label (optionally one detector instance) with confidence at
+    least F (default 0.0: every box the product retained) stays inside the
+    clip's crop window with P% of the window on every side (default 5). The
+    `a1-…` is the `analysis detect` product for that asset; the detector's own
+    retention floor is set there with `--min-confidence`, while this flag only
+    narrows what the check consumes. Evaluation maps each output frame through
+    the report to its source time, then to the product's sample grid, so it
+    checks the delivered picture rather than the clip plan. Missing box is a
+    fail; blend frames, `scale`/`offset`, an out-of-grid frame and a product
+    for another source are unverifiable. Details:
+    `docs/pitfalls/analysis.md`.
   - `words-complete [--min-coverage F] [--transcript HASH]`: without a
     transcript, F of the checked frames carry audio (default 1.0). With a
     `t1-…` hash, F of the relevant words must be whole: a trim, split or span
@@ -80,17 +93,17 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   dangling id.
 - **A check is computed, never stored.** `evaluate` is a pure function of
   `(project, report, annotation)`; `check_with` loads the sidecar and the
-  project's transcript store, then picks the annotations; the CLI, protocol
-  and TUI share that seam (`cmd/check.rs`). `CheckOutcome` copies the
-  annotation's `status`, so a `Resolved` expectation still runs, still fails,
-  and prints `[resolved]`: resolving acknowledges a verdict, it does not waive
-  it.
+  project's `AnalysisStores` (transcripts + products), then picks the
+  annotations; the CLI, protocol and TUI share that seam (`cmd/check.rs`).
+  `CheckOutcome` copies the annotation's `status`, so a `Resolved` expectation
+  still runs, still fails, and prints `[resolved]`: resolving acknowledges a
+  verdict, it does not waive it.
 - **The sequence defaults to the report's.** An explicit `--sequence` that
   names another sequence is exit 2; an `--id` that selects no expectation is
   also 2 (a stale filter must not pass a gate silently). A crop,
-  work-in-frame, word or group check against a report whose revision differs
-  from the project's is unverifiable ("re-export") — the report carries no
-  effects or probes.
+  work-in-frame, subject, word or group check against a report whose revision
+  differs from the project's is unverifiable ("re-export") — the report
+  carries no effects or probes.
 - **The protocol path is absolute.** `annotation.check` expands `~`, then
   refuses a relative path: the server's cwd is not the client's. The CLI and
   TUI read local paths directly.

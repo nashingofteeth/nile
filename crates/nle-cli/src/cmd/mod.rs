@@ -397,6 +397,10 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 margin,
                 min_coverage,
                 transcript,
+                product,
+                label,
+                subject_id,
+                min_confidence,
                 black,
                 min_frames,
             } => Some((|| {
@@ -410,6 +414,10 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                         (margin.is_some(), "--margin"),
                         (min_coverage.is_some(), "--min-coverage"),
                         (transcript.is_some(), "--transcript"),
+                        (product.is_some(), "--product"),
+                        (label.is_some(), "--label"),
+                        (subject_id.is_some(), "--subject-id"),
+                        (min_confidence.is_some(), "--min-confidence"),
                         (*black, "--black"),
                         (min_frames.is_some(), "--min-frames"),
                     ]
@@ -434,6 +442,10 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                             margin_pct: *margin,
                             min_coverage: *min_coverage,
                             transcript: transcript.clone(),
+                            product: product.clone(),
+                            label: label.clone(),
+                            subject_id: subject_id.clone(),
+                            min_confidence: *min_confidence,
                             black: *black,
                             min_frames: *min_frames,
                         })

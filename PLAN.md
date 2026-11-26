@@ -548,23 +548,24 @@ shared by the TUI and agents — with no clipgen code present.
   on trim/split/ripple/paste, recorded in the undo `Change`; source-anchored
   data survives edits for free.
 - Expectations are typed payloads (`cam`, `cropStable`, `workInFrame`,
-  `wordsComplete`, `absent`, `noSliver`, …) evaluated against a render
-  report. Protocol + TUI add/list/resolve; provenance shows human/model/
-  analysis.
+  `subjectInFrame`, `wordsComplete`, `absent`, `noSliver`, …) evaluated
+  against a render report. Protocol + TUI add/list/resolve; provenance shows
+  human/model/analysis.
 - Landed: source- and clip-relative timeline notes and markers (project v16,
   history v23), `nile annotation add|ls|rm|resolve` (including `--timeline`),
   `:note`, and the additive `annotation.list` method. Timeline anchors follow
   trims/splits/ripples, a split re-anchors, and undo restores dropped notes.
   Expectations landed with project v17: `nile annotation add --expect
-  cam|crop-stable|work-in-frame|words-complete|absent|no-sliver --timeline …`
-  writes the typed payload, and `nile annotation check --report FILE
-  [--sequence N] [--id N] [--json]` evaluates it against that export’s report
-  (0 pass, 1 fail or unverifiable, 2 error). The protocol (`annotation.check`)
-  and TUI (`:annotation check`) share the same seam. The transcript store
-  landed as `.nile/<stem>/analysis/transcripts/t1-…`: `nile analysis import`
-  and the protocol's `analysis.add` fill it, and `words-complete --transcript`
-  checks whole words against it. Remaining: CV-backed checks, which need the
-  §6 sampling and out-of-process analyzer contract.
+  cam|crop-stable|work-in-frame|subject-in-frame|words-complete|absent|no-sliver
+  --timeline …` writes the typed payload, and `nile annotation check --report
+  FILE [--sequence N] [--id N] [--json]` evaluates it against that export’s
+  report (0 pass, 1 fail or unverifiable, 2 error). The protocol
+  (`annotation.check`) and TUI (`:annotation check`) share the same seam. The
+  transcript store landed as `.nile/<stem>/analysis/transcripts/t1-…`:
+  `nile analysis import` and the protocol's `analysis.add` fill it, and
+  `words-complete --transcript` checks whole words against it. The subject
+  check landed with project v19 (see §6 for `analysis detect` and the
+  out-of-process detector contract).
 - **Gate:** ripple/split/trim/undo move timeline annotations while source
   annotations stay put; a note round-trips through the protocol and is
   visible in the TUI.
@@ -612,7 +613,7 @@ shared by the TUI and agents — with no clipgen code present.
   moved note to the right frame; a cancelled job leaves no deliverable and its
   report records the snapshot revision.
 
-### 6. Analysis sampling + sidecar contract (sampler + sidecar landed; CV pending)
+### 6. Analysis sampling + sidecar contract (sampler + sidecar + subject boxes landed; audio pending)
 
 - Landed: `nle-ffmpeg/src/sampling.rs` — `FrameSpec`/`AudioSpec`, packed
   RGB24/PCM, and a `SampleCache` keyed by version + params + canonical source
@@ -625,9 +626,13 @@ shared by the TUI and agents — with no clipgen code present.
 - Landed: per-frame times and exact source-frame index requests (at most 96
   per request; a request naming a frame past the media end is refused), sampler
   byte/frame caps, and `nile cache prune` coverage for `cache/analysis` plus
-  abandoned staging (products are never swept). Pending: audio analysis and
-  CV-backed checks. ML stays out of process and out of the Rust dependency
-  graph.
+  abandoned staging (products are never swept). Subject boxes landed:
+  `nile analysis detect` samples a grid and runs an out-of-process detector
+  (bundled colour test double, or an absolute `--analyzer`), products carry
+  normalized millionth boxes on a `SampleGrid`, and `subject-in-frame` maps
+  each output frame through the report to the product grid and the clip's
+  crop. Protocol 2; project v19/history v25. Pending: audio analysis. ML stays
+  out of process and out of the Rust dependency graph.
 
 ### 7. Toolkit hooks (after the core)
 

@@ -24,5 +24,11 @@ path.
 - **A report is read, not just printed.** `nile annotation check` (and the
   protocol's `annotation.check`) consumes it to evaluate a sequence's
   expectations over the frame map.
+- **Product checks go output → source → sample grid.** A `subject-in-frame`
+  check calls `locate(frame)` for `(clip, asset, source)`, then
+  `SampleGrid::index_at(source)` on the `a1-…` product, and applies that
+  clip's crop at `timeline_offset_of(source)`. Never sample the composited
+  render and never index the product by output frame: the detector sampled
+  the source asset on its own clock.
 - **A report write failure must not lose the video.** Log it and keep the
   export; the summary says `report failed`.

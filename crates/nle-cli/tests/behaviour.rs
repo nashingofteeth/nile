@@ -723,6 +723,106 @@ fn analysis_analyze_stores_a_mean_luma_product_and_reuses_the_sample_offline() {
 }
 
 #[test]
+fn analysis_detect_feeds_a_subject_in_frame_check() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6; red's asset is #1
+    let hash = s
+        .ok(&[
+            "analysis",
+            "detect",
+            "--asset",
+            "1",
+            "--duration",
+            "2",
+            "--fps",
+            "5",
+            "--width",
+            "32",
+            "--height",
+            "24",
+            "--label",
+            "red",
+        ])
+        .trim()
+        .to_string();
+    assert!(hash.starts_with("a1-"), "{hash}");
+
+    let state = nle_core::state::state_dir(&s.file(P));
+    let product: serde_json::Value = serde_json::from_slice(
+        &fs::read(state.join("analysis/products").join(&hash)).expect("product file"),
+    )
+    .unwrap();
+    assert_eq!(product["analyzer"]["name"], "color-boxes");
+    assert_eq!(product["result"]["kind"], "subject_boxes");
+    assert_eq!(product["result"]["labels"], serde_json::json!(["red"]));
+    let frames = product["result"]["frames"]
+        .as_array()
+        .expect("per-frame boxes");
+    assert_eq!(frames.len(), 10, "2 s at 5 fps");
+    let rect = &frames[0]["boxes"][0]["rect"];
+    assert_eq!(rect["x"], 0, "{rect}");
+    assert_eq!(rect["y"], 0, "{rect}");
+    assert_eq!(rect["w"], 1_000_000, "{rect}");
+    assert_eq!(rect["h"], 1_000_000, "{rect}");
+
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "subject-in-frame",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--to",
+        "1.5",
+        "--asset",
+        "1",
+        "--product",
+        &hash,
+        "--label",
+        "red",
+        "--margin",
+        "0",
+    ]);
+    s.export("out.mp4");
+    let out = s.run(&["annotation", "check", "--report", "out.mp4"]);
+    assert!(
+        out.status.success(),
+        "a full-frame subject passes:\n{}",
+        merged(&out)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("subject_in_frame"), "{text}");
+    assert!(text.contains('✓'), "{text}");
+
+    // A crop that excludes the subject makes the same check fail.
+    s.ok(&["effect", "crop", "--clip", "1", "--x", "50", "--w", "50"]);
+    s.export("crop.mp4");
+    let out = s.run(&["annotation", "check", "--report", "crop.mp4", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["summary"]["fail"], 1, "{report}");
+    let detail = report["checks"][0]["detail"].as_str().expect("detail");
+    assert!(detail.contains("margin"), "{detail}");
+
+    // A detector is an explicit absolute executable, never a PATH lookup.
+    let out = s.run(&[
+        "analysis",
+        "detect",
+        "--asset",
+        "1",
+        "--duration",
+        "1",
+        "--label",
+        "red",
+        "--analyzer",
+        "detector",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    assert!(merged(&out).contains("absolute"), "{}", merged(&out));
+}
+
+#[test]
 fn annotation_check_counts_unverifiable_and_resolved_failures_as_failed() {
     let s = Sandbox::new();
     s.base();

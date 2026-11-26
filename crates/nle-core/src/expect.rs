@@ -7,13 +7,13 @@
 //!
 //! Results are **computed**, never stored: [`evaluate`] is a pure function of
 //! `(project, report, annotation)`, and [`evaluate_with`] only adds the
-//! project's transcript store for the checks that read a stored analysis
-//! product. A pass cannot outlive the render it describes. Either reads a
-//! [`RenderReport`] and the project; neither spawns a process, touches a
-//! socket or decodes a frame. Asset-only `cam`/`absent` and `no_sliver` are
-//! report-only; the crop, word and group checks need the project's effects and
-//! probes — those are refused as unverifiable when the report was rendered
-//! from another revision.
+//! project's [`AnalysisStores`] (transcripts
+//! and products) for the checks that read stored analysis. A pass cannot
+//! outlive the render it describes. Either reads a [`RenderReport`] and the
+//! project; neither spawns a process, touches a socket or decodes a frame.
+//! Asset-only `cam`/`absent` and `no_sliver` are report-only; the crop, word,
+//! subject and group checks need the project's effects and probes — those are
+//! refused as unverifiable when the report was rendered from another revision.
 //!
 //! Resolving an expectation (`AnnotationStatus::Resolved`) **acknowledges** a
 //! verdict; it is not a waiver. [`evaluate`] still runs the check, still lets
@@ -22,10 +22,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::TranscriptStore;
+use crate::analysis::{AnalysisStores, ProductResult, SAMPLE_VERSION};
 use crate::annotation::{Annotation, AnnotationKind, AnnotationStatus};
 use crate::project::{Project, Sequence};
-use crate::report::{FrameSource, FrameSpan, RenderReport, SourceSide, frame_edge};
+use crate::report::{FrameLocation, FrameSource, FrameSpan, RenderReport, SourceSide, frame_edge};
 use crate::time::{Seconds, checked_sub, format_seconds, rational_ser, secs_f64};
 use crate::timeline::{Clip, CropWindow, Effect, Segment, TransitionSource};
 
@@ -88,6 +88,27 @@ pub enum Expectation {
         #[serde(default = "default_margin_pct")]
         margin_pct: f64,
     },
+    /// Every visible subject box in the checked render stays inside the
+    /// clip's crop window with `margin_pct` of that window on every side.
+    ///
+    /// `product` is the `a1-…` address of a `subject_boxes` product for
+    /// `asset`; `label` (and optionally `subject_id`) selects which boxes are
+    /// checked. The product's sample grid is consulted for each output frame
+    /// through the render report, so this checks the delivered picture, not
+    /// the clip plan.
+    SubjectInFrame {
+        product: String,
+        asset: u32,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_id: Option<String>,
+        #[serde(default = "default_margin_pct")]
+        margin_pct: f64,
+        #[serde(default)]
+        min_confidence: f64,
+        #[serde(default)]
+        tolerance_frames: i64,
+    },
     /// At least `min_coverage` of the checked frames carry unmuted audio, or
     /// with a transcript hash, of the relevant words are whole.
     ///
@@ -136,6 +157,7 @@ impl Expectation {
             Expectation::Cam { .. } => "cam",
             Expectation::CropStable { .. } => "crop_stable",
             Expectation::WorkInFrame { .. } => "work_in_frame",
+            Expectation::SubjectInFrame { .. } => "subject_in_frame",
             Expectation::WordsComplete { .. } => "words_complete",
             Expectation::Absent { .. } => "absent",
             Expectation::NoSliver { .. } => "no_sliver",
@@ -195,6 +217,35 @@ impl Expectation {
                 }
                 None
             }
+            Expectation::SubjectInFrame {
+                product,
+                label,
+                subject_id,
+                margin_pct,
+                min_confidence,
+                tolerance_frames,
+                ..
+            } => {
+                if !crate::analysis::is_product_hash(product) {
+                    return Some("product must be an a1-… content hash");
+                }
+                if label.trim().is_empty() {
+                    return Some("label must name a detector class");
+                }
+                if subject_id.as_deref() == Some("") {
+                    return Some("subject_id must not be empty");
+                }
+                if !margin_pct.is_finite() || !(0.0..=50.0).contains(margin_pct) {
+                    return Some("margin_pct must be between 0 and 50");
+                }
+                if !min_confidence.is_finite() || !(0.0..=1.0).contains(min_confidence) {
+                    return Some("min_confidence must be between 0 and 1");
+                }
+                if *tolerance_frames < 0 {
+                    return Some("tolerance_frames must be >= 0");
+                }
+                None
+            }
             Expectation::WordsComplete {
                 min_coverage,
                 transcript,
@@ -227,6 +278,9 @@ impl Expectation {
             }
             | Expectation::Absent {
                 tolerance_frames, ..
+            }
+            | Expectation::SubjectInFrame {
+                tolerance_frames, ..
             } => *tolerance_frames,
             _ => 0,
         }
@@ -240,6 +294,7 @@ impl Expectation {
             Expectation::Cam { group, .. } | Expectation::Absent { group, .. } => group.is_some(),
             Expectation::CropStable { .. }
             | Expectation::WorkInFrame { .. }
+            | Expectation::SubjectInFrame { .. }
             | Expectation::WordsComplete { .. } => true,
             Expectation::NoSliver { .. } => false,
         }
@@ -390,22 +445,23 @@ impl CheckReport {
 /// A note or marker has no expectation to check and comes back unverifiable;
 /// front-ends should filter by [`AnnotationKind`] first.
 pub fn evaluate(project: &Project, report: &RenderReport, annotation: &Annotation) -> CheckOutcome {
-    evaluate_with(project, report, annotation, &TranscriptStore::empty())
+    evaluate_with(project, report, annotation, &AnalysisStores::empty())
 }
 
-/// [`evaluate`] with the project's transcript store, for the checks that read
-/// a stored analysis product.
+/// [`evaluate`] with the project's analysis stores, for the checks that read a
+/// stored product.
 ///
-/// The store is a parameter, not a path: [`evaluate`] stays a pure function of
-/// its three arguments (report-only callers use an empty store and a transcript
-/// hash comes back unverifiable), while the CLI/TUI/protocol seam passes
-/// `TranscriptStore::at(project_path)`. A missing or corrupt transcript is a
-/// detail on an unverifiable outcome, never an error that aborts the report.
+/// The stores are a parameter, not a path: [`evaluate`] stays a pure function
+/// of its three arguments (report-only callers use empty stores, and a
+/// transcript/product hash comes back unverifiable), while the CLI/TUI/protocol
+/// seam passes `AnalysisStores::at(project_path)`. A missing or corrupt
+/// product is a detail on an unverifiable outcome, never an error that aborts
+/// the report.
 pub fn evaluate_with(
     project: &Project,
     report: &RenderReport,
     annotation: &Annotation,
-    analysis: &TranscriptStore,
+    analysis: &AnalysisStores,
 ) -> CheckOutcome {
     let expect = match &annotation.kind {
         AnnotationKind::Expectation { expect } => expect,
@@ -506,6 +562,25 @@ pub fn evaluate_with(
             hold_size,
         } => check_crop_stable(&ctx, out, *max_move_pct_per_sec, *hold_size),
         Expectation::WorkInFrame { margin_pct } => check_work_in_frame(&ctx, out, *margin_pct),
+        Expectation::SubjectInFrame {
+            product,
+            asset,
+            label,
+            subject_id,
+            margin_pct,
+            min_confidence,
+            tolerance_frames: _,
+        } => {
+            let check = SubjectCheck {
+                product,
+                asset: *asset,
+                label,
+                subject_id: subject_id.as_deref(),
+                margin: *margin_pct,
+                min_confidence: *min_confidence,
+            };
+            check_subject_in_frame(&ctx, out, &check)
+        }
         Expectation::WordsComplete {
             min_coverage,
             transcript,
@@ -524,8 +599,8 @@ struct Ctx<'a> {
     f0: i64,
     f1: i64,
     sections: Vec<Section<'a>>,
-    /// The project's transcript store (empty for a report-only [`evaluate`]).
-    analysis: &'a TranscriptStore,
+    /// The project's analysis stores (empty for a report-only [`evaluate`]).
+    analysis: &'a AnalysisStores,
 }
 
 /// One slice of the checked frame range inside one report span:
@@ -1135,6 +1210,280 @@ fn check_work_in_frame(ctx: &Ctx<'_>, mut out: CheckOutcome, margin: f64) -> Che
     passed(out)
 }
 
+struct SubjectCheck<'a> {
+    product: &'a str,
+    asset: u32,
+    label: &'a str,
+    subject_id: Option<&'a str>,
+    margin: f64,
+    min_confidence: f64,
+}
+
+fn check_subject_in_frame(
+    ctx: &Ctx<'_>,
+    mut out: CheckOutcome,
+    check: &SubjectCheck<'_>,
+) -> CheckOutcome {
+    let product = check.product;
+    let asset = check.asset;
+    let label = check.label;
+    let subject_id = check.subject_id;
+    let margin = check.margin;
+    let min_confidence = check.min_confidence;
+    let Some(sequence) = ctx.project.sequence(ctx.sequence) else {
+        out.detail = Some(format!("sequence #{} not found", ctx.sequence));
+        return out;
+    };
+    if !margin.is_finite() || !(0.0..=50.0).contains(&margin) {
+        out.detail = Some("margin_pct must be between 0 and 50".to_string());
+        return out;
+    }
+    if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+        out.detail = Some("min_confidence must be between 0 and 1".to_string());
+        return out;
+    }
+    let stored = match ctx.analysis.products.load(product) {
+        Ok(product) => product,
+        Err(error) => {
+            out.detail = Some(format!("product {product}: {error}"));
+            return out;
+        }
+    };
+    if !stored.is_compatible(SAMPLE_VERSION) {
+        out.detail = Some(format!(
+            "product schema v{} / sample v{} is incompatible with this build (product v{}, sample v{SAMPLE_VERSION})",
+            stored.version,
+            stored.sample.version,
+            crate::analysis::PRODUCT_VERSION,
+        ));
+        return out;
+    }
+    let ProductResult::SubjectBoxes {
+        grid,
+        labels,
+        floor_milli,
+        frames,
+    } = &stored.result
+    else {
+        out.detail = Some(format!(
+            "product {product} is not subject boxes (kind {})",
+            result_kind(&stored.result)
+        ));
+        return out;
+    };
+    if !labels.iter().any(|declared| declared == label) {
+        out.detail = Some(format!(
+            "product {product} detected [{}], not {label:?}",
+            labels.join(", ")
+        ));
+        return out;
+    }
+    let min_milli = (min_confidence * 1000.0).round() as u32;
+    if min_milli < *floor_milli {
+        out.detail = Some(format!(
+            "the product retained confidence {floor_milli} but the check asks for {min_milli}; re-run with a lower floor"
+        ));
+        return out;
+    }
+    let offline = match stored.freshness() {
+        crate::analysis::Freshness::Stale => {
+            out.detail = Some(
+                "source changed since the product was made; re-run `nile analysis detect`"
+                    .to_string(),
+            );
+            return out;
+        }
+        crate::analysis::Freshness::Offline => true,
+        crate::analysis::Freshness::Fresh => false,
+    };
+    let Some(media) = ctx.project.asset(asset) else {
+        out.detail = Some(format!("asset #{asset} not found"));
+        return out;
+    };
+    // The product names the source it sampled; a product for another file
+    // must not be used just because a box happens to fit.
+    let expected = std::path::absolute(&media.path)
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok());
+    let recorded = &stored.sample.source;
+    let source_matches = expected
+        .as_deref()
+        .is_some_and(|path| path == recorded.source_arg || path == recorded.source);
+    if !source_matches {
+        out.detail = Some(format!(
+            "product {product} sampled {}, not this asset's source",
+            recorded.source_arg
+        ));
+        return out;
+    }
+
+    let mut checked = 0_i64;
+    for frame in ctx.f0..ctx.f1 {
+        let Some(location) = ctx.report.locate(frame) else {
+            out.detail = Some(format!("no frame map entry covers frame {frame}"));
+            return out;
+        };
+        let (clip_id, visible_asset, source) = match location {
+            FrameLocation::Clip {
+                clip,
+                asset,
+                source,
+                ..
+            } => (clip, asset, source),
+            FrameLocation::Blend { .. } => {
+                out.detail = Some(format!(
+                    "frame {frame} is a blend; subject-in-frame has no single source picture"
+                ));
+                return out;
+            }
+            FrameLocation::Black { .. } => {
+                return failed(out, format!("frame {frame} is black"));
+            }
+        };
+        if visible_asset != asset {
+            return failed(
+                out,
+                format!("frame {frame} shows asset #{visible_asset}, not #{asset}"),
+            );
+        }
+        let Some((clip, _)) = clip_start(sequence, clip_id) else {
+            out.detail = Some(format!(
+                "clip #{clip_id} is not in sequence #{}",
+                ctx.sequence
+            ));
+            return out;
+        };
+        if let Some(effect) = clip
+            .effects
+            .iter()
+            .find(|effect| matches!(effect, Effect::Scale { .. } | Effect::Offset { .. }))
+        {
+            out.detail = Some(format!(
+                "frame {frame}: subject-in-frame does not model {}",
+                effect.kind()
+            ));
+            return out;
+        }
+        let at = clip.timeline_offset_of(source);
+        let window = match clip
+            .effects
+            .iter()
+            .find(|effect| matches!(effect, Effect::Crop { .. }))
+        {
+            None => CropWindow {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            Some(crop) => {
+                let segments = crop_segments(crop, clip.duration());
+                match segments
+                    .iter()
+                    .rev()
+                    .find(|segment| segment.start <= at)
+                    .map(|segment| segment.window_at(at))
+                {
+                    Some(window) if window.w > 0.0 && window.h > 0.0 => window,
+                    _ => {
+                        out.detail = Some(format!(
+                            "frame {frame}: the crop window is empty at the clip's {} s",
+                            format_seconds(&at)
+                        ));
+                        return out;
+                    }
+                }
+            }
+        };
+        let Some(index) = grid.index_at(source) else {
+            out.detail = Some(format!(
+                "frame {frame} is source {} s, before the product grid",
+                format_seconds(&source)
+            ));
+            return out;
+        };
+        let Some(sample) = frames.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
+            out.detail = Some(format!(
+                "frame {frame} is source {} s, outside the product grid's {} frames",
+                format_seconds(&source),
+                frames.len()
+            ));
+            return out;
+        };
+        let mut selected = 0;
+        let mut matched = 0;
+        let mut highest = 0;
+        for detected in sample.boxes.iter().filter(|detected| {
+            detected.subject.label == label
+                && subject_id.is_none_or(|id| detected.subject.id.as_deref() == Some(id))
+        }) {
+            matched += 1;
+            highest = highest.max(detected.confidence_milli);
+            if detected.confidence_milli < min_milli {
+                continue;
+            }
+            selected += 1;
+            let bx = (f64::from(detected.rect.x) / 10_000.0 - window.x) * 100.0 / window.w;
+            let by = (f64::from(detected.rect.y) / 10_000.0 - window.y) * 100.0 / window.h;
+            let bw = f64::from(detected.rect.w) / 10_000.0 * 100.0 / window.w;
+            let bh = f64::from(detected.rect.h) / 10_000.0 * 100.0 / window.h;
+            let limit = 100.0 - margin;
+            if bx < margin || by < margin || bx + bw > limit || by + bh > limit {
+                return failed(
+                    out,
+                    format!(
+                        "frame {frame} (source {}): {} box leaves the {margin}% margin — x {:.1}, y {:.1}, w {:.1}, h {:.1} in the crop window",
+                        format_seconds(&source),
+                        detected.subject.label,
+                        bx,
+                        by,
+                        bw,
+                        bh
+                    ),
+                );
+            }
+        }
+        if selected == 0 {
+            let suffix = subject_id.map(|id| format!(" #{id}")).unwrap_or_default();
+            if matched > 0 {
+                return failed(
+                    out,
+                    format!(
+                        "no {label}{suffix} at or above min_confidence {min_confidence:.2} at frame {frame} (source {}); the highest box is {:.2}",
+                        format_seconds(&source),
+                        f64::from(highest) / 1000.0
+                    ),
+                );
+            }
+            return failed(
+                out,
+                format!(
+                    "no {label}{suffix} at frame {frame} (source {})",
+                    format_seconds(&source)
+                ),
+            );
+        }
+        checked += 1;
+    }
+    out.detail = Some(format!(
+        "{checked}/{checked} frame(s) kept {label}{}{}",
+        subject_id.map(|id| format!(" #{id}")).unwrap_or_default(),
+        if offline {
+            "; source is offline, product checked as recorded"
+        } else {
+            ""
+        }
+    ));
+    passed(out)
+}
+
+fn result_kind(result: &ProductResult) -> &'static str {
+    match result {
+        ProductResult::MeanLuma { .. } => "mean_luma",
+        ProductResult::SubjectBoxes { .. } => "subject_boxes",
+    }
+}
+
 /// Timeline ranges where the mix carries sound, matching the exporter: a
 /// clip whose asset probe reports audio, or a transition with at least one
 /// clip side carrying audio (a black side is silence, see `graph.rs`'s
@@ -1347,7 +1696,7 @@ fn check_transcript_words(
             Some("a transcript words check needs a timeline range, not a point".to_string());
         return out;
     }
-    let transcript = match ctx.analysis.load(hash) {
+    let transcript = match ctx.analysis.transcripts.load(hash) {
         Ok(transcript) => transcript,
         Err(error) => {
             out.detail = Some(error.to_string());
@@ -1456,7 +1805,11 @@ fn check_transcript_words(
 mod tests {
     use super::*;
     use crate::VideoSettings;
-    use crate::analysis::{Transcript, Word};
+    use crate::analysis::{
+        AnalysisProduct, AnalysisStores, AnalyzerInfo, BoxRect, DetectedBox, FrameBoxes,
+        ProductResult, ProductSample, ProductStore, SAMPLE_VERSION, SampleGrid, SourceSignature,
+        SubjectKey, Transcript, TranscriptStore, Word,
+    };
     use crate::annotation::{Anchor, AnnotationStatus, ClipPoint};
     use crate::group::MediaPart;
     use crate::media::{RawFormat, RawProbe, RawStream};
@@ -1465,6 +1818,7 @@ mod tests {
     use crate::timeline::{
         CropKey, Gap, Track, TrackKind, Transition, TransitionKind, TransitionSource,
     };
+    use std::path::Path;
 
     fn s(n: i64) -> Seconds {
         Seconds::from_integer(n)
@@ -1674,6 +2028,95 @@ mod tests {
         (dir, store)
     }
 
+    fn detected(x: u32, y: u32, w: u32, h: u32, confidence_milli: u32) -> DetectedBox {
+        DetectedBox {
+            subject: SubjectKey {
+                label: "face".to_string(),
+                id: None,
+            },
+            rect: BoxRect { x, y, w, h },
+            confidence_milli,
+        }
+    }
+
+    fn frame_boxes(index: u64, boxes: Vec<DetectedBox>) -> FrameBoxes {
+        FrameBoxes { index, boxes }
+    }
+
+    fn subject_product(
+        source: &Path,
+        start: Seconds,
+        fps: Seconds,
+        floor_milli: u32,
+        frames: Vec<FrameBoxes>,
+    ) -> AnalysisProduct {
+        AnalysisProduct {
+            version: crate::analysis::PRODUCT_VERSION,
+            analyzer: AnalyzerInfo {
+                name: "test-detector".to_string(),
+                version: 1,
+            },
+            sample: ProductSample {
+                version: SAMPLE_VERSION,
+                key: "0123456789abcdef".to_string(),
+                params: "fedcba9876543210".to_string(),
+                source: SourceSignature {
+                    source: source.display().to_string(),
+                    source_arg: source.display().to_string(),
+                    source_size: 1,
+                    source_mtime_secs: 2,
+                    source_mtime_nanos: 3,
+                },
+            },
+            result: ProductResult::SubjectBoxes {
+                grid: SampleGrid {
+                    start,
+                    fps,
+                    width: 64,
+                    height: 36,
+                },
+                labels: vec!["face".to_string()],
+                floor_milli,
+                frames,
+            },
+        }
+    }
+
+    /// A product for `/media/a.mp4` with the same box in every one of
+    /// `count` frames at `fps`.
+    fn subject_fixture(fps: Seconds, count: u64, boxes: Vec<DetectedBox>) -> AnalysisProduct {
+        let frames = (0..count)
+            .map(|index| frame_boxes(index, boxes.clone()))
+            .collect();
+        subject_product(Path::new("/media/a.mp4"), s(0), fps, 0, frames)
+    }
+
+    /// A temp product store holding `product`, plus the tempdir that owns it.
+    fn subject_stores(product: &AnalysisProduct) -> (tempfile::TempDir, AnalysisStores) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProductStore::at(&dir.path().join("nile.json"));
+        store.import(product).expect("import the subject product");
+        (dir, AnalysisStores::with_products(store))
+    }
+
+    fn subject(
+        product: &str,
+        label: &str,
+        subject_id: Option<&str>,
+        margin: f64,
+        min_confidence: f64,
+    ) -> Expectation {
+        Expectation::SubjectInFrame {
+            product: product.to_string(),
+            asset: 1,
+            label: label.to_string(),
+            subject_id: subject_id.map(str::to_string),
+            margin_pct: margin,
+            min_confidence,
+            tolerance_frames: 0,
+        }
+    }
+
     fn word(text: &str, start: i64, end: i64) -> Word {
         Word {
             text: text.to_string(),
@@ -1858,6 +2301,328 @@ mod tests {
     }
 
     #[test]
+    fn subject_in_frame_passes_a_box_that_keeps_the_margin() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+        assert_eq!(outcome.check, "subject_in_frame");
+        assert!(outcome.detail.unwrap().contains("5/5"));
+    }
+
+    #[test]
+    fn subject_in_frame_fails_a_box_outside_the_margin() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let product = subject_fixture(s(5), 5, vec![detected(0, 300_000, 200_000, 200_000, 1000)]);
+        let (_dir, stores) = subject_stores(&product);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("margin"));
+    }
+
+    #[test]
+    fn subject_in_frame_checks_the_box_against_the_crop_window() {
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(600_000, 300_000, 100_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let project = project_with(vec![track(vec![clip_with(vec![Effect::Crop {
+            x: 50.0,
+            y: 0.0,
+            w: 50.0,
+            h: 100.0,
+            keys: Vec::new(),
+        }])])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        // A box left of the crop window is outside the visible picture.
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(100_000, 300_000, 100_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+    }
+
+    #[test]
+    fn subject_in_frame_fails_when_the_subject_is_absent_or_the_frame_is_wrong() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let empty = subject_fixture(s(5), 5, Vec::new());
+        let (_dir, stores) = subject_stores(&empty);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&empty.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("no face"));
+
+        // A different asset on screen is a failure, not an unverifiable pass.
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let other = report_at(s(5), &[(5, shot(1, 2))]);
+        let outcome = evaluate_with(
+            &project,
+            &other,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("asset #2"));
+
+        let black = report_at(s(5), &[(5, FrameSource::Black)]);
+        let outcome = evaluate_with(
+            &project,
+            &black,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("black"));
+    }
+
+    #[test]
+    fn subject_in_frame_is_unverifiable_without_a_single_source_picture() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let expect = range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1);
+
+        let blend = report_at(s(5), &[(5, blend(7, Some(1), Some(2)))]);
+        let outcome = evaluate_with(&project, &blend, &expect, &stores);
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("blend"));
+
+        let scaled = project_with(vec![track(vec![clip_with(vec![Effect::Scale {
+            w: 100.0,
+            h: 100.0,
+        }])])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let outcome = evaluate_with(&scaled, &report, &expect, &stores);
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("scale"));
+    }
+
+    #[test]
+    fn subject_in_frame_reports_missing_grid_coverage_and_bad_products() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let short = subject_fixture(
+            s(5),
+            2,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&short);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&short.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("outside the product grid"));
+
+        let mut incompatible = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        incompatible.sample.version = SAMPLE_VERSION + 1;
+        let (_dir, stores) = subject_stores(&incompatible);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&incompatible.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("incompatible"));
+
+        let missing = subject("a1-0000000000000000", "face", None, 5.0, 1.0);
+        let outcome = evaluate_with(&project, &report, &range(missing, 0, 1), &stores);
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+    }
+
+    #[test]
+    fn subject_in_frame_filters_label_instance_and_confidence() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let boxes = vec![
+            DetectedBox {
+                subject: SubjectKey {
+                    label: "face".to_string(),
+                    id: Some("spk-2".to_string()),
+                },
+                rect: BoxRect {
+                    x: 300_000,
+                    y: 300_000,
+                    w: 200_000,
+                    h: 200_000,
+                },
+                confidence_milli: 400,
+            },
+            DetectedBox {
+                subject: SubjectKey {
+                    label: "face".to_string(),
+                    id: Some("spk-3".to_string()),
+                },
+                rect: BoxRect {
+                    x: 0,
+                    y: 0,
+                    w: 100_000,
+                    h: 100_000,
+                },
+                confidence_milli: 1000,
+            },
+        ];
+        let product = subject_fixture(s(5), 5, boxes);
+        let (_dir, stores) = subject_stores(&product);
+        let expect = subject(&product.hash(), "face", None, 5.0, 1.0);
+        let outcome = evaluate_with(&project, &report, &range(expect, 0, 1), &stores);
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+
+        // Narrow to the inside box by id; the low-confidence outside box is
+        // ignored by the threshold.
+        let inside = subject(&product.hash(), "face", Some("spk-2"), 5.0, 0.3);
+        let outcome = evaluate_with(&project, &report, &range(inside, 0, 1), &stores);
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        // A product that retained less than the asked-for threshold cannot
+        // answer "no face" — it is unverifiable.
+        let mut floored = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 940)],
+        );
+        if let ProductResult::SubjectBoxes { floor_milli, .. } = &mut floored.result {
+            *floor_milli = 900;
+        }
+        let (_dir, stores) = subject_stores(&floored);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&floored.hash(), "face", None, 5.0, 0.5), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+    }
+
+    #[test]
+    fn subject_in_frame_names_boxes_below_the_threshold() {
+        let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 400)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 0.5), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        let detail = outcome.detail.unwrap();
+        assert!(detail.contains("min_confidence 0.50"), "{detail}");
+        assert!(detail.contains("highest box is 0.40"), "{detail}");
+    }
+
+    #[test]
+    fn subject_in_frame_is_unverifiable_when_the_source_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.mp4");
+        std::fs::write(&source, b"first").unwrap();
+        let meta = std::fs::metadata(&source).unwrap();
+        let (secs, nanos) = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs(), d.subsec_nanos()))
+            .unwrap();
+        let mut product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        product.sample.source = SourceSignature {
+            source: source.display().to_string(),
+            source_arg: source.display().to_string(),
+            source_size: meta.len(),
+            source_mtime_secs: secs,
+            source_mtime_nanos: nanos,
+        };
+        let (_dir, stores) = subject_stores(&product);
+        let mut project = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        project.media[0].path = source.clone();
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        let file = std::fs::File::options().write(true).open(&source).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(file);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("source changed"));
+    }
+
+    #[test]
     fn words_complete_passes_when_audio_covers_the_range() {
         let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
         let report = report(&[(150, shot(1, 1))]);
@@ -2013,7 +2778,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 0, 5),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
         assert_eq!(outcome.detail.as_deref(), Some("1/1 words complete"));
@@ -2033,7 +2798,7 @@ mod tests {
             &report,
             // source 2..7 is timeline 0..5
             &range(with_transcript(&hash, 1.0), 2, 7),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
         let detail = outcome.detail.unwrap();
@@ -2060,7 +2825,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 2, 7),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
         let detail = outcome.detail.unwrap();
@@ -2085,7 +2850,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 2, 2),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         let detail = outcome.detail.unwrap_or_default();
@@ -2106,7 +2871,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 4, 8),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
         // "no words" would also pass; the count proves the word mapped in.
@@ -2124,7 +2889,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 4, 8),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
         assert!(
@@ -2150,7 +2915,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 0, 5),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
         assert!(
@@ -2173,7 +2938,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 0, 5),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
         assert_eq!(
@@ -2197,7 +2962,12 @@ mod tests {
             .import(&transcript(1, vec![word("hello", 1, 2)]))
             .unwrap();
         let annotation = expectation(with_transcript(&hash, 1.0), 2, s(0), s(5));
-        let outcome = evaluate_with(&project, &report, &annotation, &store);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &annotation,
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         let detail = outcome.detail.unwrap_or_default();
         assert!(detail.contains("not in the anchored span"), "{detail}");
@@ -2212,12 +2982,22 @@ mod tests {
             .import(&transcript(1, vec![word("whole", 1, 2), word("cut", 4, 7)]))
             .unwrap();
         let annotation = range(with_transcript(&hash, 0.5), 0, 5);
-        let outcome = evaluate_with(&project, &report, &annotation, &store);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &annotation,
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
         assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
         assert_eq!(outcome.detail.as_deref(), Some("1/2 words complete"));
 
         let strict = range(with_transcript(&hash, 0.75), 0, 5);
-        let outcome = evaluate_with(&project, &report, &strict, &store);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &strict,
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
         assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
         assert!(outcome.detail.unwrap().contains("1/2 words complete"));
     }
@@ -2229,14 +3009,24 @@ mod tests {
         let (_dir, store) = temp_store();
 
         let missing = range(with_transcript("t1-0000000000000000", 1.0), 0, 5);
-        let outcome = evaluate_with(&project, &report, &missing, &store);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &missing,
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         let detail = outcome.detail.unwrap();
         assert!(detail.contains("not found"), "{detail}");
         assert!(detail.contains("t1-0000000000000000"), "{detail}");
 
         let misspelled = range(with_transcript("../take", 1.0), 0, 5);
-        let outcome = evaluate_with(&project, &report, &misspelled, &store);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &misspelled,
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         assert!(outcome.detail.unwrap().contains("not a transcript hash"));
     }
@@ -2255,7 +3045,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 0, 5),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         assert!(outcome.detail.unwrap().contains("not in the project"));
@@ -2274,7 +3064,7 @@ mod tests {
             &silent,
             &report,
             &range(with_transcript(&hash, 1.0), 0, 5),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         assert!(outcome.detail.unwrap().contains("has no audio"));
@@ -2287,7 +3077,7 @@ mod tests {
             &project,
             &report,
             &range(with_transcript(&hash, 1.0), 0, 5),
-            &store,
+            &AnalysisStores::with_transcripts(store.clone()),
         );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         assert!(
@@ -2313,7 +3103,12 @@ mod tests {
             track(vec![clip(1, 3, 5)]),
             track(vec![dissolve(1, Some(2), 5)]),
         ]);
-        let outcome = evaluate_with(&crossfade, &report, &expect, &store);
+        let outcome = evaluate_with(
+            &crossfade,
+            &report,
+            &expect,
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
         assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
         assert_eq!(outcome.detail.as_deref(), Some("1/1 words complete"));
 
@@ -2321,7 +3116,12 @@ mod tests {
         let mut muted = track(vec![Segment::Clip(Clip::new(2, 1, s(0), s(5)))]);
         muted.muted = true;
         let hidden = project_with(vec![track(vec![clip(1, 3, 5)]), muted]);
-        let outcome = evaluate_with(&hidden, &report, &expect, &store);
+        let outcome = evaluate_with(
+            &hidden,
+            &report,
+            &expect,
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         assert!(
             outcome
@@ -2734,6 +3534,78 @@ mod tests {
                 "content hash",
             ),
             (
+                Expectation::SubjectInFrame {
+                    product: "take".into(),
+                    asset: 1,
+                    label: "face".into(),
+                    subject_id: None,
+                    margin_pct: 5.0,
+                    min_confidence: 1.0,
+                    tolerance_frames: 0,
+                },
+                "product",
+            ),
+            (
+                Expectation::SubjectInFrame {
+                    product: "a1-0000000000000000".into(),
+                    asset: 1,
+                    label: " ".into(),
+                    subject_id: None,
+                    margin_pct: 5.0,
+                    min_confidence: 1.0,
+                    tolerance_frames: 0,
+                },
+                "label",
+            ),
+            (
+                Expectation::SubjectInFrame {
+                    product: "a1-0000000000000000".into(),
+                    asset: 1,
+                    label: "face".into(),
+                    subject_id: Some(String::new()),
+                    margin_pct: 5.0,
+                    min_confidence: 1.0,
+                    tolerance_frames: 0,
+                },
+                "subject_id",
+            ),
+            (
+                Expectation::SubjectInFrame {
+                    product: "a1-0000000000000000".into(),
+                    asset: 1,
+                    label: "face".into(),
+                    subject_id: None,
+                    margin_pct: 50.1,
+                    min_confidence: 1.0,
+                    tolerance_frames: 0,
+                },
+                "margin_pct",
+            ),
+            (
+                Expectation::SubjectInFrame {
+                    product: "a1-0000000000000000".into(),
+                    asset: 1,
+                    label: "face".into(),
+                    subject_id: None,
+                    margin_pct: 5.0,
+                    min_confidence: 1.1,
+                    tolerance_frames: 0,
+                },
+                "min_confidence",
+            ),
+            (
+                Expectation::SubjectInFrame {
+                    product: "a1-0000000000000000".into(),
+                    asset: 1,
+                    label: "face".into(),
+                    subject_id: None,
+                    margin_pct: 5.0,
+                    min_confidence: 1.0,
+                    tolerance_frames: -1,
+                },
+                "tolerance_frames",
+            ),
+            (
                 Expectation::NoSliver {
                     min_frames: 0,
                     asset: None,
@@ -2757,6 +3629,15 @@ mod tests {
                 hold_size: false,
             },
             Expectation::WorkInFrame { margin_pct: 50.0 },
+            Expectation::SubjectInFrame {
+                product: "a1-0000000000000000".into(),
+                asset: 1,
+                label: "face".into(),
+                subject_id: None,
+                margin_pct: 0.0,
+                min_confidence: 0.0,
+                tolerance_frames: 0,
+            },
             Expectation::WordsComplete {
                 min_coverage: 0.0,
                 transcript: None,

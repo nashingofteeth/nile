@@ -1,7 +1,7 @@
 //! Analysis products beside the project: transcript import and the sidecar
 //! analyzer run.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -52,26 +52,150 @@ const BAD_WINDOW: &str = "--duration must be positive (the window ends at or bef
 
 pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<()> {
     let project = Project::load(project_path)?;
+    let spec = sample_spec(
+        &project,
+        args.asset,
+        args.start,
+        args.duration,
+        args.fps,
+        args.width,
+        args.height,
+    )?;
+    analysis::check_sample_budget(&spec)?;
+    let cache = SampleCache::new(analysis::sample_cache_dir(project_path));
+    let (_sample, entry) = cache.frames_entry(&spec)?;
+    let stage = analysis::StageDir::create(cache.root())?;
+    let store = ProductStore::at(project_path);
+    let hash = analysis::run_sidecar(
+        &spec,
+        &entry,
+        &stage,
+        &store,
+        &analysis::Task::MeanLuma,
+        &analysis::Analyzer::Bundled,
+    )?;
+    // Parse once more: an `a1-` address with a broken payload would be a
+    // corrupt store, not a successful analysis.
+    let product: AnalysisProduct = store.load(&hash)?;
+    product
+        .validate()
+        .map_err(|error| anyhow::anyhow!("stored product: {error}"))?;
+    say!("{hash}");
+    Ok(())
+}
+
+/// `nile analysis detect --asset N --label face …` — run a subject detector
+/// over one source window and print the product's `a1-…` address.
+///
+/// The detector is the bundled deterministic colour-box child unless
+/// `--analyzer` (or `NILE_ANALYZER`) names an absolute executable. There is no
+/// PATH search and no project-file detector setting: a detector is a process
+/// boundary, not a dependency.
+pub(crate) struct DetectArgs<'a> {
+    pub(crate) asset: u32,
+    pub(crate) start: Option<&'a str>,
+    pub(crate) duration: Option<&'a str>,
+    pub(crate) fps: Option<&'a str>,
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+    pub(crate) labels: &'a [String],
+    pub(crate) analyzer: Option<&'a Path>,
+    pub(crate) min_confidence: Option<f64>,
+}
+
+pub(crate) fn cmd_detect(project_path: &Path, args: DetectArgs<'_>) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let spec = sample_spec(
+        &project,
+        args.asset,
+        args.start,
+        args.duration,
+        args.fps,
+        args.width,
+        args.height,
+    )?;
+    let mut labels: Vec<String> = args
+        .labels
+        .iter()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect();
+    if labels.is_empty() {
+        bail!("pass at least one --label NAME");
+    }
+    labels.sort();
+    labels.dedup();
+    let min_confidence = args.min_confidence.unwrap_or(0.0);
+    if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+        bail!("--min-confidence must be between 0 and 1");
+    }
+    let floor_milli = (min_confidence * 1000.0).round() as u32;
+    let analyzer = resolve_analyzer(args.analyzer)?;
+    analysis::check_sample_budget(&spec)?;
+    let cache = SampleCache::new(analysis::sample_cache_dir(project_path));
+    let (_sample, entry) = cache.frames_entry(&spec)?;
+    let stage = analysis::StageDir::create(cache.root())?;
+    let store = ProductStore::at(project_path);
+    let hash = analysis::run_sidecar(
+        &spec,
+        &entry,
+        &stage,
+        &store,
+        &analysis::Task::SubjectBoxes {
+            labels,
+            floor_milli,
+        },
+        &analyzer,
+    )?;
+    let product: AnalysisProduct = store.load(&hash)?;
+    product
+        .validate()
+        .map_err(|error| anyhow::anyhow!("stored product: {error}"))?;
+    say!("{hash}");
+    Ok(())
+}
+
+fn resolve_analyzer(path: Option<&Path>) -> Result<analysis::Analyzer> {
+    let selected = match path {
+        Some(path) => path.to_path_buf(),
+        None => match std::env::var_os("NILE_ANALYZER") {
+            Some(value) => PathBuf::from(value),
+            None => return Ok(analysis::Analyzer::Bundled),
+        },
+    };
+    if !selected.is_absolute() {
+        bail!("analyzer path must be absolute: {}", selected.display());
+    }
+    Ok(analysis::Analyzer::External(selected))
+}
+
+/// Resolve the shared source window into the grid the sampler will pack.
+fn sample_spec(
+    project: &Project,
+    asset: u32,
+    start: Option<&str>,
+    duration: Option<&str>,
+    fps: Option<&str>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<FrameSpec> {
     let media = project
-        .asset(args.asset)
-        .with_context(|| format!("asset #{} is not in the media pool", args.asset))?;
+        .asset(asset)
+        .with_context(|| format!("asset #{asset} is not in the media pool"))?;
     if !media.probe.has_video() {
-        bail!("asset #{} has no video stream to sample", args.asset);
+        bail!("asset #{asset} has no video stream to sample");
     }
     // `parse_time` already rejects a negative start; this value only has to
     // stay exact through the default-duration subtraction.
-    let start = match args.start {
+    let start = match start {
         Some(value) => parse_cli_time(value, "--start")?,
         None => Seconds::from_integer(0),
     };
-    let duration = match args.duration {
+    let duration = match duration {
         Some(value) => parse_cli_time(value, "--duration")?,
         None => {
             let asset_duration = media.duration().with_context(|| {
-                format!(
-                    "asset #{} has no probed duration; pass --duration",
-                    args.asset
-                )
+                format!("asset #{asset} has no probed duration; pass --duration")
             })?;
             default_duration(asset_duration, start)?
         }
@@ -79,14 +203,14 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
     if duration <= Seconds::from_integer(0) {
         bail!(BAD_WINDOW);
     }
-    let fps = match args.fps {
+    let fps = match fps {
         Some(value) => parse_fps_arg(value)?,
         None => media
             .fps()
             .or(project.fps)
-            .with_context(|| format!("asset #{} has no frame rate; pass --fps", args.asset))?,
+            .with_context(|| format!("asset #{asset} has no frame rate; pass --fps"))?,
     };
-    let (width, height) = match (args.width, args.height) {
+    let (width, height) = match (width, height) {
         (Some(width), Some(height)) => (width, height),
         (None, None) => (64, 36),
         _ => bail!("pass both --width and --height (or neither for the 64×36 default)"),
@@ -96,7 +220,7 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
         // shorter than one frame.
         bail!("width and height must be non-zero");
     }
-    let spec = FrameSpec {
+    Ok(FrameSpec {
         source: media.path.clone(),
         mode: FrameMode::Grid {
             start,
@@ -105,21 +229,7 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
         },
         width,
         height,
-    };
-    analysis::check_sample_budget(&spec)?;
-    let cache = SampleCache::new(analysis::sample_cache_dir(project_path));
-    let (_sample, entry) = cache.frames_entry(&spec)?;
-    let stage = analysis::StageDir::create(cache.root())?;
-    let store = ProductStore::at(project_path);
-    let hash = analysis::run_sidecar(&spec, &entry, &stage, &store)?;
-    // Parse once more: an `a1-` address with a broken payload would be a
-    // corrupt store, not a successful analysis.
-    let product: AnalysisProduct = store.load(&hash)?;
-    product
-        .validate()
-        .map_err(|error| anyhow::anyhow!("stored product: {error}"))?;
-    say!("{hash}");
-    Ok(())
+    })
 }
 
 fn parse_cli_time(value: &str, flag: &str) -> Result<Seconds> {

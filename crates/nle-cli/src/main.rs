@@ -29,7 +29,7 @@ mod thumbnails;
 // Waveform peaks back the timeline's audio row; `prune` is used headless.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod waveform;
-// The analysis sidecar host and the hidden mean-luma analyzer child.
+// The analysis sidecar host and the hidden analyzer child.
 mod analysis;
 
 // Declared after the macros: a child module only sees a macro_rules! that
@@ -469,7 +469,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Internal: the mean-luma analyzer child `nile analysis analyze` spawns
+    /// Internal: the analyzer child `nile analysis analyze`/`detect` spawns
     #[command(hide = true)]
     AnalysisAnalyzer,
     /// Detect the cuts in a rendered file and rebuild an editable timeline
@@ -699,6 +699,11 @@ enum MediaCmd {
 }
 
 /// Annotation subcommands.
+///
+/// `Add` carries every check's flags as `Option`s (clap's shape); boxing them
+/// would only make the command line harder to build, and this enum lives for
+/// one argv parse.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum AnnotationCmd {
     /// Add a note anchored to a source time or timeline position, or an
@@ -771,6 +776,19 @@ enum AnnotationCmd {
         /// transcript store
         #[arg(long, value_name = "HASH")]
         transcript: Option<String>,
+        /// subject-in-frame: detector product hash (`a1-…`)
+        #[arg(long, value_name = "HASH")]
+        product: Option<String>,
+        /// subject-in-frame: detector class to check
+        #[arg(long, value_name = "LABEL")]
+        label: Option<String>,
+        /// subject-in-frame: detector instance id (default: every box of the
+        /// label)
+        #[arg(long, value_name = "ID")]
+        subject_id: Option<String>,
+        /// subject-in-frame: lowest box confidence to count (0..=1, default 1)
+        #[arg(long, value_name = "F")]
+        min_confidence: Option<f64>,
         /// absent: also refuse black frames (and a blend's black side)
         #[arg(long)]
         black: bool,
@@ -820,6 +838,8 @@ enum ExpectCheck {
     CropStable,
     /// Every crop keeps --margin percent of the picture on every side
     WorkInFrame,
+    /// Every detected subject box stays inside the crop --margin
+    SubjectInFrame,
     /// The checked span carries audio for --min-coverage of its frames
     WordsComplete,
     /// Nothing named appears (and, with --black, no black frame either)
@@ -835,6 +855,7 @@ impl ExpectCheck {
             ExpectCheck::Cam => "cam",
             ExpectCheck::CropStable => "crop_stable",
             ExpectCheck::WorkInFrame => "work_in_frame",
+            ExpectCheck::SubjectInFrame => "subject_in_frame",
             ExpectCheck::WordsComplete => "words_complete",
             ExpectCheck::Absent => "absent",
             ExpectCheck::NoSliver => "no_sliver",
@@ -873,6 +894,37 @@ enum AnalysisCmd {
         /// Sample height in pixels (default 36; pass with --width)
         #[arg(long)]
         height: Option<u32>,
+    },
+    /// Sample an asset and run a subject detector, printing its a1-… product
+    Detect {
+        /// Asset id (from `nile media ls`)
+        #[arg(long)]
+        asset: u32,
+        /// Source start (seconds or timecode; default 0)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        start: Option<String>,
+        /// Source window length (default: from --start to the asset's end)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        duration: Option<String>,
+        /// Sampling rate (default: the asset's frame rate)
+        #[arg(long, value_name = "RATE")]
+        fps: Option<String>,
+        /// Sample width in pixels (default 64; pass with --height)
+        #[arg(long)]
+        width: Option<u32>,
+        /// Sample height in pixels (default 36; pass with --width)
+        #[arg(long)]
+        height: Option<u32>,
+        /// Detector class to find (repeatable; e.g. face)
+        #[arg(long = "label", value_name = "NAME", required = true)]
+        labels: Vec<String>,
+        /// Absolute detector executable (default: NILE_ANALYZER or the
+        /// bundled colour-box test detector)
+        #[arg(long, value_name = "FILE")]
+        analyzer: Option<PathBuf>,
+        /// Lowest confidence the product retains (0..=1, default 0)
+        #[arg(long, value_name = "F")]
+        min_confidence: Option<f64>,
     },
 }
 
@@ -1106,6 +1158,35 @@ fn main() -> Result<()> {
                     json,
                 },
         } => return cmd_annotation_check(&project, report, *sequence, id, *json),
+        Cmd::Analysis {
+            action:
+                AnalysisCmd::Detect {
+                    asset,
+                    start,
+                    duration,
+                    fps,
+                    width,
+                    height,
+                    labels,
+                    analyzer,
+                    min_confidence,
+                },
+        } => {
+            return cmd::analysis::cmd_detect(
+                &project,
+                cmd::analysis::DetectArgs {
+                    asset: *asset,
+                    start: start.as_deref(),
+                    duration: duration.as_deref(),
+                    fps: fps.as_deref(),
+                    width: *width,
+                    height: *height,
+                    labels,
+                    analyzer: analyzer.as_deref(),
+                    min_confidence: *min_confidence,
+                },
+            );
+        }
         Cmd::Analysis {
             action: AnalysisCmd::Import { asset, file },
         } => return cmd::analysis::cmd_import(&project, *asset, file),
@@ -1500,6 +1581,10 @@ mod tests {
                     margin: None,
                     min_coverage: None,
                     transcript: None,
+                    product: None,
+                    label: None,
+                    subject_id: None,
+                    min_confidence: None,
                     black: false,
                     min_frames: None,
                 },
@@ -1521,6 +1606,10 @@ mod tests {
                     margin: None,
                     min_coverage: None,
                     transcript: None,
+                    product: None,
+                    label: None,
+                    subject_id: None,
+                    min_confidence: None,
                     black: false,
                     min_frames: None,
                 },
@@ -1754,6 +1843,10 @@ mod tests {
                 margin: None,
                 min_coverage: None,
                 transcript: None,
+                product: None,
+                label: None,
+                subject_id: None,
+                min_confidence: None,
                 black: false,
                 min_frames: None,
             },
@@ -2325,6 +2418,10 @@ mod tests {
                 margin: None,
                 min_coverage: None,
                 transcript: None,
+                product: None,
+                label: None,
+                subject_id: None,
+                min_confidence: None,
                 black: true,
                 min_frames: None,
             },
@@ -2364,6 +2461,68 @@ mod tests {
 
     /// clap owns the usage-level refusals (exit 2), the mapping owns the
     /// rest: neither may accept a half-specified expectation.
+    #[test]
+    fn clap_maps_the_subject_in_frame_flags() {
+        let action = clap_action(&[
+            "annotation",
+            "add",
+            "--expect",
+            "subject-in-frame",
+            "--timeline",
+            "--at",
+            "1",
+            "--asset",
+            "1",
+            "--product",
+            "a1-0000000000000000",
+            "--label",
+            "face",
+            "--subject-id",
+            "spk-2",
+            "--margin",
+            "7",
+            "--min-confidence",
+            "0.5",
+            "--tolerance-frames",
+            "2",
+        ]);
+        let Action::AnnotationAddAt {
+            kind: nle_core::AnnotationKind::Expectation { expect },
+            ..
+        } = action
+        else {
+            panic!("subject-in-frame parsed as {action:?}");
+        };
+        assert_eq!(
+            expect,
+            nle_core::Expectation::SubjectInFrame {
+                product: "a1-0000000000000000".into(),
+                asset: 1,
+                label: "face".into(),
+                subject_id: Some("spk-2".into()),
+                margin_pct: 7.0,
+                min_confidence: 0.5,
+                tolerance_frames: 2,
+            }
+        );
+
+        // The product and label are required, not silently empty.
+        let err = action_error(&[
+            "annotation",
+            "add",
+            "--expect",
+            "subject-in-frame",
+            "--timeline",
+            "--at",
+            "1",
+            "--asset",
+            "1",
+            "--label",
+            "face",
+        ]);
+        assert!(err.contains("--product"), "{err}");
+    }
+
     #[test]
     fn clap_refuses_text_with_expect_and_expect_without_timeline() {
         assert!(
@@ -2420,6 +2579,10 @@ mod tests {
                 margin: None,
                 min_coverage: None,
                 transcript: None,
+                product: None,
+                label: None,
+                subject_id: None,
+                min_confidence: None,
                 black: false,
                 min_frames: None,
             },
