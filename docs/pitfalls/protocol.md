@@ -10,7 +10,8 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 `undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`,
 `sequence.audio`, `media.list`, `media.add`, `playhead.set`,
 `annotation.list`, `annotation.check`, `analysis.add`, `job.submit`,
-`job.list`, `job.get`, `job.cancel`, `job.remove`. The internal `wire_catalog!` macro
+`job.list`, `job.get`, `job.cancel`, `job.remove`, `job.prune`. The internal
+`wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a
 method to the invocation, then a sample to `all_calls()`; the `METHODS.len()`
@@ -190,8 +191,24 @@ not a model write — the project revision, history and playhead do not move.
 CAS token); `job.get`/`job.cancel` return the same record shape as submit.
 `job.remove {id}` deletes a **terminal** job's `job.json` and snapshot and
 returns the removed record; a queued or running job is invalid params (cancel
-it first), as is an unknown id. There is no age/count pruning. Additive, so
-`PROTOCOL_VERSION` stays at 5.
+it first), as is an unknown id.
+
+`job.prune {keep, older_than_days?}` is retention across jobs and returns
+`{removed: [id…]}` (oldest first). Only terminal jobs are candidates: the
+newest `keep` are always retained, and `older_than_days` further requires the
+job's finish time (its creation time if it never started) to be older than
+`now - days`; ties break on id, which is submission order. Queued and running
+jobs are never pruned, so the server and not the client owns the plan.
+Additive, so `PROTOCOL_VERSION` stays at 5.
+
+Job ids are never recycled: `.nile/<stem>/jobs/.next-id` keeps the high-water
+mark, because a pruned or removed highest id would otherwise let the next
+submit reuse it. A server start also sweeps crash leftovers: a hidden
+`.name.jobN.ext` temp is deleted only when it is exactly the
+`nle_core::jobs::partial_path` of a **terminal** record (the executor renames
+or removes it before the terminal write); a queued/running temp, another
+record's output, or an unexplained file is left for a human. The executor and
+the sweep share `partial_path`, so their naming cannot drift.
 
 `JobRecord` ignores unknown fields so a record from a newer build still parses
 far enough to hit the `version` check; startup logs and skips a corrupt or

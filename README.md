@@ -466,6 +466,7 @@ nile job ls                                # id, state, progress, output
 nile job show 1                            # the full record as JSON
 nile job cancel 1                          # drop queued or kill the render
 nile job rm 1                              # delete a terminal record + snapshot
+nile job prune --keep 5 [--older-than 30]  # keep the newest terminal jobs
 ```
 
 `nile export` stays synchronous and file-based. `nile job submit` instead
@@ -479,6 +480,14 @@ panel is the same queue; `x` cancels, `o` points at the report.
 State lives under `.nile/<stem>/jobs/<id>/` as `job.json` (the record) plus
 `project.json` (the submit-time snapshot). `nile job rm` removes both for a
 terminal job; queued or running jobs must be cancelled first.
+
+`nile job prune --keep N` deletes **terminal** jobs beyond the newest N, and
+`--older-than DAYS` additionally requires a job's finish (or creation, if it
+never started) to be older than that window; the newest N are always kept.
+Queued and running jobs are never pruned. A server start also removes hidden
+render temps (`.name.jobN.ext`) left by a crash, but only when the temp is
+exactly the one a terminal record names; a queued or running temp is live and
+is left alone. Job ids are never recycled, even after a prune.
 
 ### One-shot tools and logging
 
@@ -504,7 +513,8 @@ server per project owns the socket; a second `nile serve` refuses. Multiple
 connections serialize their calls through one handler. Call `hello` first,
 then `project.show`, `timeline.edl`,
 `sequence.list|use|add|audio`, `media.list|add`, `action.preview`,
-`action.apply`, `undo`, `redo`, or the durable `job.submit|list|get|cancel`.
+`action.apply`, `undo`, `redo`, or the durable
+`job.submit|list|get|cancel|remove|prune`.
 Actions apply to the active sequence; add media and a second sequence first,
 then switch to it:
 
