@@ -243,8 +243,9 @@ pub fn tmp_file(base: &str) -> String {
 }
 
 /// Everything the render depends on: the segment (effects, transition,
-/// source spans, speed), the output geometry and frame rate, and the media it
-/// reads (path + mtime, so replacing a file invalidates).
+/// source spans, speed), the output geometry and frame rate, the sequence's
+/// audio post, and the media it reads (path + mtime, so replacing a file
+/// invalidates).
 fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
     RENDER_VERSION.hash(&mut hasher);
@@ -258,6 +259,9 @@ fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     // key too: the same segment in a 24 fps and a 30 fps project must not
     // share an entry.
     project.fps.hash(&mut hasher);
+    // …and so does the sequence's audio post (`loudnorm`, `afade`), which the
+    // export chain applies to this render after the mix.
+    project.audio.hash(&mut hasher);
     let mut assets: Vec<u32> = Vec::new();
     match seg {
         Segment::Clip(c) => assets.push(c.asset),
@@ -525,6 +529,8 @@ fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
     w.hash(&mut hasher);
     h.hash(&mut hasher);
     project.fps.hash(&mut hasher);
+    // The composite is the export graph too, audio post included.
+    project.audio.hash(&mut hasher);
     for track in tracks {
         for seg in &track.segments {
             hash_lut_files(seg, &mut hasher);
@@ -806,6 +812,69 @@ mod tests {
             proxy_hash(&p30, &a, 320, 240),
             "frame rate is part of the key"
         );
+    }
+
+    /// The export bakes the sequence's audio post into the render, so the key
+    /// must move when each setting changes — otherwise the monitor plays a
+    /// programme shaped by the old settings.
+    #[test]
+    fn proxy_hash_includes_audio_post_settings() {
+        let seg = clip();
+        let plain = proxy_hash(&Project::new(), &seg, 320, 240);
+        let audio = |normalize: bool, fade_in: Seconds, fade_out: Seconds| {
+            let mut p = Project::new();
+            p.audio = nle_core::AudioSettings {
+                normalize,
+                fade_in,
+                fade_out,
+            };
+            proxy_hash(&p, &seg, 320, 240)
+        };
+        assert_ne!(
+            audio(true, Seconds::from_integer(0), Seconds::from_integer(0)),
+            plain,
+            "normalize is part of the key"
+        );
+        assert_ne!(
+            audio(false, Seconds::new(1, 2), Seconds::from_integer(0)),
+            plain,
+            "fade-in is part of the key"
+        );
+        assert_ne!(
+            audio(false, Seconds::from_integer(0), Seconds::new(1, 4)),
+            plain,
+            "fade-out is part of the key"
+        );
+    }
+
+    /// A composite span is rendered by the export too, so its key carries the
+    /// same audio-post settings as a segment's.
+    #[test]
+    fn span_hash_includes_audio_post_settings() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        p.timeline.tracks[0].segments = vec![Segment::Clip(Clip::new(1, a, secs(0), secs(2)))];
+        let tracks = slice_tracks(&p, secs(0), secs(2));
+        let span = |p: &Project| span_hash(p, &tracks, 320, 240);
+        let plain = span(&p);
+
+        let mut normalize = p.clone();
+        normalize.audio.normalize = true;
+        assert_ne!(span(&normalize), plain, "normalize is part of the key");
+
+        let mut fade_in = p.clone();
+        fade_in.audio.fade_in = Seconds::new(1, 2);
+        assert_ne!(span(&fade_in), plain, "fade-in is part of the key");
+
+        let mut fade_out = p.clone();
+        fade_out.audio.fade_out = Seconds::new(1, 4);
+        assert_ne!(span(&fade_out), plain, "fade-out is part of the key");
     }
 
     /// Write a cache entry of `len` bytes and stamp it `age` before `now`.

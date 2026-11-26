@@ -17,8 +17,8 @@ Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
   - a *segment* (`preview::needs_proxy`): an effect, a non-1× retime, a
     transition, or a picture size that isn't the sequence's (mpv re-frames a
     raw file to *its* aspect while the export scales it, so the framing would
-    jump at the seam); hashed by the segment + geometry + fps + the assets it
-    reads;
+    jump at the seam); hashed by the segment + geometry + fps + the sequence's
+    audio post + the assets it reads;
   - a *span* where another track is audible (`proxy::composite_proxy`): every
     unmuted track's slice of it, hashed the same way over the slices.
 - Each asset's **path and mtime** are in the hash, so a replaced file
