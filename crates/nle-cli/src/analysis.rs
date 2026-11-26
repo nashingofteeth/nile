@@ -633,12 +633,15 @@ fn require_result_shape(
             }
         }
         (
-            Task::SubjectBoxes { labels, .. },
+            Task::SubjectBoxes {
+                labels,
+                floor_milli,
+            },
             ProductResult::SubjectBoxes {
                 grid,
                 labels: declared,
+                floor_milli: product_floor,
                 frames: boxes,
-                ..
             },
         ) => {
             let FrameMode::Grid { start, fps, .. } = &spec.mode else {
@@ -658,6 +661,11 @@ fn require_result_shape(
             if declared != labels {
                 return Err(SidecarError::Product(format!(
                     "the product declares labels {declared:?}, request names {labels:?}"
+                )));
+            }
+            if product_floor != floor_milli {
+                return Err(SidecarError::Product(format!(
+                    "the product retains confidence {product_floor}, request names {floor_milli}"
                 )));
             }
             if boxes.len() as u64 != *frames {
