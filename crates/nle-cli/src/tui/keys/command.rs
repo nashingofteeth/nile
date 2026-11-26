@@ -416,12 +416,12 @@ pub(crate) fn detect_command(app: &mut App, f: &mut action::Flags) -> Option<Str
 }
 
 /// `:edl-import FILE --media DIR [--fps R] [--src-offset TC] [--map
-/// REEL=PATH] [--group NAME=FILE,FILE] [--append] [--track N] [--force]` —
-/// build a project from a CMX3600 EDL (the CLI's `import-edl`); the open
-/// project reloads when it lands.
+/// REEL=PATH] [--group NAME=FILE,FILE] [--append] [--track N] [--size WxH]
+/// [--force]` — build a project from a CMX3600 EDL (the CLI's `import-edl`);
+/// the open project reloads when it lands.
 pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
     const USAGE: &str = "usage: :edl-import FILE --media DIR [--fps R] [--src-offset TC] \
-         [--map REEL=PATH] [--group NAME=FILE,FILE] [--append] [--track N] [--force]";
+         [--map REEL=PATH] [--group NAME=FILE,FILE] [--append] [--track N] [--size WxH] [--force]";
     let file = match f.positional() {
         Some(p) => PathBuf::from(p),
         None => return Some(USAGE.to_string()),
@@ -441,6 +441,7 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
         Ok(track) => track,
         Err(error) => return Some(error.to_string()),
     };
+    let size = f.take("size");
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
@@ -474,6 +475,7 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
             groups: &groups,
             append,
             track,
+            size: size.as_deref(),
             force,
         })
         .map_err(|e| e.to_string())
@@ -489,12 +491,12 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
 }
 
 /// `:otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW]
-/// [--group NAME=FILE,FILE] [--append] [--track N] [--force]` — build a
-/// project from an OpenTimelineIO timeline (the CLI's `import-otio`); the
-/// open project reloads when it lands.
+/// [--group NAME=FILE,FILE] [--append] [--track N] [--size WxH] [--force]` —
+/// build a project from an OpenTimelineIO timeline (the CLI's `import-otio`);
+/// the open project reloads when it lands.
 pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
     const USAGE: &str = "usage: :otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW] \
-         [--group NAME=FILE,FILE] [--append] [--track N] [--force]";
+         [--group NAME=FILE,FILE] [--append] [--track N] [--size WxH] [--force]";
     let file = match f.positional() {
         Some(p) => PathBuf::from(p),
         None => return Some(USAGE.to_string()),
@@ -508,6 +510,7 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
         Ok(track) => track,
         Err(error) => return Some(error.to_string()),
     };
+    let size = f.take("size");
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
@@ -540,6 +543,7 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
             groups: &groups,
             append,
             track,
+            size: size.as_deref(),
             force,
         })
         .map_err(|e| e.to_string())

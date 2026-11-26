@@ -224,12 +224,85 @@ fn add_group_parts(project: &mut Project, spec: &GroupSpec, paths: &[PathBuf]) -
     Ok(project.add_group(&spec.name, parts)?)
 }
 
+/// Parse `--size WxH` into pixels. Both `x` and `×` are accepted; zero is
+/// refused here rather than reaching the export graph as a division by zero.
+pub(crate) fn parse_size_arg(s: &str) -> Result<(u32, u32)> {
+    let split = s
+        .split_once(['x', 'X'])
+        .or_else(|| s.split_once('×'))
+        .ok_or_else(|| anyhow::anyhow!("invalid --size {s:?} (expected WxH, e.g. 1280x720)"))?;
+    let parse = |what: &str, value: &str| -> Result<u32> {
+        value.trim().parse::<u32>().map_err(|_| {
+            anyhow::anyhow!("invalid --size {s:?}: {what} {value:?} is not a positive integer")
+        })
+    };
+    let (width, height) = (parse("width", split.0)?, parse("height", split.1)?);
+    if width == 0 || height == 0 {
+        bail!("--size must be non-zero (got {s:?})");
+    }
+    Ok((width, height))
+}
+
+/// Settle the sequence's output size before anything is written.
+///
+/// A fresh import takes `--size` first, then the first video asset's size. An
+/// append keeps the loaded sequence's size and refuses a conflicting
+/// `--size` (like `--fps`); it fills a missing size from `--size` or a video
+/// asset. Either way the final size must be known: an audio-only import still
+/// needs a canvas for export's black base, and writing a project that cannot
+/// render is not a successful import.
+fn settle_video_size(
+    project: &mut Project,
+    append: bool,
+    requested: Option<&str>,
+    inferred: Option<(u32, u32)>,
+) -> Result<()> {
+    let requested = requested.map(parse_size_arg).transpose()?;
+    if append && let Some(existing) = project.video.as_ref() {
+        if let Some((width, height)) = requested
+            && (existing.width, existing.height) != (width, height)
+        {
+            bail!(
+                "--append keeps the project's {}x{}; --size {width}x{height} would rebuild the canvas",
+                existing.width,
+                existing.height
+            );
+        }
+        return Ok(());
+    }
+    let Some((width, height)) = requested.or(inferred) else {
+        bail!(
+            "no video size known — pass --size WxH (an audio-only import still needs an export canvas)"
+        );
+    };
+    project.video = Some(VideoSettings { width, height });
+    Ok(())
+}
+
+/// Find an existing track of `kind` with the same mute state that no incoming
+/// track has claimed yet.
+fn matching_track(
+    project: &Project,
+    used: &HashSet<usize>,
+    kind: TrackKind,
+    muted: bool,
+) -> Option<usize> {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .enumerate()
+        .find(|(i, t)| !used.contains(i) && t.kind == kind && t.muted == muted)
+        .map(|(i, _)| i)
+}
+
 /// Add a built import to the existing sequence at its end.
 ///
-/// Each incoming track keeps its kind: the first video track goes to
-/// `video_track` (default: the first video track), later video tracks and
-/// audio tracks land on the next existing track of that kind, or on a new one
-/// when the project has none to spare. Every target is padded to the common
+/// Each incoming track keeps its kind **and mute state**: it reuses the first
+/// unclaimed existing track with the same pair, otherwise a new track is
+/// created with that mute flag. The first video track goes to `video_track`
+/// when given, and a mute mismatch there is refused rather than silently
+/// unmuting (or muting) the target. Every target is padded to the common
 /// `start` with a gap (`append_spans` coalesces it with a leading gap), so
 /// tracks stay aligned instead of starting at their own ends. Clip ids are
 /// renumbered from the project's next free id: the builders number from 1,
@@ -257,68 +330,63 @@ fn append_timeline(
         }
     }
 
-    let target_video = match video_track {
-        Some(n) => {
-            let i = super::cli_index(n, "--track").map_err(anyhow::Error::msg)?;
-            let track = project
-                .timeline
-                .track(i)
-                .with_context(|| format!("no track #{n}"))?;
-            if track.kind != TrackKind::Video {
-                bail!("track #{n} is not a video track");
-            }
-            i
-        }
-        None => project
+    // Validate an explicit target even when the incoming document has no
+    // video material: a bad `--track` is a user error regardless.
+    if let Some(n) = video_track {
+        let i = super::cli_index(n, "--track").map_err(anyhow::Error::msg)?;
+        let track = project
             .timeline
-            .tracks
-            .iter()
-            .position(|t| t.kind == TrackKind::Video)
-            .context("project has no video track")?,
-    };
+            .track(i)
+            .with_context(|| format!("no track #{n}"))?;
+        if track.kind != TrackKind::Video {
+            bail!("track #{n} is not a video track");
+        }
+    }
 
-    let mut audios = 0usize;
-    let mut last_video: Option<usize> = None;
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut first_video = true;
     for track in incoming.tracks {
         // An audio-only EDL still carries the model's empty base video track;
         // there is no material to append from it.
         if track.segments.is_empty() {
             continue;
         }
-        let ti = match track.kind {
-            TrackKind::Video => {
-                let target = match last_video {
-                    None => target_video,
-                    // Later video tracks go to the next existing video track
-                    // after the previous target, never back onto it.
-                    Some(prev) => project
+        let target = if first_video && track.kind == TrackKind::Video {
+            first_video = false;
+            match video_track {
+                Some(n) => {
+                    let i = super::cli_index(n, "--track").map_err(anyhow::Error::msg)?;
+                    let existing = project
                         .timeline
-                        .tracks
-                        .iter()
-                        .enumerate()
-                        .find(|(i, t)| *i > prev && t.kind == TrackKind::Video)
-                        .map(|(i, _)| i)
-                        .unwrap_or_else(|| project.timeline.add_track(TrackKind::Video)),
-                };
-                last_video = Some(target);
-                target
+                        .track(i)
+                        .with_context(|| format!("no track #{n}"))?;
+                    if existing.muted != track.muted {
+                        bail!(
+                            "--track {n} is {} but the imported video track is {} — pick a track with the same mute state",
+                            if existing.muted { "muted" } else { "unmuted" },
+                            if track.muted { "muted" } else { "unmuted" }
+                        );
+                    }
+                    i
+                }
+                None => matching_track(project, &used, track.kind, track.muted)
+                    .unwrap_or_else(|| add_matching_track(project, track.kind, track.muted)),
             }
-            TrackKind::Audio => {
-                let existing = project
-                    .timeline
-                    .tracks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| t.kind == TrackKind::Audio)
-                    .nth(audios)
-                    .map(|(i, _)| i);
-                audios += 1;
-                existing.unwrap_or_else(|| project.timeline.add_track(TrackKind::Audio))
-            }
+        } else {
+            matching_track(project, &used, track.kind, track.muted)
+                .unwrap_or_else(|| add_matching_track(project, track.kind, track.muted))
         };
-        append_spans(project, ti, start, track.segments);
+        used.insert(target);
+        append_spans(project, target, start, track.segments);
     }
     Ok(())
+}
+
+/// Append a new empty track with the incoming track's kind and mute flag.
+fn add_matching_track(project: &mut Project, kind: TrackKind, muted: bool) -> usize {
+    let i = project.timeline.add_track(kind);
+    project.timeline.tracks[i].muted = muted;
+    i
 }
 
 /// Expand `~`/`~/…` without a shell. `~user` is left alone: resolving
@@ -539,6 +607,7 @@ pub(crate) struct EdlImport<'a> {
     pub groups: &'a [GroupSpec],
     pub append: bool,
     pub track: Option<usize>,
+    pub size: Option<&'a str>,
     pub force: bool,
 }
 
@@ -558,6 +627,7 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
         groups,
         append,
         track,
+        size: size_arg,
         force,
     } = args;
     if append && force {
@@ -668,9 +738,7 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
     if project.fps.is_none() {
         project.fps = Some(fps);
     }
-    if project.video.is_none() {
-        project.video = size.map(|(width, height)| VideoSettings { width, height });
-    }
+    settle_video_size(&mut project, append, size_arg, size)?;
 
     let offset_frames = timecode_to_frames(parse_timecode(src_offset)?, fps, doc.drop_frame);
     let timeline = edl::build(&doc, fps, offset_frames, &|ev| {
@@ -804,6 +872,7 @@ pub(crate) struct OtioImport<'a> {
     pub groups: &'a [GroupSpec],
     pub append: bool,
     pub track: Option<usize>,
+    pub size: Option<&'a str>,
     pub force: bool,
 }
 
@@ -822,6 +891,7 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
         groups,
         append,
         track,
+        size: size_arg,
         force,
     } = args;
     if append && force {
@@ -926,21 +996,19 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
     if project.fps.is_none() {
         project.fps = Some(fps);
     }
-    if project.video.is_none() {
-        project.video = doc
-            .tracks
-            .iter()
-            .filter(|t| t.kind == TrackKind::Video)
-            .flat_map(|t| &t.items)
-            .find_map(|item| match item {
-                OtioItem::Clip(c) => by_path
-                    .get(&c.path)
-                    .and_then(|id| project.asset(*id))
-                    .and_then(|a| a.video_size())
-                    .map(|(width, height)| VideoSettings { width, height }),
-                OtioItem::Gap(_) => None,
-            });
-    }
+    let size = doc
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video)
+        .flat_map(|t| &t.items)
+        .find_map(|item| match item {
+            OtioItem::Clip(c) => by_path
+                .get(&c.path)
+                .and_then(|id| project.asset(*id))
+                .and_then(|a| a.video_size()),
+            OtioItem::Gap(_) => None,
+        });
+    settle_video_size(&mut project, append, size_arg, size)?;
 
     let timeline = otio::build(&doc, &|p| by_path.get(p).copied())
         .with_context(|| format!("building timeline from {}", otio_path.display()))?;
@@ -1010,6 +1078,16 @@ mod tests {
             spec.parts,
             vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")]
         );
+    }
+
+    #[test]
+    fn size_arg_parses_wxh_and_refuses_bad_values() {
+        assert_eq!(parse_size_arg("1280x720").unwrap(), (1280, 720));
+        assert_eq!(parse_size_arg("1920X1080").unwrap(), (1920, 1080));
+        assert_eq!(parse_size_arg("640×360").unwrap(), (640, 360));
+        for bad in ["1280", "1280x", "x720", "0x720", "1280x0", "a x b", "-2x4"] {
+            assert!(parse_size_arg(bad).is_err(), "{bad:?} was accepted");
+        }
     }
 
     #[test]

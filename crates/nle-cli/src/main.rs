@@ -451,6 +451,9 @@ enum Cmd {
         /// Video track to append to (1-based; default: first video track)
         #[arg(long, value_name = "N", requires = "append")]
         track: Option<usize>,
+        /// Output size for a project with no video asset: WxH (e.g. 1280x720)
+        #[arg(long, value_name = "WxH")]
+        size: Option<String>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -477,6 +480,9 @@ enum Cmd {
         /// Video track to append to (1-based; default: first video track)
         #[arg(long, value_name = "N", requires = "append")]
         track: Option<usize>,
+        /// Output size for a project with no video asset: WxH (e.g. 1280x720)
+        #[arg(long, value_name = "WxH")]
+        size: Option<String>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -1237,6 +1243,7 @@ fn main() -> Result<()> {
             group,
             append,
             track,
+            size,
             force,
         } => {
             return cmd_import_edl(EdlImport {
@@ -1249,6 +1256,7 @@ fn main() -> Result<()> {
                 groups: group,
                 append: *append,
                 track: *track,
+                size: size.as_deref(),
                 force: *force,
             });
         }
@@ -1260,6 +1268,7 @@ fn main() -> Result<()> {
             group,
             append,
             track,
+            size,
             force,
         } => {
             return cmd_import_otio(OtioImport {
@@ -1271,6 +1280,7 @@ fn main() -> Result<()> {
                 groups: group,
                 append: *append,
                 track: *track,
+                size: size.as_deref(),
                 force: *force,
             });
         }
