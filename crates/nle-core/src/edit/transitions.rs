@@ -6,13 +6,15 @@
 //! and extend modules call `move_blend_edge` / `shift_blend_side`.
 
 use crate::project::Project;
-use crate::time::{Seconds, format_seconds, frames_to_seconds};
+use crate::time::{
+    Seconds, checked_add, checked_mul, checked_sub, format_seconds, frames_to_seconds,
+};
 use crate::timeline::{
     Clip, Effect, MAX_TIMELINE_SECONDS, Segment, Track, TrackKind, Transition, TransitionKind,
     TransitionSource,
 };
 
-use super::util::{at_least_a_frame, snap, source_span, stamp, track_at};
+use super::util::{at_least_a_frame, snap, stamp, track_at};
 use super::{Batch, EditError, EditOp};
 
 /// Add a transition at a boundary (the playhead, snapped to the frame
@@ -41,7 +43,10 @@ pub fn add_transition(
     }
 
     // Whole frames, at least one.
-    let frames = (dur * fps).round().to_integer();
+    let frames = checked_mul(&dur, &fps)
+        .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?
+        .round()
+        .to_integer();
     if frames < 1 {
         return Err(EditError::TooShort);
     }
@@ -76,10 +81,16 @@ pub fn add_transition(
                 if c.effects.iter().any(Effect::is_keyed_crop) {
                     return Err(EditError::KeyedCropTransition(c.id));
                 }
-                let rem = c.duration() - dur;
+                let cdur = c
+                    .checked_duration()
+                    .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+                let rem =
+                    checked_sub(&cdur, &dur).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
                 at_least_a_frame(project, &rem)?;
-                let tail = source_span(c, dur);
-                let new_out = c.asset_out - tail;
+                let tail =
+                    checked_mul(&dur, &c.speed).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+                let new_out = checked_sub(&c.asset_out, &tail)
+                    .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
                 a = TransitionSource::Clip {
                     asset: c.asset,
                     src_in: new_out,
@@ -109,10 +120,16 @@ pub fn add_transition(
                 if c.effects.iter().any(Effect::is_keyed_crop) {
                     return Err(EditError::KeyedCropTransition(c.id));
                 }
-                let rem = c.duration() - dur;
+                let cdur = c
+                    .checked_duration()
+                    .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+                let rem =
+                    checked_sub(&cdur, &dur).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
                 at_least_a_frame(project, &rem)?;
-                let head = source_span(c, dur);
-                let new_in = c.asset_in + head;
+                let head =
+                    checked_mul(&dur, &c.speed).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+                let new_in = checked_add(&c.asset_in, &head)
+                    .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
                 b = TransitionSource::Clip {
                     asset: c.asset,
                     src_in: c.asset_in,

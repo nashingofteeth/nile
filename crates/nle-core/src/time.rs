@@ -246,6 +246,19 @@ pub(crate) fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     checked_ratio(n, d)
 }
 
+/// `a * b >= 1`, compared exactly by cross-multiplying in `i128`.
+///
+/// The frame-grid test ("is this span at least one frame?") only needs the
+/// comparison, never the product. Computing the product first overflows
+/// `Ratio<i64>` for an extreme rate (a tiny fps makes the denominator
+/// `dur.den * fps.den` exceed `i64`), so compare the two `i64 × i64`
+/// cross-products instead — each fits an `i128`.
+pub(crate) fn product_at_least_one(a: &Seconds, b: &Seconds) -> bool {
+    let lhs = (*a.numer() as i128) * (*b.numer() as i128);
+    let rhs = (*a.denom() as i128) * (*b.denom() as i128);
+    lhs >= rhs
+}
+
 fn ratio_op(a: &Seconds, b: &Seconds, op: fn(i128, i128) -> Option<i128>) -> Option<Seconds> {
     let an = (*a.numer() as i128).checked_mul(*b.denom() as i128)?;
     let bn = (*b.numer() as i128).checked_mul(*a.denom() as i128)?;
@@ -392,6 +405,29 @@ mod tests {
             checked_add(&b, &Seconds::new(1_929, 1_000_000_000)),
             Some(a)
         );
+    }
+
+    #[test]
+    fn extreme_rates_compare_without_overflowing() {
+        // Huge fps: `a * b` would overflow the product's numerator.
+        assert!(product_at_least_one(
+            &Seconds::from_integer(1),
+            &Seconds::new(i64::MAX, 1)
+        ));
+        // Tiny fps: the product's denominator would overflow.
+        assert!(!product_at_least_one(
+            &Seconds::from_integer(1),
+            &Seconds::new(1, i64::MAX)
+        ));
+        // An exact half-frame is still refused; one whole frame is accepted.
+        assert!(!product_at_least_one(
+            &Seconds::new(1, 2),
+            &Seconds::from_integer(1)
+        ));
+        assert!(product_at_least_one(
+            &Seconds::from_integer(1),
+            &Seconds::from_integer(1)
+        ));
     }
 
     #[test]
