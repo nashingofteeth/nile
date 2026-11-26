@@ -167,6 +167,8 @@ pub type ReelMap<'a> = dyn Fn(&EdlEvent) -> Option<u32> + 'a;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum BuildError {
+    #[error("the EDL has no events")]
+    Empty,
     #[error(
         "event {event}: unknown channel {channel:?} (expected V, A, A2, AA, B, or a slash combination)"
     )]
@@ -257,6 +259,9 @@ pub fn build(
     // An event's channel must name picture or sound. Refuse an unknown code
     // instead of dropping the event: a missing event shifts every later cut
     // off record time, which looks like a conform bug rather than bad input.
+    if doc.events.is_empty() {
+        return Err(BuildError::Empty);
+    }
     for ev in &doc.events {
         if !valid_channel(&ev.channel) {
             return Err(BuildError::UnknownChannel {
@@ -722,6 +727,20 @@ FCM: NON-DROP FRAME
         assert!(tl.tracks[0].segments.is_empty());
         assert_eq!(tl.tracks[1].kind, TrackKind::Audio);
         assert_eq!(tl.tracks[1].segments.len(), 1);
+    }
+
+    // An empty document has nothing to build; an empty project is not an
+    // import. (A document with only audio events is valid, see above.)
+    #[test]
+    fn an_empty_edl_is_refused() {
+        let doc = EdlDoc {
+            title: None,
+            drop_frame: false,
+            events: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let err = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap_err();
+        assert_eq!(err, BuildError::Empty);
     }
 
     // An unknown channel is refused by name; dropping it would delete an

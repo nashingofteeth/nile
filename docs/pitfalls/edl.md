@@ -24,8 +24,9 @@ Read before touching `crates/nle-core/src/edl.rs` or the `import-edl` path.
   rate, so pass `--fps` (or keep a video file in `--media` to seed it).
 - **Every event's channel must name picture or sound.** An unknown part
   (`X`, `N`, `V/X`) is `BuildError::UnknownChannel`; dropping it would silently
-  shift every later event off record time. Zero-length and non-cut events keep
-  their existing warn-and-continue path.
+  shift every later event off record time. An EDL with no events at all is
+  `BuildError::Empty`, not an empty project. Zero-length and non-cut events
+  keep their existing warn-and-continue path.
 - **`--append` adds after the current sequence end.** Each imported track keeps
   its kind (first video → `--track N` or the first video track; audio → the
   next audio track, created if needed) and is padded with a gap to the common

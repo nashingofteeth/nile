@@ -374,7 +374,10 @@ pub(crate) fn detect_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     let video_only = f.take_bool("video-only");
     let list = f.take_bool("list");
     let append = f.take_bool("append");
-    let track = flag_usize(f, "track").ok().flatten();
+    let track = match flag_usize(f, "track") {
+        Ok(track) => track,
+        Err(error) => return Some(error.to_string()),
+    };
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
@@ -434,7 +437,10 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
     let map = f.take_all("map");
     let group = f.take_all("group");
     let append = f.take_bool("append");
-    let track = flag_usize(f, "track").ok().flatten();
+    let track = match flag_usize(f, "track") {
+        Ok(track) => track,
+        Err(error) => return Some(error.to_string()),
+    };
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
@@ -498,7 +504,10 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
     let remap = f.take_all("remap");
     let group = f.take_all("group");
     let append = f.take_bool("append");
-    let track = flag_usize(f, "track").ok().flatten();
+    let track = match flag_usize(f, "track") {
+        Ok(track) => track,
+        Err(error) => return Some(error.to_string()),
+    };
     let force = f.take_bool("force");
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
