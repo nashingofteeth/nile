@@ -706,6 +706,7 @@ const MEDIA: &[&str] = &[
     "blue.mp4",
     "wide169.mp4",
     "video_only.mp4",
+    "silent.mp4",
     "audio_only.m4a",
     "tiny.mp4",
     "empty.mp4",
@@ -726,6 +727,7 @@ fn media_dir() -> &'static Path {
         gen_av(d, "blue.mp4", "blue", "320x240", "60000/1001", "5", "880");
         gen_av(d, "wide169.mp4", "blue", "640x360", "30", "5", "880");
         gen_v(d, "video_only.mp4", "orange", "2");
+        gen_av_silent(d, "silent.mp4", "purple", "2");
         gen_a(d, "audio_only.m4a", "2");
         gen_v(d, "tiny.mp4", "gray", "0.1");
         fs::write(d.join("empty.mp4"), b"").expect("empty.mp4");
@@ -822,6 +824,42 @@ fn gen_a(dir: &Path, name: &str, dur: &str) {
         &tone,
         "-c:a",
         "aac",
+        path.to_str().expect("a UTF-8 path"),
+    ]);
+}
+
+/// Picture plus a *present but digital-silent* audio stream: the structural
+/// "has audio" probe cannot tell it from a tone, so audio post reaches
+/// `loudnorm` (and its NaN problem) unless the chain guards itself.
+fn gen_av_silent(dir: &Path, name: &str, color: &str, dur: &str) {
+    let path = dir.join(name);
+    if path.exists() {
+        return;
+    }
+    let picture = format!("color=c={color}:s=320x240:d={dur}:r=30");
+    let silence = format!("anullsrc=r=48000:cl=stereo:d={dur}");
+    ffmpeg(&[
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &picture,
+        "-f",
+        "lavfi",
+        "-i",
+        &silence,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
         path.to_str().expect("a UTF-8 path"),
     ]);
 }

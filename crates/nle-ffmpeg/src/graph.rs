@@ -36,6 +36,20 @@ pub const AUDIO_LAYOUT: &str = "stereo";
 /// true peak, LRA 11 (streaming-normal, not the -23 LUFS broadcast spec).
 pub const LOUDNORM_FILTER: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
+/// `loudnorm` measures a digital-silent programme as -inf and emits NaN (or
+/// ±inf) samples, which the AAC encoder refuses. Scrub non-finite samples to
+/// zero after the resample, before a fade can multiply them (NaN × 0 is still
+/// NaN). `aeval` is per-sample; `aformat` restores the planar float format the
+/// encoder wants. The mix is always stereo (`AUDIO_LAYOUT`), so there are two
+/// channel expressions.
+fn silence_guard() -> String {
+    format!(
+        "aeval=exprs='if(isnan(val(0))+isinf(val(0)),0,val(0))\
+|if(isnan(val(1))+isinf(val(1)),0,val(1))',\
+aformat=sample_fmts=fltp:sample_rates={AUDIO_RATE}:channel_layouts={AUDIO_LAYOUT}"
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum CompileError {
     #[error("timeline is empty — add clips first")]
@@ -219,8 +233,9 @@ fn has_audio_material(project: &Project) -> bool {
 
 /// The sequence's audio-post filters, appended to the final mixed chain.
 /// Empty when the sequence opts out — the classic graph stays byte-identical.
-/// Fades are clamped to the programme length, so `st` is never negative even
-/// when a setting outlives the clip it was set for.
+/// Normalize is followed by the silence guard (see `silence_guard`); fades are
+/// clamped to the programme length, so `st` is never negative even when a
+/// setting outlives the clip it was set for.
 fn audio_post_chain(audio: &AudioSettings, duration: Seconds, audible: bool) -> String {
     if !audible {
         return String::new();
@@ -233,6 +248,11 @@ fn audio_post_chain(audio: &AudioSettings, duration: Seconds, audible: bool) -> 
         // graph's 48 kHz so the encoder and the monitor see one rate. A
         // fades-only chain is already 48 kHz and needs no resample.
         chain.push_str(",aresample=48000");
+        // A silent-but-present stream reaches loudnorm (the structural gate
+        // only sees the stream), so scrub its non-finite output to silence
+        // before the fades; otherwise the AAC encoder rejects the export.
+        chain.push(',');
+        chain.push_str(&silence_guard());
     }
     let zero = Seconds::from_integer(0);
     let total = secs_f64(&duration).max(0.0);
@@ -1725,6 +1745,14 @@ mod tests {
             g.contains(&format!("{LOUDNORM_FILTER},aresample=48000")),
             "loudnorm's 192 kHz output is pinned back to the graph rate:\n{g}"
         );
+        assert!(
+            g.contains(",aresample=48000,aeval=exprs='if(isnan(val(0))+isinf(val(0)),0,val(0))"),
+            "digital silence becomes NaN; the guard must follow the resample:\n{g}"
+        );
+        assert!(
+            g.contains("aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"),
+            "the guard restores the format the AAC encoder wants:\n{g}"
+        );
         assert!(g.contains("afade=t=in:st=0:d=0.5"), "{g}");
         // Fade-out starts 0.25 s before the 15 s programme end.
         assert!(g.contains("afade=t=out:st=14.75:d=0.25[aout]"), "{g}");
@@ -1765,6 +1793,7 @@ mod tests {
         let filter = audio_post_filter(&p).expect("the sequence opted in");
         assert!(filter.starts_with(LOUDNORM_FILTER), "{filter}");
         assert!(filter.contains(",aresample=48000"), "{filter}");
+        assert!(filter.contains("aeval=exprs="), "{filter}");
         assert!(filter.ends_with("afade=t=out:st=14.75:d=0.25"), "{filter}");
         assert!(
             !filter.starts_with(','),
@@ -1787,6 +1816,10 @@ mod tests {
         assert_eq!(
             audio_post_chain(&all, Seconds::from_integer(5), true),
             ",afade=t=in:st=0:d=5,afade=t=out:st=0:d=5"
+        );
+        assert!(
+            !audio_post_chain(&all, Seconds::from_integer(5), true).contains("aeval"),
+            "fades alone are safe on silence; no guard is needed"
         );
         // Nothing to fade on a zero-length or silent programme.
         assert_eq!(audio_post_chain(&all, zero, true), "");
