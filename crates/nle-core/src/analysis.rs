@@ -303,6 +303,12 @@ fn is_hash(prefix: &str, hash: &str) -> bool {
 
 // ---------------------------------------------------------------- products
 
+/// Version of the sampler's packed-frame/audio contract. It lives beside the
+/// product schema because a product records it: a bump makes old products
+/// incompatible, not stale-by-mtime. `nle-ffmpeg` re-exports this constant so
+/// the sampler and the consumers cannot drift.
+pub const SAMPLE_VERSION: u32 = 2;
+
 /// Version of the on-disk analyzer-product shape. A product from another
 /// schema is refused with a clear error; there is no migration code.
 pub const PRODUCT_VERSION: u32 = 1;
@@ -341,13 +347,118 @@ pub struct ProductSample {
     pub source: SourceSignature,
 }
 
+/// The sampled frame grid a per-frame product is indexed on.
+///
+/// Sample frame `i` covers source `[start + i/fps, start + (i+1)/fps)`. The
+/// geometry is the sampled picture's, not the source's: normalized box
+/// coordinates are invariant to the sampler's `scale`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SampleGrid {
+    #[serde(with = "rational_ser")]
+    pub start: Seconds,
+    #[serde(with = "rational_ser")]
+    pub fps: Seconds,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl SampleGrid {
+    /// The sample frame covering source time `source`, or `None` before the
+    /// grid. Exact rational floor: no float can round the lookup onto a
+    /// neighbouring frame.
+    pub fn index_at(&self, source: Seconds) -> Option<u64> {
+        if self.fps <= Seconds::from_integer(0) {
+            return None;
+        }
+        let offset = crate::time::checked_sub(&source, &self.start)?;
+        if offset < Seconds::from_integer(0) {
+            return None;
+        }
+        let numerator = i128::from(*offset.numer()) * i128::from(*self.fps.numer());
+        let denominator = i128::from(*offset.denom()) * i128::from(*self.fps.denom());
+        if denominator <= 0 {
+            return None;
+        }
+        u64::try_from(numerator / denominator).ok()
+    }
+}
+
+/// One detector class/track. `label` is the class the detector was asked for
+/// (`face`, `person`); `id` is its optional stable instance id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectKey {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+/// A box in millionths of the sampled picture (`1_000_000` = one side).
+/// Integers keep the canonical bytes float-free, the same reason `luma_milli`
+/// is an integer: a float's last bit must not decide an `a1-` address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoxRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// One detected subject in one sample frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectedBox {
+    pub subject: SubjectKey,
+    pub rect: BoxRect,
+    pub confidence_milli: u32,
+}
+
+/// The boxes detected in sample frame `index` (one entry per packed frame,
+/// in presentation order).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameBoxes {
+    pub index: u64,
+    pub boxes: Vec<DetectedBox>,
+}
+
+/// The one canonical box order: label, id, confidence descending, then
+/// geometry. The analyzer sorts before writing; [`AnalysisProduct::validate`]
+/// refuses bytes that are not in this order, so equal detections hash alike.
+pub fn sort_detected_boxes(boxes: &mut [DetectedBox]) {
+    boxes.sort_by(|a, b| {
+        a.subject
+            .label
+            .cmp(&b.subject.label)
+            .then_with(|| a.subject.id.cmp(&b.subject.id))
+            .then_with(|| b.confidence_milli.cmp(&a.confidence_milli))
+            .then_with(|| {
+                (a.rect.x, a.rect.y, a.rect.w, a.rect.h)
+                    .cmp(&(b.rect.x, b.rect.y, b.rect.w, b.rect.h))
+            })
+    });
+}
+
+/// The smallest accepted box side, in millionths. A zero-width/height box is
+/// not a detection; the host refuses it rather than dividing by zero later.
+pub const BOX_MIN_SIDE: u32 = 1;
+
 /// What an analyzer produced. Tagged so a second analyzer cannot be mistaken
 /// for the first; `luma_milli` is per-frame mean Rec. 709 luma × 1000, in
 /// presentation order (integer units keep the canonical bytes float-free).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProductResult {
-    MeanLuma { luma_milli: Vec<u32> },
+    MeanLuma {
+        luma_milli: Vec<u32>,
+    },
+    /// Per-frame subject boxes on one sampled grid. `labels` is the sorted,
+    /// deduplicated set the detector was asked for and `floor_milli` is the
+    /// confidence floor it retained; a consumer asking for a lower threshold
+    /// knows the answer is incomplete.
+    SubjectBoxes {
+        grid: SampleGrid,
+        labels: Vec<String>,
+        floor_milli: u32,
+        frames: Vec<FrameBoxes>,
+    },
 }
 
 /// A content-addressed analyzer product.
@@ -424,6 +535,11 @@ impl AnalysisProduct {
         if self.analyzer.name.is_empty() {
             return Err(ProductError::Invalid("empty analyzer name".into()));
         }
+        if self.analyzer.version == 0 {
+            return Err(ProductError::Invalid(
+                "analyzer version must be positive".into(),
+            ));
+        }
         if self.sample.version == 0 {
             return Err(ProductError::Invalid(
                 "sample version must be positive".into(),
@@ -452,6 +568,14 @@ impl AnalysisProduct {
                     )));
                 }
             }
+            ProductResult::SubjectBoxes {
+                grid,
+                labels,
+                floor_milli,
+                frames,
+            } => {
+                validate_subject_boxes(grid, labels, *floor_milli, frames)?;
+            }
         }
         Ok(())
     }
@@ -468,6 +592,119 @@ impl AnalysisProduct {
     pub fn hash(&self) -> String {
         format!("a1-{:016x}", fnv1a64(&self.canonical_bytes()))
     }
+}
+
+fn validate_subject_boxes(
+    grid: &SampleGrid,
+    labels: &[String],
+    floor_milli: u32,
+    frames: &[FrameBoxes],
+) -> Result<(), ProductError> {
+    if grid.start < Seconds::from_integer(0) {
+        return Err(ProductError::Invalid(
+            "the sample grid starts before zero".into(),
+        ));
+    }
+    if grid.fps <= Seconds::from_integer(0) {
+        return Err(ProductError::Invalid(
+            "the sample grid needs a positive fps".into(),
+        ));
+    }
+    if grid.width == 0 || grid.height == 0 {
+        return Err(ProductError::Invalid(
+            "the sample grid has a zero dimension".into(),
+        ));
+    }
+    if labels.is_empty() {
+        return Err(ProductError::Invalid("the product names no labels".into()));
+    }
+    if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ProductError::Invalid(
+            "labels must be sorted and unique".into(),
+        ));
+    }
+    if floor_milli > 1000 {
+        return Err(ProductError::Invalid(format!(
+            "the confidence floor {floor_milli} is outside 0..=1000"
+        )));
+    }
+    if frames.is_empty() {
+        return Err(ProductError::Invalid("the product has no frames".into()));
+    }
+    for (position, frame) in frames.iter().enumerate() {
+        if frame.index != position as u64 {
+            return Err(ProductError::Invalid(format!(
+                "frame {position} records index {}",
+                frame.index
+            )));
+        }
+        if !boxes_in_order(&frame.boxes) {
+            return Err(ProductError::Invalid(format!(
+                "frame {position} boxes are not in canonical order"
+            )));
+        }
+        for detected in &frame.boxes {
+            if detected.subject.label.is_empty() {
+                return Err(ProductError::Invalid(format!(
+                    "frame {position} has an empty subject label"
+                )));
+            }
+            if !labels.contains(&detected.subject.label) {
+                return Err(ProductError::Invalid(format!(
+                    "frame {position} uses label {:?}, not one it declared",
+                    detected.subject.label
+                )));
+            }
+            if detected.subject.id.as_deref() == Some("") {
+                return Err(ProductError::Invalid(format!(
+                    "frame {position} has an empty subject id"
+                )));
+            }
+            let rect = detected.rect;
+            if rect.w < BOX_MIN_SIDE || rect.h < BOX_MIN_SIDE {
+                return Err(ProductError::Invalid(format!(
+                    "frame {position} has a zero-side box"
+                )));
+            }
+            if u64::from(rect.x) + u64::from(rect.w) > 1_000_000
+                || u64::from(rect.y) + u64::from(rect.h) > 1_000_000
+            {
+                return Err(ProductError::Invalid(format!(
+                    "frame {position} box leaves the sampled picture"
+                )));
+            }
+            if detected.confidence_milli < floor_milli || detected.confidence_milli > 1000 {
+                return Err(ProductError::Invalid(format!(
+                    "frame {position} confidence {} is outside {floor_milli}..=1000",
+                    detected.confidence_milli
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn boxes_in_order(boxes: &[DetectedBox]) -> bool {
+    boxes.windows(2).all(|pair| {
+        let (a, b) = (&pair[0], &pair[1]);
+        (
+            a.subject.label.as_str(),
+            a.subject.id.as_deref(),
+            std::cmp::Reverse(a.confidence_milli),
+            a.rect.x,
+            a.rect.y,
+            a.rect.w,
+            a.rect.h,
+        ) <= (
+            b.subject.label.as_str(),
+            b.subject.id.as_deref(),
+            std::cmp::Reverse(b.confidence_milli),
+            b.rect.x,
+            b.rect.y,
+            b.rect.w,
+            b.rect.h,
+        )
+    })
 }
 
 fn is_hex16(value: &str) -> bool {
@@ -645,6 +882,49 @@ impl ProductStore {
             ));
         }
         Ok(product)
+    }
+}
+
+/// The project's analysis stores, bundled so a check cannot accidentally
+/// consult a transcript store from one project and a product store from
+/// another. [`AnalysisStores::empty`] is the report-only case.
+#[derive(Debug, Clone)]
+pub struct AnalysisStores {
+    pub transcripts: TranscriptStore,
+    pub products: ProductStore,
+}
+
+impl AnalysisStores {
+    /// No stores: every transcript/product lookup is a clean miss.
+    pub fn empty() -> Self {
+        Self {
+            transcripts: TranscriptStore::empty(),
+            products: ProductStore::empty(),
+        }
+    }
+
+    /// The stores beside `project_path`.
+    pub fn at(project_path: &Path) -> Self {
+        Self {
+            transcripts: TranscriptStore::at(project_path),
+            products: ProductStore::at(project_path),
+        }
+    }
+
+    /// A bundle with a transcript store and no products (the older callers).
+    pub fn with_transcripts(transcripts: TranscriptStore) -> Self {
+        Self {
+            transcripts,
+            products: ProductStore::empty(),
+        }
+    }
+
+    /// A bundle with a product store and no transcripts.
+    pub fn with_products(products: ProductStore) -> Self {
+        Self {
+            transcripts: TranscriptStore::empty(),
+            products,
+        }
     }
 }
 
@@ -1102,6 +1382,232 @@ mod tests {
         );
     }
 
+    fn subject_product() -> AnalysisProduct {
+        AnalysisProduct {
+            version: PRODUCT_VERSION,
+            analyzer: AnalyzerInfo {
+                name: "test-detector".to_string(),
+                version: 1,
+            },
+            sample: ProductSample {
+                version: SAMPLE_VERSION,
+                key: "0123456789abcdef".to_string(),
+                params: "fedcba9876543210".to_string(),
+                source: SourceSignature {
+                    source: "/media/a.mp4".to_string(),
+                    source_arg: "/media/a.mp4".to_string(),
+                    source_size: 1,
+                    source_mtime_secs: 2,
+                    source_mtime_nanos: 3,
+                },
+            },
+            result: ProductResult::SubjectBoxes {
+                grid: SampleGrid {
+                    start: s(0),
+                    fps: s(30),
+                    width: 64,
+                    height: 36,
+                },
+                labels: vec!["face".to_string()],
+                floor_milli: 0,
+                frames: vec![FrameBoxes {
+                    index: 0,
+                    boxes: vec![DetectedBox {
+                        subject: SubjectKey {
+                            label: "face".to_string(),
+                            id: Some("spk-2".to_string()),
+                        },
+                        rect: BoxRect {
+                            x: 312_500,
+                            y: 333_333,
+                            w: 125_000,
+                            h: 166_667,
+                        },
+                        confidence_milli: 940,
+                    }],
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn subject_boxes_validate_their_grid_order_and_bounds() {
+        let product = subject_product();
+        product.validate().expect("the fixture is valid");
+        assert!(product.is_compatible(SAMPLE_VERSION));
+        assert!(!product.is_compatible(SAMPLE_VERSION - 1));
+
+        let invalid = |mutate: &dyn Fn(&mut AnalysisProduct), what: &str| {
+            let mut product = subject_product();
+            mutate(&mut product);
+            assert!(product.validate().is_err(), "{what}");
+        };
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { grid, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                grid.fps = s(0);
+            },
+            "zero fps",
+        );
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { labels, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                labels.clear();
+            },
+            "no labels",
+        );
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { labels, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                labels.insert(0, "zebra".to_string());
+            },
+            "labels not sorted",
+        );
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { frames, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                frames[0].index = 2;
+            },
+            "frame index mismatch",
+        );
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { frames, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                frames[0].boxes[0].rect.w = 0;
+            },
+            "zero-side box",
+        );
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { frames, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                frames[0].boxes[0].rect.x = 900_000;
+                frames[0].boxes[0].rect.w = 200_000;
+            },
+            "box leaves the picture",
+        );
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { frames, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                frames[0].boxes[0].confidence_milli = 1001;
+            },
+            "confidence above 1000",
+        );
+        invalid(
+            &|product| {
+                let ProductResult::SubjectBoxes { frames, .. } = &mut product.result else {
+                    panic!("subject fixture")
+                };
+                frames[0].boxes.push(DetectedBox {
+                    subject: SubjectKey {
+                        label: "face".to_string(),
+                        id: None,
+                    },
+                    rect: BoxRect {
+                        x: 0,
+                        y: 0,
+                        w: 1,
+                        h: 1,
+                    },
+                    confidence_milli: 1000,
+                });
+            },
+            "boxes not in canonical order",
+        );
+    }
+
+    #[test]
+    fn the_sample_grid_index_is_an_exact_rational_floor() {
+        let grid = SampleGrid {
+            start: s(0),
+            fps: Seconds::new(30_000, 1001),
+            width: 64,
+            height: 36,
+        };
+        assert_eq!(grid.index_at(s(0)), Some(0));
+        let frame_one = Seconds::new(1001, 30_000);
+        assert_eq!(grid.index_at(frame_one), Some(1));
+        // Just after the boundary is the next frame; just before it is not.
+        let before = frame_one - Seconds::new(1, 1_000_000);
+        assert_eq!(grid.index_at(before), Some(0));
+        let after = frame_one + Seconds::new(1, 1_000_000);
+        assert_eq!(grid.index_at(after), Some(1));
+        assert_eq!(grid.index_at(-Seconds::from_integer(1)), None);
+        let late = SampleGrid {
+            start: s(10),
+            ..grid
+        };
+        assert_eq!(late.index_at(s(9)), None);
+        assert_eq!(late.index_at(s(10)), Some(0));
+    }
+
+    #[test]
+    fn sorting_detected_boxes_matches_the_validation_order() {
+        let mut boxes = vec![
+            DetectedBox {
+                subject: SubjectKey {
+                    label: "person".to_string(),
+                    id: None,
+                },
+                rect: BoxRect {
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 10,
+                },
+                confidence_milli: 900,
+            },
+            DetectedBox {
+                subject: SubjectKey {
+                    label: "face".to_string(),
+                    id: Some("b".to_string()),
+                },
+                rect: BoxRect {
+                    x: 20,
+                    y: 20,
+                    w: 10,
+                    h: 10,
+                },
+                confidence_milli: 800,
+            },
+            DetectedBox {
+                subject: SubjectKey {
+                    label: "face".to_string(),
+                    id: Some("a".to_string()),
+                },
+                rect: BoxRect {
+                    x: 30,
+                    y: 30,
+                    w: 10,
+                    h: 10,
+                },
+                confidence_milli: 1000,
+            },
+        ];
+        sort_detected_boxes(&mut boxes);
+        let keys: Vec<_> = boxes
+            .iter()
+            .map(|b| (b.subject.label.as_str(), b.subject.id.as_deref()))
+            .collect();
+        assert_eq!(
+            keys,
+            [("face", Some("a")), ("face", Some("b")), ("person", None)]
+        );
+    }
+
     #[test]
     fn product_validation_refuses_impossible_results() {
         let dir = tempfile::tempdir().unwrap();
@@ -1118,12 +1624,16 @@ mod tests {
         assert!(bad.validate().is_err());
 
         let mut bad = product_in(dir.path());
-        let ProductResult::MeanLuma { luma_milli } = &mut bad.result;
+        let ProductResult::MeanLuma { luma_milli } = &mut bad.result else {
+            panic!("the fixture is mean luma")
+        };
         luma_milli.clear();
         assert!(bad.validate().is_err());
 
         let mut bad = product_in(dir.path());
-        let ProductResult::MeanLuma { luma_milli } = &mut bad.result;
+        let ProductResult::MeanLuma { luma_milli } = &mut bad.result else {
+            panic!("the fixture is mean luma")
+        };
         luma_milli[0] = 255_001;
         assert!(bad.validate().is_err());
     }

@@ -47,9 +47,9 @@ use thiserror::Error;
 /// frames). Old entries are then unreachable instead of being served as if
 /// they were the new thing.
 ///
-/// v2 records per-frame source times and exact source indices, so a v1 entry
-/// cannot answer "which source frame is this?".
-pub const SAMPLE_VERSION: u32 = 2;
+/// The constant lives in `nle-core::analysis` because products record it; this
+/// re-export keeps the sampler's public spelling.
+pub use nle_core::analysis::SAMPLE_VERSION;
 
 /// The largest packed payload one request may buffer (256 MiB).
 pub const MAX_SAMPLE_BYTES: u64 = 256 * 1024 * 1024;

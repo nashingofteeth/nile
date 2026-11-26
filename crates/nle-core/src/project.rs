@@ -36,8 +36,8 @@ use crate::timemap::{TimeMap, TimeMapError};
 /// crop keyframes; v17 adds the `expectation` annotation payload (a typed
 /// check a render must satisfy) and the CLI that writes and runs it;
 /// v18 adds per-sequence audio-post settings (loudness normalization and
-/// programme fades).
-pub const PROJECT_VERSION: u32 = 18;
+/// programme fades); v19 adds the subject-box analysis check payload.
+pub const PROJECT_VERSION: u32 = 19;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -325,6 +325,7 @@ fn expectation_names_asset(expect: &Expectation, id: u32) -> bool {
         Expectation::Cam { asset, .. }
         | Expectation::Absent { asset, .. }
         | Expectation::NoSliver { asset, .. } => *asset == Some(id),
+        Expectation::SubjectInFrame { asset, .. } => *asset == id,
         _ => false,
     }
 }
@@ -1059,6 +1060,7 @@ impl Project {
                         check_asset(*asset)?;
                     }
                 }
+                Expectation::SubjectInFrame { asset, .. } => check_asset(*asset)?,
                 Expectation::CropStable { .. }
                 | Expectation::WorkInFrame { .. }
                 | Expectation::WordsComplete { .. } => {}
@@ -1640,7 +1642,7 @@ mod tests {
 
     #[test]
     fn a_new_project_has_one_root_sequence() {
-        assert_eq!(PROJECT_VERSION, 18);
+        assert_eq!(PROJECT_VERSION, 19);
         let p = Project::new();
         assert_eq!(p.revision, 0);
         assert_eq!(p.sequences.len(), 1);
@@ -2284,6 +2286,18 @@ mod tests {
                 },
                 "asset #99 not found",
             ),
+            (
+                Expectation::SubjectInFrame {
+                    product: "a1-0000000000000000".into(),
+                    asset: 99,
+                    label: "face".into(),
+                    subject_id: None,
+                    margin_pct: 5.0,
+                    min_confidence: 1.0,
+                    tolerance_frames: 0,
+                },
+                "asset #99 not found",
+            ),
         ] {
             let err = p
                 .add_annotation(1, expectation(expect), anchor(), provenance())
@@ -2373,6 +2387,32 @@ mod tests {
                 if id == spare && ids == &vec![cam_asset]
         ));
 
+        // A subject check names its asset too: the same guard covers it.
+        let subject = p
+            .add_annotation(
+                1,
+                AnnotationKind::Expectation {
+                    expect: Expectation::SubjectInFrame {
+                        product: "a1-0000000000000000".into(),
+                        asset: spare,
+                        label: "face".into(),
+                        subject_id: None,
+                        margin_pct: 5.0,
+                        min_confidence: 1.0,
+                        tolerance_frames: 0,
+                    },
+                },
+                anchor(),
+                provenance(),
+            )
+            .unwrap();
+        assert_eq!(p.asset_annotation_usage(spare), vec![cam_asset, subject]);
+        assert!(matches!(
+            p.remove_asset(spare),
+            Err(ProjectError::AssetInAnnotation(id, ref ids))
+                if id == spare && ids.contains(&subject)
+        ));
+
         let group = p
             .add_group(
                 "CAM 3",
@@ -2406,15 +2446,21 @@ mod tests {
         ));
 
         // Removing the check releases the group, then the asset (still named
-        // by the first expectation) stays refused until that one goes too.
+        // by the cam and subject expectations) stays refused until they go too.
         p.remove_annotation(cam_group).unwrap();
         p.remove_group(group).unwrap();
         assert!(matches!(
             p.remove_asset(spare),
             Err(ProjectError::AssetInAnnotation(id, ref ids))
-                if id == spare && ids == &vec![cam_asset]
+                if id == spare && ids.contains(&cam_asset) && ids.contains(&subject)
         ));
         p.remove_annotation(cam_asset).unwrap();
+        assert!(matches!(
+            p.remove_asset(spare),
+            Err(ProjectError::AssetInAnnotation(id, ref ids))
+                if id == spare && ids == &vec![subject]
+        ));
+        p.remove_annotation(subject).unwrap();
         assert!(p.remove_asset(spare).is_ok());
     }
 
