@@ -13,10 +13,10 @@ project=$orig
 # Match `nile-core/src/state.rs`: an existing project resolves symlinks before
 # its state directory is chosen.
 if [ -e "$project" ] && command -v realpath >/dev/null; then
-  project=$(realpath -- "$project")
+  project=$(realpath "$project")
 fi
-dir=$(dirname -- "$project")
-stem=$(basename -- "$project")
+dir=$(dirname "$project")
+stem=$(basename "$project")
 stem=${stem%.json}
 lock="$dir/.nile/$stem/serve.lock"
 [ -r "$lock" ] || exit 0
