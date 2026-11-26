@@ -484,10 +484,13 @@ terminal job; queued or running jobs must be cancelled first.
 `nile job prune --keep N` deletes **terminal** jobs beyond the newest N, and
 `--older-than DAYS` additionally requires a job's finish (or creation, if it
 never started) to be older than that window; the newest N are always kept.
-Queued and running jobs are never pruned. A server start also removes hidden
-render temps (`.name.jobN.ext`) left by a crash, but only when the temp is
-exactly the one a terminal record names; a queued or running temp is live and
-is left alone. Job ids are never recycled, even after a prune.
+Queued and running jobs are never pruned. A directory that cannot be deleted
+does not stop the pass: the removed ids are printed and the failures are named,
+then the command exits nonzero. A server start also removes hidden render temps
+(`.name.jobN.ext`) left by a crash, but only when the temp is exactly the one a
+terminal record names; a queued or running temp is live and is left alone. Job
+ids are never recycled, even after a prune: `jobs/.next-id` is the high-water
+mark and is advanced on removal too.
 
 ### One-shot tools and logging
 
@@ -556,7 +559,7 @@ video/
         ├── analysis/
         │   ├── transcripts/  # content-addressed transcript words (t1-…)
         │   └── products/     # analyzer outputs (a1-…)
-        ├── jobs/          # durable render jobs (id/job.json + snapshot)
+        ├── jobs/          # durable render jobs (id/job.json + snapshot, .next-id)
         └── cache/
             ├── analysis/      # packed frame/audio samples (disposable)
             ├── proxy/         # rendered video proxies

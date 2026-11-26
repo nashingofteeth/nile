@@ -194,20 +194,25 @@ returns the removed record; a queued or running job is invalid params (cancel
 it first), as is an unknown id.
 
 `job.prune {keep, older_than_days?}` is retention across jobs and returns
-`{removed: [id…]}` (oldest first). Only terminal jobs are candidates: the
-newest `keep` are always retained, and `older_than_days` further requires the
-job's finish time (its creation time if it never started) to be older than
-`now - days`; ties break on id, which is submission order. Queued and running
-jobs are never pruned, so the server and not the client owns the plan.
+`{removed: [id…], failed?: [{id, error}…]}` (removed oldest first). Only
+terminal jobs are candidates: the newest `keep` are always retained, and
+`older_than_days` further requires the job's finish time (its creation time
+if it never started) to be older than `now - days`; ties break on id, which is
+submission order. Queued and running jobs are never pruned, so the server and
+not the client owns the plan. A directory that cannot be deleted does not
+abort the pass: it is reported in `failed` while the rest are removed.
 Additive, so `PROTOCOL_VERSION` stays at 5.
 
 Job ids are never recycled: `.nile/<stem>/jobs/.next-id` keeps the high-water
 mark, because a pruned or removed highest id would otherwise let the next
-submit reuse it. A server start also sweeps crash leftovers: a hidden
-`.name.jobN.ext` temp is deleted only when it is exactly the
-`nle_core::jobs::partial_path` of a **terminal** record (the executor renames
-or removes it before the terminal write); a queued/running temp, another
-record's output, or an unexplained file is left for a human. The executor and
+submit reuse it. Removal advances the marker before the directory disappears,
+which also covers a project written before the file existed; an unreadable or
+non-positive marker is an error, not a directory-scan rebuild. A server start
+also sweeps crash leftovers: a hidden `.name.jobN.ext` temp is deleted only
+when it is exactly the `nle_core::jobs::partial_path` of a **terminal** record
+(the executor renames or removes it before the terminal write); a
+queued/running temp, another record's output, or an unexplained file is left
+for a human. The executor and
 the sweep share `partial_path`, so their naming cannot drift.
 
 `JobRecord` ignores unknown fields so a record from a newer build still parses
