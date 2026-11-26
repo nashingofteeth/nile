@@ -470,6 +470,10 @@ impl Handler for ServeHandler {
             Call::JobGet { id } => self.job_get(*id),
             Call::JobCancel { id } => self.job_cancel(*id),
             Call::JobRemove { id } => self.job_remove(*id),
+            Call::JobPrune {
+                keep,
+                older_than_days,
+            } => self.job_prune(*keep, *older_than_days),
         }
     }
 
@@ -609,6 +613,13 @@ impl ServeHandler {
     /// record is returned so a client can report what went away.
     fn job_remove(&self, id: u64) -> Result<Reply, RpcError> {
         Ok(Reply::Job(self.jobs.remove(id).map_err(queue_rpc)?))
+    }
+
+    /// Retention across jobs: the queue owns the plan (terminal only), so a
+    /// stale client cannot name a running job here.
+    fn job_prune(&self, keep: u64, older_than_days: Option<u64>) -> Result<Reply, RpcError> {
+        let removed = self.jobs.prune(keep, older_than_days).map_err(queue_rpc)?;
+        Ok(Reply::Pruned(nle_protocol::JobPruneReply { removed }))
     }
 
     fn check_revision(&self, base_revision: u64) -> Result<(), RpcError> {
@@ -1218,6 +1229,118 @@ mod tests {
         let store = nle_core::JobStore::at(handler.session.path());
         assert!(!store.job_dir(job.id).exists());
         assert!(handler.jobs.get(job.id).is_err(), "the record is gone");
+    }
+
+    /// A runner that blocks until the test releases it, so one job is live
+    /// while others queue behind it.
+    fn gated_runner() -> (
+        std::sync::Arc<crate::jobs::JobRunner>,
+        std::sync::mpsc::Receiver<u64>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        let run: std::sync::Arc<crate::jobs::JobRunner> =
+            std::sync::Arc::new(move |_store, job, _cancel, _progress| {
+                let _ = started_tx.send(job.id);
+                let rx = release_rx.lock().unwrap();
+                let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+                Ok(None)
+            });
+        (run, started_rx, release_tx)
+    }
+
+    #[test]
+    fn job_prune_removes_terminal_jobs_and_spares_live_ones() {
+        let (run, started, release) = gated_runner();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(Seconds::from_integer(30));
+        project.save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start_with(&path, run).expect("queue");
+        let mut handler = ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: None,
+            jobs,
+        };
+        let store = nle_core::JobStore::at(handler.session.path());
+
+        let submit = |handler: &mut ServeHandler, name: &str| {
+            let Reply::Job(job) = handler
+                .job_submit(
+                    handler.session.revision(),
+                    &dir.path().join(name),
+                    handler.session.project().active_id(),
+                    nle_core::jobs::JobExport::default(),
+                )
+                .expect("submit")
+            else {
+                panic!("expected a job");
+            };
+            job
+        };
+        let running = submit(&mut handler, "running.mp4");
+        assert_eq!(
+            started
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("job started"),
+            running.id
+        );
+        let queued = submit(&mut handler, "queued.mp4");
+        let cancelled = submit(&mut handler, "cancelled.mp4");
+        handler.job_cancel(cancelled.id).expect("cancel queued");
+        let _ = handler.take_events();
+
+        // Zero keep still spares the running and queued jobs; only the
+        // cancelled terminal job goes.
+        let Reply::Pruned(reply) = handler.job_prune(0, None).expect("prune") else {
+            panic!("expected a prune reply");
+        };
+        assert_eq!(reply.removed, vec![cancelled.id]);
+        assert!(!store.job_dir(cancelled.id).exists());
+        assert!(store.job_dir(running.id).exists());
+        assert!(store.job_dir(queued.id).exists());
+        assert!(
+            handler.take_events().is_empty(),
+            "the pruned job's events are dropped"
+        );
+
+        // Finish both live jobs, then keep only the newest.
+        release.send(()).unwrap();
+        assert_eq!(
+            wait_done(&handler, running.id).state,
+            nle_core::JobState::Done
+        );
+        assert_eq!(
+            started
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("second job started"),
+            queued.id
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            wait_done(&handler, queued.id).state,
+            nle_core::JobState::Done
+        );
+        let Reply::Pruned(reply) = handler.job_prune(1, None).expect("prune again") else {
+            panic!("expected a prune reply");
+        };
+        assert_eq!(reply.removed, vec![running.id]);
+        assert!(!store.job_dir(running.id).exists());
+        assert!(store.job_dir(queued.id).exists());
+
+        // The wire shape: a successful `job.prune` call carries the reply.
+        assert!(matches!(
+            handler.handle(&Call::JobPrune {
+                keep: 1,
+                older_than_days: None
+            }),
+            Ok(Reply::Pruned(_))
+        ));
     }
 
     #[cfg(unix)]

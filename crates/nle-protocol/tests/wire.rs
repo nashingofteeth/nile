@@ -14,9 +14,9 @@ use nle_core::{
 };
 use nle_protocol::{
     AnalysisHash, AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR,
-    INVALID_PARAMS, INVALID_REQUEST, Id, JobList, METHOD_NOT_FOUND, MediaAsset, MediaList,
-    MediaUsage, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply, Preview,
-    REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError, SequenceList,
+    INVALID_PARAMS, INVALID_REQUEST, Id, JobList, JobPruneReply, METHOD_NOT_FOUND, MediaAsset,
+    MediaList, MediaUsage, Notification, Outcome, PARSE_ERROR, PROTOCOL_VERSION, PlayheadReply,
+    Preview, REVISION_CONFLICT, Reply, Request, Response, RevisionConflict, RpcError, SequenceList,
     SequenceReply, SequenceSummary, Server,
 };
 use serde_json::{Value, json};
@@ -263,6 +263,9 @@ impl Handler for Fake {
                 &PathBuf::from("/media/job.mp4"),
                 1,
             ))),
+            Call::JobPrune { keep, .. } => Ok(Reply::Pruned(JobPruneReply {
+                removed: vec![*keep, *keep + 1],
+            })),
         }
     }
 
@@ -419,6 +422,10 @@ fn all_calls() -> Vec<Call> {
         Call::JobGet { id: 3 },
         Call::JobCancel { id: 4 },
         Call::JobRemove { id: 5 },
+        Call::JobPrune {
+            keep: 2,
+            older_than_days: Some(7),
+        },
     ]
 }
 
@@ -826,6 +833,50 @@ fn golden_job_submit_request_and_round_trip() {
     );
     let (reply, _) = exchange(&mut Fake::new(7), remove);
     assert!(matches!(reply, Ok(Reply::Job(ref job)) if job.id == 5));
+}
+
+#[test]
+fn golden_job_prune_request_and_typed_helper() {
+    let call = Call::JobPrune {
+        keep: 2,
+        older_than_days: Some(7),
+    };
+    let request = Request::new(
+        Id::from(1u64),
+        call.method(),
+        call.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"job.prune","params":{"keep":2,"older_than_days":7}}"#
+    );
+
+    // The window is optional: omitting it asks for a pure count prune.
+    let call = Call::JobPrune {
+        keep: 0,
+        older_than_days: None,
+    };
+    let request = Request::new(
+        Id::from(1u64),
+        call.method(),
+        call.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"job.prune","params":{"keep":0}}"#
+    );
+
+    // The typed helper decodes the removed ids.
+    let (_, output) = exchange(
+        &mut Fake::new(7),
+        Call::JobPrune {
+            keep: 3,
+            older_than_days: Some(1),
+        },
+    );
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let pruned = client.prune_jobs(3, Some(1)).expect("job prune");
+    assert_eq!(pruned.removed, vec![3, 4]);
 }
 
 #[test]
