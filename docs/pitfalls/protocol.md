@@ -10,7 +10,7 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 `undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`,
 `sequence.audio`, `media.list`, `media.add`, `playhead.set`,
 `annotation.list`, `annotation.check`, `analysis.add`, `job.submit`,
-`job.list`, `job.get`, `job.cancel`. The internal `wire_catalog!` macro
+`job.list`, `job.get`, `job.cancel`, `job.remove`. The internal `wire_catalog!` macro
 (`crates/nle-protocol/src/catalog.rs`) is the single source: it generates the
 enum, `method()`, and `METHODS`/`EVENTS`. Add a
 method to the invocation, then a sample to `all_calls()`; the `METHODS.len()`
@@ -188,7 +188,16 @@ success; a cancelled job leaves no half-written deliverable.
 not a model write — the project revision, history and playhead do not move.
 `job.list` returns `{revision: <live>, jobs}` (the revision is context, not a
 CAS token); `job.get`/`job.cancel` return the same record shape as submit.
-Additive, so `PROTOCOL_VERSION` stays at 5.
+`job.remove {id}` deletes a **terminal** job's `job.json` and snapshot and
+returns the removed record; a queued or running job is invalid params (cancel
+it first), as is an unknown id. There is no age/count pruning. Additive, so
+`PROTOCOL_VERSION` stays at 5.
+
+`JobRecord` ignores unknown fields so a record from a newer build still parses
+far enough to hit the `version` check; startup logs and skips a corrupt or
+newer record and keeps its directory. `JobQueue::start` selects the job's
+`sequence` on the snapshot before computing the frame total, and finish reuses
+that total for the progress record.
 
 ## Time
 `from`, `Outcome.playhead`, `SetSpeed.rate`, and event `at` are rational
@@ -232,18 +241,17 @@ Unknown or malformed notifications are skipped and counted
 (`Client::skipped()`); a malformed **response** is fatal. Current events are
 request-triggered; an async event source needs a channel/thread.
 
-`job.progress {id, state, progress}` fires while a render advances (throttled;
-progress is advisory and recovered by `job.get`). `job.changed {id, state,
-report?}` marks every terminal transition, including startup's
-`interrupted`; `report` is the retained sidecar for a `done` job. Both are
-queued by the worker and drained after the next successful call, because the
+`job.progress {id, state, progress}` fires while a render advances (throttled
+and coalesced per id: a pending update is replaced, not appended). Progress
+is advisory and recovered by `job.get`. `job.changed {id, state,
+report?}` marks every terminal transition; startup emits it only for the
+records **this** run flipped `running` → `interrupted`, never for historical
+ones. `report` is the retained sidecar for a `done` job. Both are queued by the
+worker and drained after the next successful call, because the
 single-threaded transport writes events only with a reply: a client that wants
 live progress polls `job.list`/`job.get`. An error reply drops queued events
 (the transport contract), so terminal state must always be read from the
 durable record.
-
-Events belong to a successful call: an error reply discards any events the
-handler queued.
 
 ## Transport
 
@@ -268,6 +276,9 @@ then listens on `.nile/<stem>/session.sock` (or one stdin/stdout connection
 with `--stdio`). It is a **single-writer** interface: a `serve.lock` beside
 the socket serializes startup, one server owns the socket, a second server
 refuses, and multiple client connections are serialized through one handler.
+Socket mode binds and takes the lock **before** the handler is built, so a
+refused second server cannot recover the job queue or spawn a dispatcher.
+`--stdio` has no singleton gate (tests and pipes use separate projects).
 A killed owner leaves both files behind; the next start checks the lock PID
 and clears a dead owner's state. One-shot CLI edits are still file-based; do
 not run them alongside the server; `nile edit` attaches to the socket when it

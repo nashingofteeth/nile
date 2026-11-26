@@ -462,6 +462,7 @@ nile job submit -o final.mp4 [--sequence N] [--preset balanced] [--crf 22]
 nile job ls                                # id, state, progress, output
 nile job show 1                            # the full record as JSON
 nile job cancel 1                          # drop queued or kill the render
+nile job rm 1                              # delete a terminal record + snapshot
 ```
 
 `nile export` stays synchronous and file-based. `nile job submit` instead
@@ -471,6 +472,10 @@ silently resumes a job that was mid-render. One export runs at a time, oldest
 first. A finished job keeps its report beside the output
 (`final.mp4.report.json`) and links it from the record. The TUI's `:jobs`
 panel is the same queue; `x` cancels, `o` points at the report.
+
+State lives under `.nile/<stem>/jobs/<id>/` as `job.json` (the record) plus
+`project.json` (the submit-time snapshot). `nile job rm` removes both for a
+terminal job; queued or running jobs must be cancelled first.
 
 ### One-shot tools and logging
 
