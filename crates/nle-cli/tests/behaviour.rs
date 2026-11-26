@@ -709,6 +709,17 @@ fn analysis_analyze_stores_a_mean_luma_product_and_reuses_the_sample_offline() {
     assert_eq!(again, hash, "the offline sample produced the same product");
     assert_eq!(entries().len(), 2, "the sample hit did not grow the cache");
     assert_eq!(s.read(P), project_before);
+
+    // A zero dimension is a bad grid, not a window shorter than one frame.
+    let out = s.run(&[
+        "analysis", "analyze", "--asset", "1", "--width", "0", "--height", "24",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    assert!(
+        merged(&out).contains("width and height must be non-zero"),
+        "{}",
+        merged(&out)
+    );
 }
 
 #[test]

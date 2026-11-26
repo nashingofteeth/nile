@@ -132,6 +132,12 @@ impl SidecarError {
 
 // ------------------------------------------------------------ host: the CLI
 
+/// The analysis sample cache inside a project's state folder, mirroring
+/// `proxy::proxy_cache_dir`: `.nile/<stem>/cache/analysis`.
+pub(crate) fn sample_cache_dir(project_path: &Path) -> PathBuf {
+    nle_core::state::cache_dir(project_path).join("analysis")
+}
+
 /// Refuse a sample whose packed payload cannot fit the host's memory budget.
 ///
 /// This is deliberately checked before
@@ -399,6 +405,7 @@ fn adopt_product(
     let meta_bytes = std::fs::read(entry.meta_path())?;
     let sample_meta: SampleMeta = serde_json::from_slice(&meta_bytes)
         .map_err(|error| SidecarError::Product(format!("sample metadata: {error}")))?;
+    require_one_result_per_frame(&product, &sample_meta.data)?;
     let recorded = &product.sample.source;
     if recorded.source != sample_meta.source
         || recorded.source_arg != sample_meta.source_arg
@@ -414,6 +421,28 @@ fn adopt_product(
     store
         .adopt(&product, &staged, &ok.hash)
         .map_err(|error| SidecarError::Product(error.to_string()))
+}
+
+/// Metadata, not the product, says how many frames were packed. A result
+/// with a different length is a truncated or padded analysis, never a
+/// "shorter sample": refuse it before the store sees it.
+fn require_one_result_per_frame(
+    product: &AnalysisProduct,
+    data: &SampleData,
+) -> Result<(), SidecarError> {
+    let ProductResult::MeanLuma { luma_milli } = &product.result;
+    let SampleData::Frames { frames, .. } = data else {
+        return Err(SidecarError::Product(
+            "mean luma needs a frame sample".to_string(),
+        ));
+    };
+    if luma_milli.len() as u64 != *frames {
+        return Err(SidecarError::Product(format!(
+            "the product has {} frame results but the sample packed {frames}",
+            luma_milli.len()
+        )));
+    }
+    Ok(())
 }
 
 fn is_product_hash(hash: &str) -> bool {
@@ -1268,6 +1297,66 @@ mod tests {
 
         let error = mean_luma(&[0, 0, 0], 2, 1, 1).unwrap_err();
         assert!(matches!(error, SidecarError::CorruptInput(_)));
+    }
+
+    #[test]
+    fn a_product_must_have_one_result_per_packed_frame() {
+        let product = AnalysisProduct {
+            version: nle_core::analysis::PRODUCT_VERSION,
+            analyzer: AnalyzerInfo {
+                name: ANALYZER_NAME.to_string(),
+                version: ANALYZER_VERSION,
+            },
+            sample: ProductSample {
+                version: SAMPLE_VERSION,
+                key: "0123456789abcdef".to_string(),
+                params: "fedcba9876543210".to_string(),
+                source: SourceSignature {
+                    source: "/media/red.mp4".to_string(),
+                    source_arg: "/media/red.mp4".to_string(),
+                    source_size: 1,
+                    source_mtime_secs: 2,
+                    source_mtime_nanos: 3,
+                },
+            },
+            result: ProductResult::MeanLuma {
+                luma_milli: vec![1, 2],
+            },
+        };
+        let error = require_one_result_per_frame(
+            &product,
+            &SampleData::Frames {
+                width: 32,
+                height: 24,
+                frames: 3,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
+        assert!(error.to_string().contains("2 frame results"), "{error}");
+
+        assert!(
+            require_one_result_per_frame(
+                &product,
+                &SampleData::Frames {
+                    width: 32,
+                    height: 24,
+                    frames: 2,
+                },
+            )
+            .is_ok()
+        );
+
+        let error = require_one_result_per_frame(
+            &product,
+            &SampleData::Audio {
+                sample_rate: 48_000,
+                channels: 2,
+                samples: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
     }
 
     #[test]

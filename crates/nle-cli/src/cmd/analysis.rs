@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use nle_core::analysis::{
     AnalysisProduct, ProductStore, Transcript, TranscriptInput, TranscriptStore,
 };
+use nle_core::time::checked_sub;
 use nle_core::{Project, Seconds, parse_time};
 use nle_ffmpeg::sampling::{FrameSpec, SampleCache};
 
@@ -47,6 +48,8 @@ pub(crate) struct AnalyzeArgs<'a> {
     pub(crate) height: Option<u32>,
 }
 
+const BAD_WINDOW: &str = "--duration must be positive (the window ends at or before its start)";
+
 pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<()> {
     let project = Project::load(project_path)?;
     let media = project
@@ -55,6 +58,8 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
     if !media.probe.has_video() {
         bail!("asset #{} has no video stream to sample", args.asset);
     }
+    // `parse_time` already rejects a negative start; this value only has to
+    // stay exact through the default-duration subtraction.
     let start = match args.start {
         Some(value) => parse_cli_time(value, "--start")?,
         None => Seconds::from_integer(0),
@@ -62,19 +67,17 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
     let duration = match args.duration {
         Some(value) => parse_cli_time(value, "--duration")?,
         None => {
-            media.duration().with_context(|| {
+            let asset_duration = media.duration().with_context(|| {
                 format!(
                     "asset #{} has no probed duration; pass --duration",
                     args.asset
                 )
-            })? - start
+            })?;
+            default_duration(asset_duration, start)?
         }
     };
-    if start < Seconds::from_integer(0) {
-        bail!("--start must not be negative");
-    }
     if duration <= Seconds::from_integer(0) {
-        bail!("--duration must be positive (the window ends at or before its start)");
+        bail!(BAD_WINDOW);
     }
     let fps = match args.fps {
         Some(value) => parse_fps_arg(value)?,
@@ -88,6 +91,11 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
         (None, None) => (64, 36),
         _ => bail!("pass both --width and --height (or neither for the 64×36 default)"),
     };
+    if width == 0 || height == 0 {
+        // Before the budget: a zero dimension is a bad grid, not a window
+        // shorter than one frame.
+        bail!("width and height must be non-zero");
+    }
     let spec = FrameSpec {
         source: media.path.clone(),
         start,
@@ -97,7 +105,7 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
         height,
     };
     analysis::check_sample_budget(&spec)?;
-    let cache = SampleCache::new(nle_core::state::cache_dir(project_path).join("analysis"));
+    let cache = SampleCache::new(analysis::sample_cache_dir(project_path));
     let (_sample, entry) = cache.frames_entry(&spec)?;
     let stage = analysis::StageDir::create(cache.root())?;
     let store = ProductStore::at(project_path);
@@ -114,4 +122,31 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
 
 fn parse_cli_time(value: &str, flag: &str) -> Result<Seconds> {
     parse_time(value).with_context(|| format!("invalid {flag} {value:?} (try 1.5 or 0:00:01.500)"))
+}
+
+/// `asset_duration - start`, refusing overflow instead of panicking on a
+/// hand-typed extreme start. A non-integer probe duration and a huge start
+/// can exceed `i64` while the exact difference is still meaningful.
+fn default_duration(asset_duration: Seconds, start: Seconds) -> Result<Seconds> {
+    checked_sub(&asset_duration, &start).ok_or_else(|| anyhow::anyhow!(BAD_WINDOW))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_huge_start_is_refused_not_panicked() {
+        // A non-integer probe duration: the unchecked subtraction
+        // `i64::MAX/3 - i64::MAX` overflows `i64` in debug before it can be
+        // compared with zero.
+        let asset_duration = Seconds::new(i64::MAX, 3);
+        let start = Seconds::from_integer(i64::MAX);
+        let error = default_duration(asset_duration, start).unwrap_err();
+        assert!(error.to_string().contains("window ends"), "{error}");
+
+        // The ordinary non-integer case still subtracts exactly.
+        let duration = default_duration(Seconds::new(10, 3), Seconds::new(1, 3)).unwrap();
+        assert_eq!(duration, Seconds::from_integer(3));
+    }
 }

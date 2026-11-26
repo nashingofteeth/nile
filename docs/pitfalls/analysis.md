@@ -70,8 +70,8 @@ Packed is one read, exact bytes.
 ## Cache
 
 - Root: `SampleCache::new(root)` takes a caller directory. `nle-cli` passes
-  `state::cache_dir(project_path).join("analysis")`
-  (`.nile/<stem>/cache/analysis/`), a `sample_cache_dir` helper mirroring
+  `analysis::sample_cache_dir(project_path)` — `cache_dir(...).join(
+  "analysis")`, `.nile/<stem>/cache/analysis/` — a helper mirroring
   `proxy_cache_dir`; the sampler's own comment records the same split
   (samples are disposable, `analysis/` is state).
 - **Key = request + source signature.** `SAMPLE_VERSION` in
@@ -101,10 +101,11 @@ Packed is one read, exact bytes.
   `cache prune --days` keeps ageing it.
 - Misses: replaced source (mtime/size), changed params/kind, a
   `SAMPLE_VERSION` bump. On a miss the caller samples, stores, and serves.
-- `nile cache prune` gains an `analysis` line through `proxy::prune_at`: add
-  `.raw` to `is_entry_name` (it already knows `.json`), and the tmp shape
-  parses as `<key>.tmp-<pid>-<seq>.raw`. Pruning is explicit; a pruned sample
-  re-extracts. **`analysis/` is never swept.**
+- **Pending:** `nile cache prune` will gain an `analysis` line through
+  `proxy::prune_at`: add `.raw` to `is_entry_name` (it already knows
+  `.json`), and the tmp shape parses as `<key>.tmp-<pid>-<seq>.raw`. Until
+  it lands, only the host's `StageDir` removes its own run. Pruning will be
+  explicit; a pruned sample re-extracts. **`analysis/` is never swept.**
 
 ## Sidecar contract
 
@@ -163,6 +164,8 @@ Packed bytes never travel on the wire — only paths.
   integer units. The analyzer writes it canonically (plus one newline); the
   host accepts only those bytes (or the same bytes without the newline).
   Pretty-printed or reordered output is a refusal, not silently rewritten.
+  Adoption also requires one luma entry per packed frame (`meta.frames`), so
+  a truncated result is refused rather than read as a shorter sample.
   `AnalysisProduct::freshness` compares the recorded signature with the live
   file and answers `Fresh`/`Stale`/`Offline`; `is_compatible` owns the
   product/sampler version check.
