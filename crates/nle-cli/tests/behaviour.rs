@@ -2875,6 +2875,10 @@ fn cache_prune_is_explicit_and_age_based() {
 
     let out = s.ok(&["cache", "prune"]);
     assert!(out.contains("removed 1"), "{out}");
+    assert!(
+        out.contains("analysis:"),
+        "the analysis sample sweep is reported too:\n{out}"
+    );
     assert!(!dir.join("aaaa.mp4").exists(), "the old entry is gone");
     assert!(dir.join("bbbb.mp4").exists(), "the young entry is kept");
 

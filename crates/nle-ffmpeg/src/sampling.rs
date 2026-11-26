@@ -25,8 +25,10 @@
 //! offline through the lossy form; the key itself hashes the exact `Path`.
 //!
 //! Sampling buffers the whole result in memory (`width × height × 3` bytes per
-//! frame; `samples × channels × 2` bytes of audio). Callers pick a range and a
-//! geometry small enough for the analysis they are doing.
+//! frame; `samples × channels × 2` bytes of audio). The sampler itself refuses
+//! a request over [`MAX_SAMPLE_BYTES`] or [`MAX_SAMPLE_FRAMES`], and an exact
+//! frame request over [`MAX_INDEX_FRAMES`], before it spawns ffmpeg: a caller
+//! cannot exhaust memory by asking for a large window.
 
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
@@ -41,9 +43,27 @@ use nle_core::time::format_seconds;
 use thiserror::Error;
 
 /// Bump when the *meaning* of a sample changes (a different pixel format, a
-/// different resampler, a different truncation rule). Old entries are then
-/// unreachable instead of being served as if they were the new thing.
-pub const SAMPLE_VERSION: u32 = 1;
+/// different resampler, a different truncation rule, a new way to pick
+/// frames). Old entries are then unreachable instead of being served as if
+/// they were the new thing.
+///
+/// v2 records per-frame source times and exact source indices, so a v1 entry
+/// cannot answer "which source frame is this?".
+pub const SAMPLE_VERSION: u32 = 2;
+
+/// The largest packed payload one request may buffer (256 MiB).
+pub const MAX_SAMPLE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The largest number of frames one frame request may name, independent of
+/// their size. A grid of a thousand 8×8 frames is harmless; a million of them
+/// is not worth the metadata.
+pub const MAX_SAMPLE_FRAMES: u64 = 100_000;
+
+/// The largest number of source frames one exact-frame (index) request may
+/// name. `select=eq(n,…)+…` is a single left-deep expression, and ffmpeg's
+/// expression parser stops at about 100 terms; 96 leaves margin across
+/// builds. Sample a grid for a longer range.
+pub const MAX_INDEX_FRAMES: u64 = 96;
 
 #[derive(Debug, Error)]
 pub enum SampleError {
@@ -51,6 +71,26 @@ pub enum SampleError {
     MissingFile(String),
     #[error("invalid sampling spec: {0}")]
     InvalidSpec(String),
+    #[error("sample is too large: {what} needs {bytes} bytes (limit {limit})")]
+    TooLarge {
+        what: String,
+        bytes: u64,
+        limit: u64,
+    },
+    #[error("sample is too large: {frames} frames (limit {limit})")]
+    TooManyFrames { frames: u64, limit: u64 },
+    #[error(
+        "an exact-frame request names {frames} frames (limit {limit}); sample a grid for a longer range"
+    )]
+    TooManyIndices { frames: u64, limit: u64 },
+    #[error(
+        "requested {requested} exact source frames but only {packed} are in {path}; the media ends before the last index"
+    )]
+    ShortIndex {
+        requested: u64,
+        packed: u64,
+        path: String,
+    },
     #[error("could not run ffmpeg: {0}")]
     Spawn(#[from] std::io::Error),
     #[error("ffmpeg failed ({status}): {message}")]
@@ -69,67 +109,240 @@ pub enum SampleError {
     CacheEncode(String),
 }
 
-/// A frame-sampling request: the `[start, start + duration)` source range,
-/// sampled at `fps` and scaled to `width` × `height` RGB24.
+/// How a frame request picks frames. A grid is a fresh sampling clock; index
+/// requests name the source's own frames so a caller can ask "frame 137" and
+/// get exactly that picture.
 ///
-/// `duration` is an exact rational and `start` is measured from the source's
-/// zero. The frame count is `floor(duration × fps)`; a range past the end of
-/// the media yields fewer frames, never invented ones.
+/// The mode owns the window: a grid is `[start, start + duration)` at `fps`,
+/// an index request derives its decode window from the indices and the source
+/// `rate`. That way there is no `fps` field to leave stale on an index
+/// request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameMode {
+    /// Frame `i` is source time `start + i/fps`.
+    Grid {
+        start: Seconds,
+        duration: Seconds,
+        fps: Seconds,
+    },
+    /// Frame `i` is source frame `indices[i]` at the source's `rate`, i.e.
+    /// source time `indices[i] / rate`. Indices are strictly increasing, so
+    /// payload order is request order: the sample preserves source-frame
+    /// identity instead of resampling onto another clock.
+    Indices { rate: Seconds, indices: Vec<u64> },
+}
+
+impl FrameMode {
+    /// How many frames the request names (a grid floors
+    /// `duration × fps`; it may pack fewer when the window runs past the
+    /// media's end).
+    pub fn frame_count(&self) -> u64 {
+        match self {
+            FrameMode::Grid { duration, fps, .. } => product_floor(*duration, *fps),
+            FrameMode::Indices { indices, .. } => indices.len() as u64,
+        }
+    }
+
+    /// The exact source time of frame `index`, or `None` past the request.
+    pub fn time(&self, index: usize) -> Option<Seconds> {
+        match self {
+            FrameMode::Grid { start, fps, .. } => {
+                if index as u64 >= self.frame_count() {
+                    return None;
+                }
+                let index = i64::try_from(index).ok()?;
+                Some(*start + Seconds::from_integer(index) / *fps)
+            }
+            FrameMode::Indices { rate, indices } => {
+                let source = i64::try_from(*indices.get(index)?).ok()?;
+                Some(Seconds::from_integer(source) / *rate)
+            }
+        }
+    }
+
+    /// The exact source times of the first `frames` packed frames.
+    pub fn times(&self, frames: usize) -> Option<Vec<Seconds>> {
+        (0..frames).map(|index| self.time(index)).collect()
+    }
+
+    /// The source frame indices, for an index request. A grid has no source
+    /// frame identity: its times are not the media's own frame grid.
+    pub fn indices(&self) -> Option<&[u64]> {
+        match self {
+            FrameMode::Grid { .. } => None,
+            FrameMode::Indices { indices, .. } => Some(indices),
+        }
+    }
+
+    /// Refuse a mode that cannot describe frames: a non-positive range/rate,
+    /// no indices, indices out of order (which would reorder the payload), or
+    /// an absurd count (the sampler would drop frames silently).
+    pub fn validate(&self) -> Result<(), SampleError> {
+        match self {
+            FrameMode::Grid {
+                start,
+                duration,
+                fps,
+            } => {
+                if *start < Seconds::from_integer(0) {
+                    return Err(SampleError::InvalidSpec(
+                        "start must not be negative".into(),
+                    ));
+                }
+                if *duration <= Seconds::from_integer(0) {
+                    return Err(SampleError::InvalidSpec("duration must be positive".into()));
+                }
+                if *fps <= Seconds::from_integer(0) {
+                    return Err(SampleError::InvalidSpec("fps must be positive".into()));
+                }
+                if self.frame_count() == 0 {
+                    return Err(SampleError::InvalidSpec(
+                        "the range is shorter than one frame at this fps".into(),
+                    ));
+                }
+            }
+            FrameMode::Indices { rate, indices } => {
+                if *rate <= Seconds::from_integer(0) {
+                    return Err(SampleError::InvalidSpec("rate must be positive".into()));
+                }
+                if indices.is_empty() {
+                    return Err(SampleError::InvalidSpec(
+                        "an index request names no frames".into(),
+                    ));
+                }
+                if !indices.windows(2).all(|pair| pair[0] < pair[1]) {
+                    return Err(SampleError::InvalidSpec(
+                        "frame indices must be strictly increasing".into(),
+                    ));
+                }
+                if indices.last().is_some_and(|last| *last >= i64::MAX as u64) {
+                    return Err(SampleError::InvalidSpec(
+                        "frame index is too large to spell as a source time".into(),
+                    ));
+                }
+                if indices.len() as u64 > MAX_INDEX_FRAMES {
+                    return Err(SampleError::TooManyIndices {
+                        frames: indices.len() as u64,
+                        limit: MAX_INDEX_FRAMES,
+                    });
+                }
+            }
+        }
+        let frames = self.frame_count();
+        if frames > MAX_SAMPLE_FRAMES {
+            return Err(SampleError::TooManyFrames {
+                frames,
+                limit: MAX_SAMPLE_FRAMES,
+            });
+        }
+        Ok(())
+    }
+
+    fn hash(&self, hasher: &mut DefaultHasher) {
+        // Separate tags: a grid and an index list are different samples even
+        // when they happen to name the same times.
+        match self {
+            FrameMode::Grid {
+                start,
+                duration,
+                fps,
+            } => {
+                "frames-grid".hash(hasher);
+                rational(hasher, *start);
+                rational(hasher, *duration);
+                rational(hasher, *fps);
+            }
+            FrameMode::Indices { rate, indices } => {
+                "frames-indices".hash(hasher);
+                rational(hasher, *rate);
+                indices.hash(hasher);
+            }
+        }
+    }
+}
+
+/// A frame-sampling request: the source, how to pick frames, and the RGB24
+/// geometry.
+///
+/// A grid is `[start, start + duration)` at `fps` with `floor(duration × fps)`
+/// frames; a range past the end of the media yields fewer frames, never
+/// invented ones. An index request names exact source frames at `rate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameSpec {
     pub source: PathBuf,
-    pub start: Seconds,
-    pub duration: Seconds,
-    pub fps: Seconds,
+    pub mode: FrameMode,
     pub width: u32,
     pub height: u32,
 }
 
 impl FrameSpec {
-    /// How many frames `[start, start + duration)` contains at `fps`.
-    ///
-    /// Exact rational floor — a float product would round at 29.97 fps.
+    /// How many frames the request asks for.
     pub fn frame_count(&self) -> u64 {
-        product_floor(self.duration, self.fps)
+        self.mode.frame_count()
+    }
+
+    /// The exact source time of frame `index` (see [`FrameMode::time`]).
+    pub fn time_of(&self, index: usize) -> Option<Seconds> {
+        self.mode.time(index)
     }
 
     fn validate(&self) -> Result<(), SampleError> {
-        if self.start < Seconds::from_integer(0) {
-            return Err(SampleError::InvalidSpec(
-                "start must not be negative".into(),
-            ));
-        }
-        if self.duration <= Seconds::from_integer(0) {
-            return Err(SampleError::InvalidSpec("duration must be positive".into()));
-        }
-        if self.fps <= Seconds::from_integer(0) {
-            return Err(SampleError::InvalidSpec("fps must be positive".into()));
-        }
         if self.width == 0 || self.height == 0 {
             return Err(SampleError::InvalidSpec(
                 "width and height must be non-zero".into(),
             ));
         }
-        if self.frame_count() == 0 {
-            return Err(SampleError::InvalidSpec(
-                "the range is shorter than one frame at this fps".into(),
-            ));
+        self.mode.validate()?;
+        let frames = self.frame_count();
+        let stride = (self.width as u64)
+            .checked_mul(self.height as u64)
+            .and_then(|n| n.checked_mul(3))
+            .ok_or_else(|| SampleError::InvalidSpec("frame size overflows".into()))?;
+        let bytes = frames
+            .checked_mul(stride)
+            .ok_or_else(|| SampleError::InvalidSpec("the sample length overflows".into()))?;
+        if bytes > MAX_SAMPLE_BYTES {
+            return Err(SampleError::TooLarge {
+                what: format!("{frames} frames at {}×{}", self.width, self.height),
+                bytes,
+                limit: MAX_SAMPLE_BYTES,
+            });
         }
         Ok(())
     }
 }
 
-/// The packed frames: `frames` × `height` rows of `width` RGB triples.
+/// The packed frames: `frames` × `height` rows of `width` RGB triples, plus
+/// each frame's exact source time (and, for an index request, its source
+/// frame number).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameSample {
     width: u32,
     height: u32,
     rgb: Vec<u8>,
+    times: Vec<Seconds>,
+    indices: Option<Vec<u64>>,
 }
 
 impl FrameSample {
-    fn new(width: u32, height: u32, rgb: Vec<u8>) -> Self {
-        Self { width, height, rgb }
+    fn new(
+        width: u32,
+        height: u32,
+        rgb: Vec<u8>,
+        times: Vec<Seconds>,
+        indices: Option<Vec<u64>>,
+    ) -> Self {
+        debug_assert_eq!(
+            times.len(),
+            rgb.len() / (width as usize * height as usize * 3)
+        );
+        Self {
+            width,
+            height,
+            rgb,
+            times,
+            indices,
+        }
     }
 
     pub fn width(&self) -> u32 {
@@ -153,6 +366,21 @@ impl FrameSample {
     /// The whole packed buffer, row-major RGB24.
     pub fn rgb(&self) -> &[u8] {
         &self.rgb
+    }
+
+    /// Each frame's exact source time, in the same order as the frames.
+    pub fn times(&self) -> &[Seconds] {
+        &self.times
+    }
+
+    /// One frame's exact source time; `None` past the last frame.
+    pub fn time(&self, index: usize) -> Option<&Seconds> {
+        self.times.get(index)
+    }
+
+    /// The source frame numbers, for an index request (`None` for a grid).
+    pub fn indices(&self) -> Option<&[u64]> {
+        self.indices.as_deref()
     }
 
     /// One frame's RGB24 bytes; `None` past the last frame.
@@ -223,6 +451,21 @@ impl AudioSpec {
             return Err(SampleError::InvalidSpec(
                 "the range is shorter than one audio sample".into(),
             ));
+        }
+        let bytes = self
+            .sample_count()
+            .checked_mul(self.bytes_per_sample() as u64)
+            .ok_or_else(|| SampleError::InvalidSpec("the sample length overflows".into()))?;
+        if bytes > MAX_SAMPLE_BYTES {
+            return Err(SampleError::TooLarge {
+                what: format!(
+                    "{} samples × {} channels",
+                    self.sample_count(),
+                    self.channels
+                ),
+                bytes,
+                limit: MAX_SAMPLE_BYTES,
+            });
         }
         Ok(())
     }
@@ -402,6 +645,8 @@ impl SampleCache {
             width,
             height,
             frames,
+            times,
+            indices,
         } = meta.data
         else {
             return None;
@@ -415,7 +660,22 @@ impl SampleCache {
         if expected != raw.len() as u64 || meta.bytes != expected {
             return None;
         }
-        Some(FrameSample::new(width, height, raw))
+        // The request is authoritative for time: a metadata time list that
+        // disagrees with the spec is a corrupt entry, not a usable sample.
+        let expected_times = spec.mode.times(frames as usize)?;
+        let expected_indices = spec.mode.indices().map(<[u64]>::to_vec);
+        // A short index entry (written before the sampler refused one) records
+        // the whole request but packs fewer frames. It is not a hit: re-sample
+        // so the request gets its typed `ShortIndex` refusal.
+        if let Some(all) = spec.mode.indices()
+            && frames as usize != all.len()
+        {
+            return None;
+        }
+        if times != expected_times || indices != expected_indices {
+            return None;
+        }
+        Some(FrameSample::new(width, height, raw, times, indices))
     }
 
     fn load_audio(
@@ -564,6 +824,8 @@ impl SampleCache {
                 width: spec.width,
                 height: spec.height,
                 frames: sample.frame_count() as u64,
+                times: sample.times().to_vec(),
+                indices: sample.indices().map(<[u64]>::to_vec),
             },
         );
         self.store_entry(entry, &meta, sample.rgb())
@@ -677,9 +939,7 @@ fn frame_params(spec: &FrameSpec) -> u64 {
     let mut hasher = DefaultHasher::new();
     SAMPLE_VERSION.hash(&mut hasher);
     "frames".hash(&mut hasher);
-    rational(&mut hasher, spec.start);
-    rational(&mut hasher, spec.duration);
-    rational(&mut hasher, spec.fps);
+    spec.mode.hash(&mut hasher);
     spec.width.hash(&mut hasher);
     spec.height.hash(&mut hasher);
     hasher.finish()
@@ -820,6 +1080,13 @@ pub enum SampleData {
         width: u32,
         height: u32,
         frames: u64,
+        /// One exact source time per packed frame, in payload order.
+        #[serde(with = "nle_core::time::rational_ser::vec")]
+        times: Vec<Seconds>,
+        /// Source frame numbers for an index request; absent for a grid,
+        /// whose frames live on the request's own clock.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        indices: Option<Vec<u64>>,
     },
     Audio {
         sample_rate: u32,
@@ -885,19 +1152,43 @@ fn sample_frames(spec: &FrameSpec) -> Result<FrameSample, SampleError> {
             unit: stride,
         });
     }
+    // `-frames:v` caps the count, but never trust the process for the shape:
+    // a filter rounding up must not hand the caller more than it asked for.
+    let wanted = spec.frame_count() as usize;
+    let frames = (raw.len() / stride).min(wanted);
+    // A grid may legitimately run past the media's end and pack fewer frames.
+    // An index request names exact frames, so a short payload cannot be the
+    // sample the caller asked for; refuse it instead of caching a prefix the
+    // analyzer would then read as corruption.
+    if let Some(indices) = spec.mode.indices()
+        && frames < indices.len()
+    {
+        return Err(SampleError::ShortIndex {
+            requested: indices.len() as u64,
+            packed: frames as u64,
+            path: spec.source.display().to_string(),
+        });
+    }
     if raw.is_empty() {
         return Err(SampleError::Empty {
             what: "frames",
             path: spec.source.display().to_string(),
         });
     }
-    // `-frames:v` caps the count, but never trust the process for the shape:
-    // a filter rounding up must not hand the caller more than it asked for.
-    let wanted = spec.frame_count() as usize;
-    let frames = (raw.len() / stride).min(wanted);
     // `truncate` is the no-copy path when the count is already exact.
     raw.truncate(frames * stride);
-    Ok(FrameSample::new(spec.width, spec.height, raw))
+    let times = spec
+        .mode
+        .times(frames)
+        .ok_or_else(|| SampleError::InvalidSpec("frame times overflow".into()))?;
+    let indices = spec.mode.indices().map(<[u64]>::to_vec);
+    Ok(FrameSample::new(
+        spec.width,
+        spec.height,
+        raw,
+        times,
+        indices,
+    ))
 }
 
 fn sample_audio(spec: &AudioSpec) -> Result<AudioSample, SampleError> {
@@ -932,14 +1223,36 @@ fn rate_arg(fps: &Seconds) -> String {
 
 /// The exact argv for a frame sample, so the command can be inspected without
 /// running it.
+///
+/// A grid resamples with `fps=`. An index request selects source frames with
+/// `select=eq(n,…)` **before** the scale, and seeks half a frame early so the
+/// boundary frame is never dropped by seek rounding; `n` is relative to the
+/// first requested frame (the first frame the seek emits).
 fn frame_args(spec: &FrameSpec) -> Vec<OsString> {
-    let filter = format!(
-        "fps={},scale={}:{}:flags=area,setsar=1",
-        rate_arg(&spec.fps),
-        spec.width,
-        spec.height
-    );
-    let mut args = common_args(spec.source.as_path(), spec.start, spec.duration);
+    let scale = format!("scale={}:{}:flags=area,setsar=1", spec.width, spec.height);
+    let (mut args, filter) = match &spec.mode {
+        FrameMode::Grid {
+            start,
+            duration,
+            fps,
+        } => (
+            common_args(spec.source.as_path(), *start, *duration),
+            format!("fps={},{}", rate_arg(fps), scale),
+        ),
+        FrameMode::Indices { rate, indices } => {
+            let (start, duration) = index_window(rate, indices);
+            let first = indices[0];
+            let select = indices
+                .iter()
+                .map(|index| format!("eq(n\\,{})", index - first))
+                .collect::<Vec<_>>()
+                .join("+");
+            (
+                common_args(spec.source.as_path(), start, duration),
+                format!("select={select},{scale}"),
+            )
+        }
+    };
     args.extend([
         "-map".into(),
         "0:v:0".into(),
@@ -948,6 +1261,9 @@ fn frame_args(spec: &FrameSpec) -> Vec<OsString> {
         "-dn".into(),
         "-vf".into(),
         filter.into(),
+        // Never let the muxer duplicate/drop a selected frame to hit a rate.
+        "-fps_mode".into(),
+        "passthrough".into(),
         "-frames:v".into(),
         spec.frame_count().to_string().into(),
         "-f".into(),
@@ -958,6 +1274,20 @@ fn frame_args(spec: &FrameSpec) -> Vec<OsString> {
         "-".into(),
     ]);
     args
+}
+
+/// The decode window for exact source frames: from half a frame before the
+/// first index through the frame after the last. The half-frame margin keeps
+/// `-ss` (printed to six decimals by [`format_seconds`]) strictly before the
+/// first wanted frame, so accurate seek keeps it.
+fn index_window(rate: &Seconds, indices: &[u64]) -> (Seconds, Seconds) {
+    let first = *indices.first().expect("an index request names frames") as i64;
+    let last = *indices.last().expect("an index request names frames") as i64;
+    let frame = Seconds::from_integer(1) / *rate;
+    let start = (Seconds::from_integer(first) / *rate - frame / Seconds::from_integer(2))
+        .max(Seconds::from_integer(0));
+    let end = Seconds::from_integer(last + 1) / *rate;
+    (start, end - start)
 }
 
 /// The exact argv for an audio sample. `atrim=end_sample` makes the sample
@@ -1046,6 +1376,39 @@ mod tests {
         path
     }
 
+    /// A 1-second 30 fps test pattern whose picture changes every frame, so an
+    /// index request can be checked against the exact source frame.
+    fn moving_video(dir: &Path) -> PathBuf {
+        moving_video_at(dir, "moving.mp4", "30", "1")
+    }
+
+    /// A 2-second 29.97 fps test pattern, for exact-frame requests at a
+    /// rational rate.
+    fn moving_video_2997(dir: &Path) -> PathBuf {
+        moving_video_at(dir, "moving2997.mp4", "30000/1001", "2")
+    }
+
+    fn moving_video_at(dir: &Path, name: &str, rate: &str, duration: &str) -> PathBuf {
+        let path = dir.join(name);
+        ffmpeg(&[
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size=160x120:rate={rate}:duration={duration}"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            path.to_str().unwrap(),
+        ]);
+        path
+    }
+
     /// A 1-second 300 Hz mono tone as PCM (exact sample count, unlike AAC).
     fn tone(dir: &Path) -> PathBuf {
         let path = dir.join("tone.wav");
@@ -1068,9 +1431,20 @@ mod tests {
     fn frame_spec(source: &Path) -> FrameSpec {
         FrameSpec {
             source: source.to_path_buf(),
-            start: Seconds::from_integer(0),
-            duration: Seconds::from_integer(1),
-            fps: Seconds::from_integer(5),
+            mode: FrameMode::Grid {
+                start: Seconds::from_integer(0),
+                duration: Seconds::from_integer(1),
+                fps: Seconds::from_integer(5),
+            },
+            width: 32,
+            height: 24,
+        }
+    }
+
+    fn index_spec(source: &Path, rate: Seconds, indices: Vec<u64>) -> FrameSpec {
+        FrameSpec {
+            source: source.to_path_buf(),
+            mode: FrameMode::Indices { rate, indices },
             width: 32,
             height: 24,
         }
@@ -1123,6 +1497,285 @@ mod tests {
         assert!(r > 200 && g < 60 && b < 60, "not red: {r},{g},{b}");
     }
 
+    /// An index request must land on the source's own frames, not a resample
+    /// that happens to be close. The grid sample here is the reference: its
+    /// frame `n` is source frame `n` at the same rate.
+    #[test]
+    fn index_requests_return_the_exact_source_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = moving_video(dir.path());
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let grid = cache
+            .frames(&FrameSpec {
+                source: source.clone(),
+                mode: FrameMode::Grid {
+                    start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(1),
+                    fps: Seconds::from_integer(30),
+                },
+                width: 16,
+                height: 12,
+            })
+            .unwrap();
+        assert_eq!(grid.frame_count(), 30);
+        assert!(grid.indices().is_none(), "a grid has no source identity");
+        assert_eq!(grid.time(7), Some(&Seconds::new(7, 30)));
+
+        let sample = cache
+            .frames(&FrameSpec {
+                source,
+                mode: FrameMode::Indices {
+                    rate: Seconds::from_integer(30),
+                    indices: vec![0, 7, 29],
+                },
+                width: 16,
+                height: 12,
+            })
+            .unwrap();
+        assert_eq!(sample.frame_count(), 3);
+        assert_eq!(sample.indices(), Some([0, 7, 29].as_slice()));
+        for (packed, source_frame) in [0usize, 7, 29].into_iter().enumerate() {
+            assert_eq!(
+                sample.frame(packed),
+                grid.frame(source_frame),
+                "packed frame {packed} is not source frame {source_frame}"
+            );
+            assert_eq!(
+                sample.time(packed),
+                Some(&Seconds::new(source_frame as i64, 30))
+            );
+        }
+    }
+
+    /// A non-zero first index must seek half a frame early and still select
+    /// the source's own frames; with `first == 0` the seek clamp hides an
+    /// off-by-one in `index_window`.
+    #[test]
+    fn index_requests_with_a_nonzero_first_frame_stay_frame_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let cases = [
+            (
+                moving_video(dir.path()),
+                Seconds::from_integer(30),
+                vec![7_u64, 29],
+            ),
+            (
+                moving_video_2997(dir.path()),
+                Seconds::new(30000, 1001),
+                vec![10, 29],
+            ),
+        ];
+        for (source, rate, indices) in cases {
+            let grid = cache
+                .frames(&FrameSpec {
+                    source: source.clone(),
+                    mode: FrameMode::Grid {
+                        start: Seconds::from_integer(0),
+                        duration: Seconds::from_integer(2),
+                        fps: rate,
+                    },
+                    width: 32,
+                    height: 24,
+                })
+                .unwrap();
+            let sample = cache
+                .frames(&index_spec(&source, rate, indices.clone()))
+                .unwrap();
+            assert_eq!(sample.indices(), Some(indices.as_slice()));
+            for (packed, source_frame) in indices.iter().enumerate() {
+                assert_eq!(
+                    sample.frame(packed),
+                    grid.frame(*source_frame as usize),
+                    "rate {rate:?}: packed frame {packed} is not source frame {source_frame}"
+                );
+                assert_eq!(
+                    sample.time(packed),
+                    Some(&(Seconds::from_integer(*source_frame as i64) / rate))
+                );
+            }
+        }
+    }
+
+    /// `select=eq(n,…)+…` is one left-deep expression and ffmpeg's parser
+    /// stops at around 100 terms; refuse the request before spawning instead
+    /// of surfacing a raw ffmpeg parse error.
+    #[test]
+    fn an_exact_frame_request_over_the_select_limit_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let missing = dir.path().join("missing.mp4");
+        let indices: Vec<u64> = (0..=MAX_INDEX_FRAMES).collect();
+        let error = cache
+            .frames(&index_spec(&missing, Seconds::from_integer(30), indices))
+            .unwrap_err();
+        assert!(
+            matches!(error, SampleError::TooManyIndices { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("limit"), "{error}");
+        assert!(!cache.root().exists(), "the refusal created no cache");
+
+        // Exactly the limit is a valid request; it fails later, on the
+        // missing source, not in validation.
+        let indices: Vec<u64> = (0..MAX_INDEX_FRAMES).collect();
+        let error = cache
+            .frames(&index_spec(&missing, Seconds::from_integer(30), indices))
+            .unwrap_err();
+        assert!(matches!(error, SampleError::MissingFile(_)), "{error:?}");
+    }
+
+    /// An index request names exact frames. If the media ends first, the
+    /// sampler refuses rather than caching a prefix the analyzer would read as
+    /// corruption, and a later valid request still works.
+    #[test]
+    fn an_index_request_past_the_media_end_is_refused_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = moving_video(dir.path());
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let error = cache
+            .frames(&index_spec(
+                &source,
+                Seconds::from_integer(30),
+                vec![0, 7, 40],
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SampleError::ShortIndex {
+                    requested: 3,
+                    packed: 2,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("media ends"), "{error}");
+        assert_eq!(entries(&cache), 0, "a refused sample writes no entry");
+
+        // Even a first index past the end names zero packed frames; it is the
+        // same refusal, not a generic empty sample.
+        let error = cache
+            .frames(&index_spec(&source, Seconds::from_integer(30), vec![40]))
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SampleError::ShortIndex {
+                    requested: 1,
+                    packed: 0,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        let sample = cache
+            .frames(&index_spec(
+                &source,
+                Seconds::from_integer(30),
+                vec![0, 7, 29],
+            ))
+            .unwrap();
+        assert_eq!(sample.indices(), Some([0, 7, 29].as_slice()));
+        assert_eq!(sample.frame_count(), 3);
+    }
+
+    /// A grid and an index list are different samples even when they describe
+    /// the same times: one resamples onto a request clock, the other keeps
+    /// source-frame identity.
+    #[test]
+    fn a_grid_and_an_index_request_never_share_a_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = moving_video(dir.path());
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let grid = frame_spec(&source);
+        let (grid_sample, grid_entry) = cache.frames_entry(&grid).unwrap();
+        let index = FrameSpec {
+            source,
+            mode: FrameMode::Indices {
+                rate: Seconds::from_integer(5),
+                indices: vec![0, 1, 2, 3, 4],
+            },
+            width: grid.width,
+            height: grid.height,
+        };
+        let (index_sample, index_entry) = cache.frames_entry(&index).unwrap();
+
+        assert_ne!(grid_entry.params(), index_entry.params());
+        assert_ne!(grid_entry.key(), index_entry.key());
+        assert_eq!(entries(&cache), 4, "two entries, not one shared one");
+        assert!(grid_sample.indices().is_none());
+        assert_eq!(index_sample.indices(), Some(&[0, 1, 2, 3, 4][..]));
+        assert_eq!(
+            index_sample.times(),
+            &[0, 1, 2, 3, 4].map(|i| Seconds::new(i, 5))
+        );
+    }
+
+    /// A request over the sampler's own budget is refused before it looks at
+    /// the source (so before any ffmpeg spawn): the missing path would
+    /// otherwise be `MissingFile`.
+    #[test]
+    fn caps_refuse_a_huge_request_before_ffmpeg_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let missing = dir.path().join("missing.mp4");
+
+        let error = cache
+            .frames(&FrameSpec {
+                source: missing.clone(),
+                mode: FrameMode::Grid {
+                    start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(600),
+                    fps: Seconds::from_integer(30),
+                },
+                width: 4096,
+                height: 4096,
+            })
+            .unwrap_err();
+        assert!(matches!(error, SampleError::TooLarge { .. }), "{error:?}");
+        assert!(error.to_string().contains("limit"), "{error}");
+
+        let error = cache
+            .frames(&FrameSpec {
+                source: missing,
+                mode: FrameMode::Grid {
+                    start: Seconds::from_integer(0),
+                    duration: Seconds::from_integer(4000),
+                    fps: Seconds::from_integer(30),
+                },
+                width: 4,
+                height: 4,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, SampleError::TooManyFrames { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("limit"), "{error}");
+        assert!(!cache.root().exists(), "the refusal created no cache");
+    }
+
+    #[test]
+    fn an_audio_request_over_the_cap_is_refused_before_ffmpeg_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let error = cache
+            .audio(&AudioSpec {
+                source: dir.path().join("missing.wav"),
+                start: Seconds::from_integer(0),
+                duration: Seconds::from_integer(3600),
+                sample_rate: 192_000,
+                channels: 8,
+            })
+            .unwrap_err();
+        assert!(matches!(error, SampleError::TooLarge { .. }), "{error:?}");
+        assert!(error.to_string().contains("limit"), "{error}");
+        assert!(!cache.root().exists());
+    }
+
     /// The sidecar host needs the entry it just sampled: the key names the
     /// packed file, and the metadata carries the source signature a product
     /// records. A hit and a miss must describe the same entry.
@@ -1149,11 +1802,44 @@ mod tests {
         assert_eq!(meta.key, entry.key());
         assert_eq!(meta.params, entry.params());
         assert_eq!(meta.bytes, first.rgb().len() as u64);
+        let SampleData::Frames { times, indices, .. } = meta.data else {
+            panic!("a frame sample");
+        };
+        assert_eq!(times, first.times(), "metadata records the exact times");
+        assert_eq!(times[1], Seconds::new(1, 5));
+        assert!(indices.is_none(), "a grid does not invent source indices");
+        assert!(
+            std::str::from_utf8(&std::fs::read(entry.meta_path()).unwrap())
+                .unwrap()
+                .contains("\"1/5\""),
+            "times are spelled as exact rationals"
+        );
 
         // A hit is the same entry, sampled again.
         let (again, hit) = cache.frames_entry(&spec).unwrap();
         assert_eq!(again, first);
         assert_eq!(hit, entry);
+    }
+
+    /// An index entry records both the times and the source frame numbers, and
+    /// stays offline-readable with them.
+    #[test]
+    fn an_index_sample_survives_a_removed_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = moving_video(dir.path());
+        let cache = SampleCache::new(dir.path().join("cache"));
+        let spec = index_spec(&source, Seconds::from_integer(30), vec![0, 7, 29]);
+        let (first, entry) = cache.frames_entry(&spec).unwrap();
+        let meta: SampleMeta = serde_json::from_slice(&std::fs::read(entry.meta_path()).unwrap())
+            .expect("the entry's metadata");
+        let SampleData::Frames { indices, .. } = meta.data else {
+            panic!("a frame sample");
+        };
+        assert_eq!(indices, Some(vec![0, 7, 29]));
+
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(cache.frames(&spec).unwrap(), first);
+        assert_eq!(entries(&cache), 2, "the hit did not grow the cache");
     }
 
     #[test]
@@ -1373,13 +2059,21 @@ mod tests {
         let source = video(dir.path(), "red");
         let cache = SampleCache::new(dir.path());
         let mut spec = frame_spec(&source);
-        spec.duration = Seconds::from_integer(0);
+        spec.mode = FrameMode::Grid {
+            start: Seconds::from_integer(0),
+            duration: Seconds::from_integer(0),
+            fps: Seconds::from_integer(5),
+        };
         assert!(matches!(
             cache.frames(&spec),
             Err(SampleError::InvalidSpec(_))
         ));
         let mut spec = frame_spec(&source);
-        spec.fps = Seconds::from_integer(0);
+        spec.mode = FrameMode::Grid {
+            start: Seconds::from_integer(0),
+            duration: Seconds::from_integer(1),
+            fps: Seconds::from_integer(0),
+        };
         assert!(matches!(
             cache.frames(&spec),
             Err(SampleError::InvalidSpec(_))
@@ -1393,11 +2087,43 @@ mod tests {
         // A range shorter than one frame would ask ffmpeg for 0 frames, which
         // ffmpeg reads as "unlimited" — refuse it instead.
         let mut spec = frame_spec(&source);
-        spec.duration = Seconds::new(1, 100);
+        spec.mode = FrameMode::Grid {
+            start: Seconds::from_integer(0),
+            duration: Seconds::new(1, 100),
+            fps: Seconds::from_integer(5),
+        };
         assert!(matches!(
             cache.frames(&spec),
             Err(SampleError::InvalidSpec(_))
         ));
+        // An index list that is empty, out of order or names no frame at a
+        // positive rate is not a sample.
+        let cache = SampleCache::new(dir.path().join("indices"));
+        for mode in [
+            FrameMode::Indices {
+                rate: Seconds::from_integer(30),
+                indices: Vec::new(),
+            },
+            FrameMode::Indices {
+                rate: Seconds::from_integer(30),
+                indices: vec![2, 1],
+            },
+            FrameMode::Indices {
+                rate: Seconds::from_integer(0),
+                indices: vec![0],
+            },
+        ] {
+            let spec = FrameSpec {
+                source: source.clone(),
+                mode,
+                width: 4,
+                height: 4,
+            };
+            assert!(matches!(
+                cache.frames(&spec),
+                Err(SampleError::InvalidSpec(_))
+            ));
+        }
     }
 
     #[test]
@@ -1412,6 +2138,7 @@ mod tests {
         assert!(line.contains("scale=32:24"), "{line}");
         assert!(line.contains("rawvideo"), "{line}");
         assert!(line.contains("rgb24"), "{line}");
+        assert!(line.contains("-fps_mode passthrough"), "{line}");
         assert!(
             args.iter().any(|a| a.as_os_str() == source.as_os_str()),
             "a path with a space stays one argument: {args:?}"
@@ -1428,13 +2155,77 @@ mod tests {
     }
 
     #[test]
+    fn index_args_select_source_frames_and_seek_a_half_frame_early() {
+        let spec = index_spec(
+            Path::new("in.mp4"),
+            Seconds::from_integer(30),
+            vec![2, 5, 7],
+        );
+        let args = frame_args(&spec);
+        let line = args_line(&args);
+        assert!(
+            line.contains("select=eq(n\\,0)+eq(n\\,3)+eq(n\\,5)"),
+            "n is relative to the first requested frame: {line}"
+        );
+        assert!(line.contains("scale=32:24"), "{line}");
+        assert!(line.contains("-fps_mode passthrough"), "{line}");
+        // Frame 2 is 0.0666… s; half a frame earlier is exactly 0.05 s.
+        assert!(line.contains("-ss 0.05 -i "), "{line}");
+        assert!(line.contains("-t 0.216667"), "{line}");
+        assert_eq!(args[args.len() - 2], "--");
+        assert_eq!(args.last().map(|a| a.to_str()), Some(Some("-")));
+    }
+
+    #[test]
     fn a_rational_fps_is_spelled_as_a_ratio() {
         assert_eq!(rate_arg(&Seconds::from_integer(30)), "30");
         assert_eq!(rate_arg(&Seconds::new(30_000, 1001)), "30000/1001");
         let mut spec = frame_spec(Path::new("in.mp4"));
-        spec.fps = Seconds::new(30_000, 1001);
+        spec.mode = FrameMode::Grid {
+            start: Seconds::from_integer(0),
+            duration: Seconds::from_integer(1),
+            fps: Seconds::new(30_000, 1001),
+        };
         assert!(args_line(&frame_args(&spec)).contains("fps=30000/1001"));
         assert_eq!(spec.frame_count(), 29);
+    }
+
+    /// The sample API carries exact source seconds, not just a shape. At
+    /// 29.97 the frame spacing is 1001/30000 s — a float would drift.
+    #[test]
+    fn frame_times_are_exact_rational_source_seconds() {
+        let spec = FrameSpec {
+            source: PathBuf::from("in.mp4"),
+            mode: FrameMode::Grid {
+                start: Seconds::new(1, 1),
+                duration: Seconds::new(10, 1),
+                fps: Seconds::new(30_000, 1001),
+            },
+            width: 4,
+            height: 4,
+        };
+        assert_eq!(spec.frame_count(), 299);
+        assert_eq!(spec.time_of(0), Some(Seconds::from_integer(1)));
+        assert_eq!(spec.time_of(1), Some(Seconds::new(31_001, 30_000)));
+        assert_eq!(
+            spec.time_of(29),
+            Some(Seconds::new(29 * 1001 + 30_000, 30_000))
+        );
+        assert_eq!(spec.time_of(299), None, "one past the request");
+
+        // Index requests derive the time from the source rate.
+        let spec = FrameSpec {
+            source: PathBuf::from("in.mp4"),
+            mode: FrameMode::Indices {
+                rate: Seconds::new(30_000, 1001),
+                indices: vec![0, 7, 29],
+            },
+            width: 4,
+            height: 4,
+        };
+        assert_eq!(spec.time_of(0), Some(Seconds::from_integer(0)));
+        assert_eq!(spec.time_of(1), Some(Seconds::new(7 * 1001, 30_000)));
+        assert_eq!(spec.time_of(2), Some(Seconds::new(29 * 1001, 30_000)));
     }
 
     #[test]
@@ -1457,9 +2248,11 @@ mod tests {
     fn counts_are_exact_rationals_not_floats() {
         let spec = FrameSpec {
             source: PathBuf::from("in.mp4"),
-            start: Seconds::from_integer(0),
-            duration: Seconds::new(10, 1),
-            fps: Seconds::new(30_000, 1001),
+            mode: FrameMode::Grid {
+                start: Seconds::from_integer(0),
+                duration: Seconds::new(10, 1),
+                fps: Seconds::new(30_000, 1001),
+            },
             width: 4,
             height: 4,
         };

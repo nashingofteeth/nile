@@ -1046,14 +1046,19 @@ pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> 
         Ok(report) => report,
         Err(e) => return Some(format!("prune failed: {e}")),
     };
+    let analysis = match crate::analysis::prune(app.project.path(), age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
     Some(format!(
-        "{}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; filmstrip: {}; export: {}",
+        "{}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; filmstrip: {}; export: {}; analysis: {}",
         proxy.summary_named(dry_run, "proxy render"),
         audio.summary_named(dry_run, "preview audio"),
         wave.summary_named(dry_run, "waveform"),
         keyframes.summary_named(dry_run, "keyframe list"),
         thumbs.summary_named(dry_run, "thumbnail"),
         filmstrip.summary_named(dry_run, "filmstrip"),
-        export.summary_named(dry_run, "export chunk")
+        export.summary_named(dry_run, "export chunk"),
+        analysis.summary_named(dry_run, "analysis entry")
     ))
 }

@@ -299,6 +299,32 @@ pub mod rational_ser {
         parse_rate(&s).ok_or_else(|| de::Error::custom(format!("invalid rational time {s:?}")))
     }
 
+    /// `Vec<Seconds>` variant for a per-frame time list: every entry is the
+    /// same `"n/d"` spelling, so a sample's times hash and round-trip exactly.
+    pub mod vec {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        use super::super::{Seconds, parse_rate};
+
+        pub fn serialize<S: Serializer>(v: &[Seconds], s: S) -> Result<S::Ok, S::Error> {
+            v.iter()
+                .map(|t| format!("{}/{}", t.numer(), t.denom()))
+                .collect::<Vec<_>>()
+                .serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Seconds>, D::Error> {
+            Vec::<String>::deserialize(d)?
+                .into_iter()
+                .map(|value| {
+                    parse_rate(&value).ok_or_else(|| {
+                        serde::de::Error::custom(format!("invalid rational time {value:?}"))
+                    })
+                })
+                .collect()
+        }
+    }
+
     /// `Option<Seconds>` variant for fields that may be absent.
     pub mod opt {
         use serde::{Deserialize, Deserializer, Serializer, de};

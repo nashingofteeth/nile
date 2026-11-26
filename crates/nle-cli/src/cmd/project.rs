@@ -773,16 +773,18 @@ pub(crate) fn cmd_cache(project_path: &Path, action: &CacheCmd) -> Result<()> {
             let thumbs = crate::thumbnails::prune(project_path, max_age, *dry_run)?;
             let filmstrip = crate::filmstrip::prune(project_path, max_age, *dry_run)?;
             let export = super::schedule::prune_export(project_path, max_age, *dry_run)?;
+            let analysis = crate::analysis::prune(project_path, max_age, *dry_run)?;
             let prefix = if *dry_run { "prune --dry-run" } else { "prune" };
             say!(
-                "{prefix}: {}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; filmstrip: {}; export: {}",
+                "{prefix}: {}; audio: {}; wave: {}; keyframes: {}; thumbs: {}; filmstrip: {}; export: {}; analysis: {}",
                 report.summary_named(*dry_run, "proxy render"),
                 audio.summary_named(*dry_run, "preview audio"),
                 wave.summary_named(*dry_run, "waveform"),
                 keyframes.summary_named(*dry_run, "keyframe list"),
                 thumbs.summary_named(*dry_run, "thumbnail"),
                 filmstrip.summary_named(*dry_run, "filmstrip"),
-                export.summary_named(*dry_run, "export chunk")
+                export.summary_named(*dry_run, "export chunk"),
+                analysis.summary_named(*dry_run, "analysis entry")
             );
             Ok(())
         }

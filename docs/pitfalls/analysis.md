@@ -5,7 +5,7 @@ expectation. The **sampler** lives in `crates/nle-ffmpeg/src/sampling.rs`
 (`FrameSpec`/`AudioSpec`, `SampleCache`, RGB24/PCM); the **sidecar host and
 bundled mean-luma analyzer** live in `crates/nle-cli/src/analysis.rs`, with
 products in `crates/nle-core/src/analysis.rs` (`ProductStore`, `a1-`
-addresses). Frame times/indices, audio analysis and CV checks are still
+addresses). Frame times/indices landed; audio analysis and CV checks are still
 pending. Precedents: `crates/nle-cli/src/proxy.rs` (`RENDER_VERSION`,
 tmp+rename, `prune_at`), `crates/nle-cli/src/filmstrip.rs`/`thumbnails.rs`
 (`asset.path` + size + mtime key; filmstrip also the source span and
@@ -14,9 +14,10 @@ dimensions) and the transcript store (`t1-` addresses).
 ## Purpose and where it lands
 
 - **Sampling decodes bytes; it does not know timelines.** The request is about
-  one media file: a source window on the asset's own clock plus shape/rate
-  parameters. The caller maps timeline positions with `Clip::source_at` /
-  `TimeMap` first, exactly as proxy segments are built.
+  one media file: a source window (a grid) or exact source indices, on the
+  asset's own clock, plus shape/rate parameters. The caller maps timeline
+  positions with `Clip::source_at` / `TimeMap` first, exactly as proxy
+  segments are built.
 - `crates/nle-ffmpeg/src/sampling.rs` owns the argv builder, the packed bytes
   and the cache entry; it stays free of `.nile/` paths and project state.
   `SampleCache::new(root)` takes a caller directory; `nile analysis analyze`
@@ -37,19 +38,30 @@ Packed is one read, exact bytes.
 
 - **Frames: RGB24**, row-major, tightly packed (`width × height × 3` per
   frame, no row padding), frames concatenated in presentation order.
-- **The frames metadata has shape, not the window.** `<key>.json` is
+- **The frames metadata records shape and exact times.** `<key>.json` is
   `version`, `params`, `source`, `source_arg`, `source_size`,
   `source_mtime_secs`, `source_mtime_nanos`, `key`, `bytes`, plus the
-  flattened `kind: "frames"`, `width`, `height` and `frames`. `params` is a
-  16-hex fingerprint, not the spec; `start`/`duration`/`fps` are carried by
-  the request only. **`meta` is authoritative for shape** (`frames`, `width`,
-  `height`); the request is authoritative for time.
-- **Identity is the grid.** The live sampler runs `fps=<rate>` from `start`
-  for `duration` and scales to the geometry, so frame `i` is
-  `start + i/rate` by construction. A range past the media end packs fewer
-  frames, so `frames <= floor(duration × fps)`; `frames == 0` is an error,
-  never an empty success. Per-frame `times` and exact index selection
-  (`select='eq(n,…)'`) are pending; a reader must not invent either.
+  flattened `kind: "frames"`, `width`, `height`, `frames`, `times` and (for an
+  index request) `indices`. `params` is a 16-hex fingerprint, not the spec;
+  the window is carried by the request only. **`meta` is authoritative for
+  shape** (`frames`, `width`, `height`); the request is authoritative for
+  time, and a recorded time list that disagrees with it is a miss.
+- **Identity is mode-defined.** A **grid** runs `fps=<rate>` from `start` for
+  `duration` and scales to the geometry, so frame `i` is `start + i/rate` by
+  construction; a range past the media end packs fewer frames
+  (`frames <= floor(duration × fps)`), and `frames == 0` is an error, never an
+  empty success. An **index** request names exact source frames at the source
+  `rate`: frame `i` is source frame `indices[i]`, at `indices[i] / rate`, and
+  `indices` is strictly increasing so payload order is request order. The
+  sampler seeks half a frame before the first index and uses
+  `select=eq(n,…)` **before** the scale, so the picture is the source's own
+  frame, not a resample. An index request names at most `MAX_INDEX_FRAMES`
+  (96) frames: `select=eq(n,…)+…` is one left-deep expression and ffmpeg's
+  parser stops at about 100 terms, so a larger request is refused before
+  ffmpeg spawns — sample a grid for a longer range. If the media ends before
+  the last requested index, the sampler refuses the short sample
+  (`ShortIndex`) and writes no entry; it never caches a prefix.
+  `FrameSample::times()`/`time(i)`/`indices()` expose both.
 - **Audio: PCM s16le**, interleaved, no WAV/container header. The `.json` is
   the same envelope with `kind: "audio"`, `sample_rate`, `channels` and
   `samples` (per-channel frames actually packed, at most
@@ -57,15 +69,18 @@ Packed is one read, exact bytes.
   `samples × channels × 2`.
 - **The request must agree with the payload.** Recompute the length from
   `meta` and require `bytes == raw.len()`; require `width`/`height` (or
-  `sample_rate`/`channels`) to equal the request, and `frames`/`samples` not
-  to exceed the request's count. A disagreeing pair is corrupt input, not a
-  shorter sample.
-- **Validation is positivity plus the host's sample budget.** `FrameSpec` /
-  `AudioSpec` reject negative/zero ranges, zero fps/rate/channels and zero
-  dimensions, and the sampler buffers the whole sample in memory.
-  `nile analysis analyze` checks `frames × width × height × 3` against a
-  256 MiB budget *before* sampling; the sampler still has no cap of its own,
-  so any other caller must pick a range that fits memory.
+  `sample_rate`/`channels`) to equal the request, `frames`/`samples` not to
+  exceed the request's count, and `times`/`indices` to be exactly the
+  request's. An index entry that packs fewer frames than its `indices` names
+  is a miss: it is re-sampled, and the sampler then refuses the short sample.
+  A disagreeing pair is corrupt input, not a shorter sample.
+- **Validation is positivity plus the sampler's caps.** `FrameSpec` /
+  `AudioSpec` reject negative/zero ranges, zero fps/rate/channels, zero
+  dimensions, empty/out-of-order indices, an index request over
+  `MAX_INDEX_FRAMES` (96), and any request over `MAX_SAMPLE_FRAMES`
+  (100 000) or `MAX_SAMPLE_BYTES` (256 MiB) — **before** the source is
+  stat'ed or ffmpeg spawns. `nile analysis analyze` keeps its own budget check
+  for a CLI-level message; it uses the same byte limit.
 
 ## Cache
 
@@ -76,11 +91,13 @@ Packed is one read, exact bytes.
   (samples are disposable, `analysis/` is state).
 - **Key = request + source signature.** `SAMPLE_VERSION` in
   `nle-ffmpeg::sampling` (same discipline as `RENDER_VERSION`: bump when the
-  *meaning* of a parameter changes), the kind, the exact rational window and
-  geometry/rate — hashed to the 16-hex `params` — plus the canonical source
-  path and the source `size` + `mtime` secs/nanos. The full key is the
-  16-hex `key` that names the entry. Both are opaque fingerprints, not a
-  readable spec.
+  *meaning* of a parameter changes; v2 introduced per-frame times and exact
+  indices), the kind, the mode tag and its exact rational window/rate and
+  indices, and the geometry — hashed to the 16-hex `params` — plus the
+  canonical source path and the source `size` + `mtime` secs/nanos. The full
+  key is the 16-hex `key` that names the entry. Both are opaque fingerprints,
+  not a readable spec. A grid and an index request never share an entry: the
+  mode tag is part of `params`.
 - Metadata keeps both source spellings: `source` (canonical when the file
   existed) and `source_arg` (lexical absolute), so a symlinked — and a
   removed — path still resolves offline.
@@ -96,16 +113,19 @@ Packed is one read, exact bytes.
 - **A hit is only served when it is complete:** metadata parses, `version`,
   `params` and `key` match, the source spelling matches, `meta.bytes` equals
   the raw length, and `frames`/`samples`, geometry and rate match the spec
-  with a recomputed length equal to the raw length. Anything else is a miss
-  and an atomic overwrite. A hit spawns nothing and does not touch mtime, so
+  with a recomputed length equal to the raw length; the recorded `times` and
+  `indices` must equal what the spec derives. Anything else is a miss and an
+  atomic overwrite. A hit spawns nothing and does not touch mtime, so
   `cache prune --days` keeps ageing it.
-- Misses: replaced source (mtime/size), changed params/kind, a
+- Misses: replaced source (mtime/size), changed params/kind/mode, a
   `SAMPLE_VERSION` bump. On a miss the caller samples, stores, and serves.
-- **Pending:** `nile cache prune` will gain an `analysis` line through
-  `proxy::prune_at`: add `.raw` to `is_entry_name` (it already knows
-  `.json`), and the tmp shape parses as `<key>.tmp-<pid>-<seq>.raw`. Until
-  it lands, only the host's `StageDir` removes its own run. Pruning will be
-  explicit; a pruned sample re-extracts. **`analysis/` is never swept.**
+- **Prune:** `nile cache prune` / `:cache prune` adds an `analysis` line —
+  `proxy::prune_at` over `cache/analysis` (`<key>.raw`, `<key>.json` and a
+  crashed write's `<key>.tmp-<pid>-<seq>.<ext>` are all entry names) plus
+  `analysis::prune_staging` over `cache/analysis/staging/<pid>-<seq>/`
+  directories, which only the killed-host leftover needs. **`analysis/` is
+  never swept**: products and transcripts are state, and pruning a sample
+  re-extracts it.
 
 ## Sidecar contract
 
@@ -118,13 +138,15 @@ Packed bytes never travel on the wire — only paths.
 - **Handshake.** Host: `{"id":1,"method":"hello","protocol":1}`; analyzer:
   `{"id":1,"ok":{"protocol":1}}`. A mismatch refuses to run.
 - **Request.** `analyze` carries `input` (`kind`, `sample` — the cache key —
-  plus the absolute `data` and `meta` paths), `request` (the full window:
-  `start`, `duration` and `fps`/`width`/`height`, or `sample_rate`/
-  `channels`), `stage` (a host-made temp directory under
-  `cache/analysis/`), and `limits`. `meta` is authoritative for shape, the
-  request is the window, and the analyzer cross-checks the two. Ids are
-  positive, unique and increasing per child; every path is absolute (the
-  child's cwd is not the client's) and the analyzer refuses a relative one.
+  plus the absolute `data` and `meta` paths), `request` (tagged by `mode`: a
+  grid's `start`/`duration`/`fps`, or an index request's `rate`/`indices`, plus
+  `width`/`height`; an audio window would use `sample_rate`/`channels`),
+  `stage` (a host-made temp directory under `cache/analysis/`), and `limits`.
+  A mode may not carry the other mode's fields. `meta` is authoritative for
+  shape, the request is the window, and the analyzer cross-checks the two —
+  including `times` and `indices`. Ids are positive, unique and increasing per
+  child; every path is absolute (the child's cwd is not the client's) and the
+  analyzer refuses a relative one.
 - **Response.** Exactly one line per request, same `id`, `ok` or `error`
   (codes `bad_request`, `unsupported`, `io`, `corrupt_input`, `internal`).
   `ok` reports the product `hash` and the file name inside `stage`; the host
@@ -138,6 +160,8 @@ Packed bytes never travel on the wire — only paths.
  "request":{"mode":"grid","start":"0/1","duration":"1/2","fps":"2/1",
  "width":32,"height":24},
  "stage":"/p/.nile/nile/cache/analysis/staging/1234-7"}
+{"id":3,"method":"analyze", … "request":{"mode":"indices","rate":"30000/1001",
+ "indices":[0,7,29],"width":16,"height":12}, …}
 {"id":2,"ok":{"hash":"a1-…","stage":"product.json"}}
 {"id":2,"error":{"code":"bad_request","message":"relative path"}}
 ```
@@ -212,10 +236,12 @@ Packed bytes never travel on the wire — only paths.
   path, an escaping `stage` name or an over-cap request is refused with a
   typed error before any process spawns; the id is echoed when it was
   parseable.
-- **Caps are pending, so the host must bound the request.** Until the
-  sampler takes byte/frame limits, a caller can ask for a geometry that
-  exhausts memory; the sidecar host validates the window and geometry
-  against its own budget before it writes the request.
+- **The sampler bounds every request.** `MAX_SAMPLE_BYTES` (256 MiB) and
+  `MAX_SAMPLE_FRAMES` (100 000) are checked in `FrameSpec::validate` /
+  `AudioSpec::validate` before the source is stat'ed or ffmpeg spawns; the
+  refusal (`SampleError::TooLarge` / `TooManyFrames`) names the count and the
+  limit. The sidecar host keeps its own budget line for a CLI message, using
+  the same byte constant.
 - Missing source: `SampleError::MissingFile` (or the offline cache lookup) —
   ffmpeg is not spawned to discover it.
 - ffmpeg failure: `SampleError::Ffmpeg { status, message }` with the tail from
@@ -235,36 +261,45 @@ Packed bytes never travel on the wire — only paths.
 
 ## Test plan
 
-Live in `sampling.rs` (19 tests):
+Live in `sampling.rs`:
 - **Frame bytes:** a generated testsrc sampled at a grid → payload is exactly
   `frames × width × height × 3`, packed rows, expected RGB and dimensions.
+- **Times at 29.97:** grid times are `start + i/(30000/1001)` exactly; index
+  times are `index/(30000/1001)`.
+- **Exact indices:** a moving test pattern's index sample compares byte-for-byte
+  with the same source frames from a 30 fps grid; a case whose first index is
+  non-zero (30 and 29.97 fps) guards the half-frame-early seek.
+- **Index caps:** an index request over `MAX_INDEX_FRAMES` is refused before
+  any spawn; a request whose last index is past the media end returns
+  `ShortIndex`, writes no entry, and leaves a later valid request working.
+- **Grid vs index keys:** the two modes produce different `params`/`key` and
+  two entries, never a shared one.
+- **Caps:** an over-byte or over-frame request to a missing source is refused
+  before any spawn (`TooLarge`/`TooManyFrames`, no cache directory).
 - **Audio bytes:** a generated tone at 48 kHz → the requested sample count,
-  `len == samples × channels × 2`, and a non-zero peak.
+  `len == samples × channels × 2`, and a non-zero peak; an over-cap audio
+  request is refused.
 - **Cache hit after source removal:** sample, delete the media, sample again
-  → identical bytes, no ffmpeg spawn; the offline lookup picks the newest
-  generation when two exist.
+  → identical bytes/times/indices, no ffmpeg spawn; the offline lookup picks
+  the newest generation when two exist.
 - **Invalidation:** a spec/source change produces a new key; a truncated raw
   turns a hit into a miss that re-extracts.
-- **argv guard:** no shell, `--` before the positional output, and the
-  `rawvideo`/`s16le` flags.
+- **argv guard:** no shell, `--` before the positional output, the
+  `rawvideo`/`s16le` flags, and `select=eq(n\,…)` + a half-frame-early seek for
+  index requests.
 
 Landed with the sidecar/analyzer:
 - The hidden mean-luma analyzer → `a1-…` product via `stage`, with address
-  re-hash and sample/source cross-checks; `behaviour.rs` also removes the
+  re-hash and sample/source/times cross-checks; `behaviour.rs` also removes the
   source and re-runs to prove the offline sample hit.
 - A malformed line, oversized line, relative path and escaping stage name are
-  typed errors; `hostile.rs` drives the child with garbage and asserts it
+  typed errors; a grid request carrying `rate`/`indices` (or the reverse) is a
+  `bad_request`; `hostile.rs` drives the child with garbage and asserts it
   never panics.
 - **Product staleness:** `ProductStore` tests cover `Fresh`/`Stale`/`Offline`
   and an incompatible schema/sampler bump; a pruned sample leaves the product
   readable because the source signature is recorded, not recomputed.
-
-Pending:
-- `times`/`indices` and exact source-frame selection agree with the source
-  grid; a request/meta disagreement is refused.
-- **Prune:** `cache prune` reports the analysis line, removes `.raw`/`.json`
-  and stale staging dirs, leaves `analysis/` alone, and a pruned sample
-  re-extracts. The host's `StageDir` removes its own run; a killed host can
-  still leave `cache/analysis/staging/<pid>-<seq>/` for that sweep.
-- **Caps:** the sampler itself still buffers without a byte frame cap; only
-  the CLI host's budget refuses an oversized request.
+- **Prune:** `analysis::prune` removes old `.raw`/`.json`/tmp files and stale
+  `staging/<pid>-<seq>/` directories (dry run included), leaves a young entry,
+  and never touches `analysis/products/`; `cache prune` prints the `analysis`
+  line. A pruned sample re-extracts.

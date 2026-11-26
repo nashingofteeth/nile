@@ -10,7 +10,7 @@ use nle_core::analysis::{
 };
 use nle_core::time::checked_sub;
 use nle_core::{Project, Seconds, parse_time};
-use nle_ffmpeg::sampling::{FrameSpec, SampleCache};
+use nle_ffmpeg::sampling::{FrameMode, FrameSpec, SampleCache};
 
 use crate::{analysis, parse_fps_arg, say};
 
@@ -98,9 +98,11 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
     }
     let spec = FrameSpec {
         source: media.path.clone(),
-        start,
-        duration,
-        fps,
+        mode: FrameMode::Grid {
+            start,
+            duration,
+            fps,
+        },
         width,
         height,
     };
