@@ -29,18 +29,20 @@ use std::time::{Duration, SystemTime};
 
 use nle_core::Seconds;
 use nle_core::analysis::{
-    AnalysisProduct, AnalyzerInfo, BoxRect, DetectedBox, FrameBoxes, ProductResult, ProductSample,
-    ProductStore, SampleGrid, SourceSignature, SubjectKey, sort_detected_boxes,
+    AnalysisProduct, AnalyzerInfo, AudioWindowLevel, BoxRect, DetectedBox, FrameBoxes,
+    ProductResult, ProductSample, ProductStore, SampleGrid, SourceSignature, SubjectKey,
+    sort_detected_boxes,
 };
 use nle_ffmpeg::sampling::{
-    FrameMode, FrameSpec, MAX_SAMPLE_BYTES, SAMPLE_VERSION, SampleData, SampleEntry, SampleMeta,
+    AudioSpec, FrameMode, FrameSpec, MAX_SAMPLE_BYTES, SAMPLE_VERSION, SampleData, SampleEntry,
+    SampleMeta, samples_in,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 /// The protocol version both sides must agree on.
-const PROTOCOL: u32 = 2;
+const PROTOCOL: u32 = 3;
 
 /// One control line may not exceed this many bytes. A longer line is fatal —
 /// never truncated, because half a JSON object is not a smaller request.
@@ -71,6 +73,10 @@ const MEAN_LUMA_VERSION: u32 = 1;
 const SUBJECT_NAME: &str = "color-boxes";
 const SUBJECT_VERSION: u32 = 1;
 
+/// The bundled level analyzer's product identity.
+const AUDIO_NAME: &str = "audio-levels";
+const AUDIO_VERSION: u32 = 1;
+
 /// What one analyze call asks the child to compute. The wire tag is the same
 /// name the hello advertises in `tasks`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +86,10 @@ pub(crate) enum Task {
         labels: Vec<String>,
         floor_milli: u32,
     },
+    /// RMS/peak over windows of `window_samples` per channel.
+    AudioLevels {
+        window_samples: u64,
+    },
 }
 
 impl Task {
@@ -87,6 +97,7 @@ impl Task {
         match self {
             Task::MeanLuma => "mean_luma",
             Task::SubjectBoxes { .. } => "subject_boxes",
+            Task::AudioLevels { .. } => "audio_levels",
         }
     }
 
@@ -101,6 +112,28 @@ impl Task {
                 name: SUBJECT_NAME.to_string(),
                 version: SUBJECT_VERSION,
             },
+            Task::AudioLevels { .. } => AnalyzerInfo {
+                name: AUDIO_NAME.to_string(),
+                version: AUDIO_VERSION,
+            },
+        }
+    }
+}
+
+/// Which packed sample a run analyzes. One enum keeps the frame and audio
+/// paths from drifting: the wire request, the input kind, and the adoption
+/// cross-check all dispatch on the same value.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SampleRequest<'a> {
+    Frames(&'a FrameSpec),
+    Audio(&'a AudioSpec),
+}
+
+impl SampleRequest<'_> {
+    fn kind(self) -> &'static str {
+        match self {
+            SampleRequest::Frames(_) => "frames",
+            SampleRequest::Audio(_) => "audio",
         }
     }
 }
@@ -365,7 +398,7 @@ impl Drop for StageDir {
 /// Sample the window, run the analyzer on the packed sample, and adopt the
 /// resulting product. Returns the `a1-…` address.
 pub(crate) fn run_sidecar(
-    spec: &FrameSpec,
+    request: SampleRequest<'_>,
     entry: &SampleEntry,
     stage: &StageDir,
     store: &ProductStore,
@@ -395,7 +428,7 @@ pub(crate) fn run_sidecar(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let outcome = converse(&mut child, spec, entry, stage.path(), store, task);
+    let outcome = converse(&mut child, request, entry, stage.path(), store, task);
     if outcome.is_err() {
         // A protocol failure can leave the child waiting for another line.
         let _ = child.kill();
@@ -421,7 +454,7 @@ pub(crate) fn run_sidecar(
 
 fn converse(
     child: &mut Child,
-    spec: &FrameSpec,
+    request: SampleRequest<'_>,
     entry: &SampleEntry,
     stage: &Path,
     store: &ProductStore,
@@ -469,19 +502,19 @@ fn converse(
     let data = wire_path(entry.data_path())?;
     let meta = wire_path(entry.meta_path())?;
     let stage_wire = wire_path(stage)?;
-    let request = wire_request(spec);
+    let request_wire = wire_request(request);
     write_control(
         &mut stdin,
         &Analyze {
             id: 2,
             method: "analyze",
             input: InputRef {
-                kind: "frames",
+                kind: request.kind(),
                 sample: entry.key(),
                 data: &data,
                 meta: &meta,
             },
-            request,
+            request: request_wire,
             task: wire_task(task),
             stage: &stage_wire,
             limits: Limits {
@@ -490,7 +523,7 @@ fn converse(
         },
     )?;
     let ok: AnalyzeOk = expect_ok(read_response(&mut stdout)?, 2)?;
-    let hash = adopt_product(store, entry, stage, &ok, spec, task)?;
+    let hash = adopt_product(store, entry, stage, &ok, request, task)?;
 
     write_control(
         &mut stdin,
@@ -514,7 +547,7 @@ fn adopt_product(
     entry: &SampleEntry,
     stage: &Path,
     ok: &AnalyzeOk,
-    spec: &FrameSpec,
+    request: SampleRequest<'_>,
     task: &Task,
 ) -> Result<String, SidecarError> {
     if !is_product_hash(&ok.hash) {
@@ -584,7 +617,7 @@ fn adopt_product(
     let meta_bytes = std::fs::read(entry.meta_path())?;
     let sample_meta: SampleMeta = serde_json::from_slice(&meta_bytes)
         .map_err(|error| SidecarError::Product(format!("sample metadata: {error}")))?;
-    require_result_shape(&product, &sample_meta.data, spec, task)?;
+    require_result_shape(&product, &sample_meta.data, request, task)?;
     let recorded = &product.sample.source;
     if recorded.source != sample_meta.source
         || recorded.source_arg != sample_meta.source_arg
@@ -602,11 +635,23 @@ fn adopt_product(
         .map_err(|error| SidecarError::Product(error.to_string()))
 }
 
-/// Metadata, not the product, says how many frames were packed. A result with
-/// a different length or a grid that disagrees with the request is a
-/// truncated/padded analysis, never a "shorter sample": refuse it before the
-/// store sees it.
+/// Metadata, not the product, says how many frames/samples were packed. A
+/// result with a different length, a grid that disagrees with the request, or
+/// audio windows that do not cover the packed payload is a truncated/padded
+/// analysis, never a "shorter sample": refuse it before the store sees it.
 fn require_result_shape(
+    product: &AnalysisProduct,
+    data: &SampleData,
+    request: SampleRequest<'_>,
+    task: &Task,
+) -> Result<(), SidecarError> {
+    match request {
+        SampleRequest::Frames(spec) => require_frame_result(product, data, spec, task),
+        SampleRequest::Audio(spec) => require_audio_result(product, data, spec, task),
+    }
+}
+
+fn require_frame_result(
     product: &AnalysisProduct,
     data: &SampleData,
     spec: &FrameSpec,
@@ -683,18 +728,102 @@ fn require_result_shape(
                 }
             }
         }
-        (Task::MeanLuma, other) => {
+        (_, other) => {
             return Err(SidecarError::Product(format!(
-                "the analyzer returned {} for mean luma",
-                product_kind(other)
+                "the analyzer returned {} for {}",
+                product_kind(other),
+                task.wire_name()
             )));
         }
-        (Task::SubjectBoxes { .. }, other) => {
+    }
+    Ok(())
+}
+
+/// Cross-check the audio product against the packed sample metadata: rate,
+/// channels, window length, and that its windows tile the whole payload. The
+/// sample's own count is authoritative, never the product's claim.
+fn require_audio_result(
+    product: &AnalysisProduct,
+    data: &SampleData,
+    spec: &AudioSpec,
+    task: &Task,
+) -> Result<(), SidecarError> {
+    let SampleData::Audio {
+        sample_rate,
+        channels,
+        samples,
+    } = data
+    else {
+        return Err(SidecarError::Product(
+            "the analyzer needs an audio sample".to_string(),
+        ));
+    };
+    let (
+        Task::AudioLevels {
+            window_samples: requested_window,
+        },
+        ProductResult::AudioLevels {
+            start,
+            sample_rate: product_rate,
+            channels: product_channels,
+            window_samples: product_window,
+            windows,
+        },
+    ) = (task, &product.result)
+    else {
+        return Err(SidecarError::Product(format!(
+            "the analyzer returned {} for {}",
+            product_kind(&product.result),
+            task.wire_name()
+        )));
+    };
+    if *product_rate != *sample_rate || *product_channels != *channels {
+        return Err(SidecarError::Product(format!(
+            "the product is {product_rate} Hz × {product_channels} ch, the sample is {sample_rate} Hz × {channels} ch"
+        )));
+    }
+    if *start != spec.start {
+        return Err(SidecarError::Product(
+            "the product's window starts at a different source time".to_string(),
+        ));
+    }
+    if *product_window != *requested_window {
+        return Err(SidecarError::Product(format!(
+            "the product uses {product_window}-sample windows, the request names {requested_window}"
+        )));
+    }
+    if windows.is_empty() {
+        return Err(SidecarError::Product(
+            "the product has no audio windows".to_string(),
+        ));
+    }
+    let mut covered = 0_u64;
+    for (position, window) in windows.iter().enumerate() {
+        if window.start != covered {
             return Err(SidecarError::Product(format!(
-                "the analyzer returned {} for subject boxes",
-                product_kind(other)
+                "audio window {position} starts at sample {} but the previous one ended at {covered}",
+                window.start
             )));
         }
+        if window.samples == 0 || window.samples > *product_window {
+            return Err(SidecarError::Product(format!(
+                "audio window {position} covers {} samples (window length {product_window})",
+                window.samples
+            )));
+        }
+        if position + 1 != windows.len() && window.samples != *product_window {
+            return Err(SidecarError::Product(format!(
+                "audio window {position} is short but not last"
+            )));
+        }
+        covered = covered.checked_add(window.samples).ok_or_else(|| {
+            SidecarError::Product("the audio window coverage overflows".to_string())
+        })?;
+    }
+    if covered != *samples {
+        return Err(SidecarError::Product(format!(
+            "the product covers {covered} samples but the sample packed {samples}"
+        )));
     }
     Ok(())
 }
@@ -703,6 +832,7 @@ fn product_kind(result: &ProductResult) -> &'static str {
     match result {
         ProductResult::MeanLuma { .. } => "mean_luma",
         ProductResult::SubjectBoxes { .. } => "subject_boxes",
+        ProductResult::AudioLevels { .. } => "audio_levels",
     }
 }
 
@@ -793,7 +923,7 @@ pub(crate) fn run_analyzer() -> Result<(), SidecarError> {
                     &serde_json::json!({
                         "protocol": PROTOCOL,
                         "analyzer": { "name": BUILTIN_NAME, "version": BUILTIN_VERSION },
-                        "tasks": ["mean_luma", "subject_boxes"],
+                        "tasks": ["mean_luma", "subject_boxes", "audio_levels"],
                     }),
                 )?;
                 hello_seen = true;
@@ -951,7 +1081,7 @@ struct AnalyzeRequest {
     #[allow(dead_code)]
     method: String,
     input: InputRefOwned,
-    request: FrameRequestIn,
+    request: RequestIn,
     task: TaskIn,
     stage: String,
     limits: LimitsIn,
@@ -965,20 +1095,30 @@ struct TaskIn {
     labels: Option<Vec<String>>,
     #[serde(default)]
     floor_milli: Option<u32>,
+    #[serde(default)]
+    window_samples: Option<u64>,
 }
 
 impl TaskIn {
     fn parse(&self) -> Result<Task, SidecarError> {
         match self.kind.as_str() {
             "mean_luma" => {
-                if self.labels.is_some() || self.floor_milli.is_some() {
+                if self.labels.is_some()
+                    || self.floor_milli.is_some()
+                    || self.window_samples.is_some()
+                {
                     return Err(SidecarError::BadRequest(
-                        "mean_luma does not take labels/floor_milli".to_string(),
+                        "mean_luma does not take labels/floor_milli/window_samples".to_string(),
                     ));
                 }
                 Ok(Task::MeanLuma)
             }
             "subject_boxes" => {
+                if self.window_samples.is_some() {
+                    return Err(SidecarError::BadRequest(
+                        "subject_boxes does not take window_samples".to_string(),
+                    ));
+                }
                 let mut labels = self.labels.clone().ok_or_else(|| {
                     SidecarError::BadRequest("subject_boxes needs labels".to_string())
                 })?;
@@ -1001,8 +1141,24 @@ impl TaskIn {
                     floor_milli,
                 })
             }
+            "audio_levels" => {
+                if self.labels.is_some() || self.floor_milli.is_some() {
+                    return Err(SidecarError::BadRequest(
+                        "audio_levels does not take labels/floor_milli".to_string(),
+                    ));
+                }
+                let window_samples = self.window_samples.ok_or_else(|| {
+                    SidecarError::BadRequest("audio_levels needs window_samples".to_string())
+                })?;
+                if window_samples == 0 {
+                    return Err(SidecarError::BadRequest(
+                        "audio_levels needs a positive window_samples".to_string(),
+                    ));
+                }
+                Ok(Task::AudioLevels { window_samples })
+            }
             other => Err(SidecarError::Unsupported(format!(
-                "task {other:?} (this analyzer knows mean_luma and subject_boxes)"
+                "task {other:?} (this analyzer knows mean_luma, subject_boxes and audio_levels)"
             ))),
         }
     }
@@ -1018,11 +1174,11 @@ struct InputRefOwned {
 }
 
 /// The wire DTO: stringly and permissive so the tag can be read first. The
-/// typed [`FrameRequest`] is what the rest of the analyzer sees, so a mode
-/// cannot carry fields it does not use.
+/// typed [`Request`] is what the rest of the analyzer sees, so a mode cannot
+/// carry fields it does not use.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FrameRequestIn {
+struct RequestIn {
     mode: String,
     #[serde(default)]
     start: Option<String>,
@@ -1034,14 +1190,44 @@ struct FrameRequestIn {
     rate: Option<String>,
     #[serde(default)]
     indices: Option<Vec<u64>>,
-    width: u32,
-    height: u32,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    sample_rate: Option<u32>,
+    #[serde(default)]
+    channels: Option<u16>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LimitsIn {
     max_product_bytes: u64,
+}
+
+#[derive(Debug)]
+enum Request {
+    Frames(FrameRequest),
+    Audio(AudioRequest),
+}
+
+impl Request {
+    fn parse(input_kind: &str, request: &RequestIn) -> Result<Self, SidecarError> {
+        match (input_kind, request.mode.as_str()) {
+            ("frames", "grid" | "indices") => Ok(Request::Frames(FrameRequest::parse(request)?)),
+            ("audio", "audio") => Ok(Request::Audio(AudioRequest::parse(request)?)),
+            ("frames", mode) => Err(SidecarError::BadRequest(format!(
+                "a frame sample cannot carry mode {mode:?}"
+            ))),
+            ("audio", mode) => Err(SidecarError::BadRequest(format!(
+                "an audio sample cannot carry mode {mode:?}"
+            ))),
+            (kind, _) => Err(SidecarError::Unsupported(format!(
+                "sample kind {kind:?} (this analyzer reads frames or audio)"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1052,7 +1238,12 @@ struct FrameRequest {
 }
 
 impl FrameRequest {
-    fn parse(request: &FrameRequestIn) -> Result<Self, SidecarError> {
+    fn parse(request: &RequestIn) -> Result<Self, SidecarError> {
+        if request.sample_rate.is_some() || request.channels.is_some() {
+            return Err(SidecarError::BadRequest(
+                "a frame request must not carry sample_rate/channels".to_string(),
+            ));
+        }
         let mode = match request.mode.as_str() {
             "grid" => {
                 if request.rate.is_some() || request.indices.is_some() {
@@ -1092,16 +1283,102 @@ impl FrameRequest {
                 )));
             }
         };
-        if request.width == 0 || request.height == 0 {
+        let width = request.width.ok_or_else(|| {
+            SidecarError::BadRequest(
+                "width and height are required for a frame request".to_string(),
+            )
+        })?;
+        let height = request.height.ok_or_else(|| {
+            SidecarError::BadRequest(
+                "width and height are required for a frame request".to_string(),
+            )
+        })?;
+        if width == 0 || height == 0 {
             return Err(SidecarError::BadRequest(
                 "width and height must be non-zero".to_string(),
             ));
         }
         Ok(Self {
             mode,
-            width: request.width,
-            height: request.height,
+            width,
+            height,
         })
+    }
+}
+
+/// The audio request: the source window and the packed rate/channels. The
+/// analyzer cross-checks all four against the sample metadata; window length
+/// is the task's, because it changes the result, not the payload.
+#[derive(Debug)]
+struct AudioRequest {
+    start: Seconds,
+    duration: Seconds,
+    sample_rate: u32,
+    channels: u16,
+}
+
+impl AudioRequest {
+    fn parse(request: &RequestIn) -> Result<Self, SidecarError> {
+        if request.fps.is_some()
+            || request.rate.is_some()
+            || request.indices.is_some()
+            || request.width.is_some()
+            || request.height.is_some()
+        {
+            return Err(SidecarError::BadRequest(
+                "an audio request carries start/duration/sample_rate/channels only".to_string(),
+            ));
+        }
+        let start = parse_rational(required(&request.start, "start")?, "start")?;
+        let duration = parse_rational(required(&request.duration, "duration")?, "duration")?;
+        let sample_rate = request
+            .sample_rate
+            .ok_or_else(|| SidecarError::BadRequest("sample_rate is required".to_string()))?;
+        let channels = request
+            .channels
+            .ok_or_else(|| SidecarError::BadRequest("channels is required".to_string()))?;
+        let parsed = Self {
+            start,
+            duration,
+            sample_rate,
+            channels,
+        };
+        parsed.validate()?;
+        Ok(parsed)
+    }
+
+    fn validate(&self) -> Result<(), SidecarError> {
+        if self.start < Seconds::from_integer(0) {
+            return Err(SidecarError::BadRequest(
+                "start must not be negative".to_string(),
+            ));
+        }
+        if self.duration <= Seconds::from_integer(0) {
+            return Err(SidecarError::BadRequest(
+                "duration must be positive".to_string(),
+            ));
+        }
+        if self.sample_rate == 0 {
+            return Err(SidecarError::BadRequest(
+                "sample_rate must be non-zero".to_string(),
+            ));
+        }
+        if self.channels == 0 {
+            return Err(SidecarError::BadRequest(
+                "channels must be non-zero".to_string(),
+            ));
+        }
+        if self.sample_count() == 0 {
+            return Err(SidecarError::BadRequest(
+                "the window is shorter than one audio sample".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The sample count the request allows, from the shared exact floor.
+    fn sample_count(&self) -> u64 {
+        samples_in(self.duration, self.sample_rate)
     }
 }
 
@@ -1132,12 +1409,6 @@ fn parse_rational(value: &str, what: &str) -> Result<Seconds, SidecarError> {
 }
 
 fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarError> {
-    if request.input.kind != "frames" {
-        return Err(SidecarError::Unsupported(format!(
-            "sample kind {:?} (mean luma reads frames)",
-            request.input.kind
-        )));
-    }
     if !is_hex16(&request.input.sample) {
         return Err(SidecarError::BadRequest(
             "sample is not a 16-hex key".to_string(),
@@ -1146,7 +1417,7 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
     let meta_path = require_absolute(&request.input.meta, "meta")?;
     let data_path = require_absolute(&request.input.data, "data")?;
     let stage = require_absolute(&request.stage, "stage")?;
-    let requested = FrameRequest::parse(&request.request)?;
+    let requested = Request::parse(&request.input.kind, &request.request)?;
     let task = request.task.parse()?;
 
     // Metadata first: it is authoritative for shape, the request is the
@@ -1166,6 +1437,64 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
             meta.key, request.input.sample
         )));
     }
+    if meta.bytes > MAX_SAMPLE_BYTES {
+        return Err(SidecarError::CorruptInput(format!(
+            "the sample is {} bytes (limit {MAX_SAMPLE_BYTES})",
+            meta.bytes
+        )));
+    }
+
+    let result = match &requested {
+        Request::Frames(frames) => frame_result(&meta, &data_path, frames, &task)?,
+        Request::Audio(audio) => audio_result(&meta, &data_path, audio, &task)?,
+    };
+    let product = AnalysisProduct {
+        version: nle_core::analysis::PRODUCT_VERSION,
+        analyzer: task.builtin_analyzer(),
+        sample: ProductSample {
+            version: meta.version,
+            key: meta.key.clone(),
+            params: meta.params.clone(),
+            source: SourceSignature {
+                source: meta.source.clone(),
+                source_arg: meta.source_arg.clone(),
+                source_size: meta.source_size,
+                source_mtime_secs: meta.source_mtime_secs,
+                source_mtime_nanos: meta.source_mtime_nanos,
+            },
+        },
+        result,
+    };
+    product
+        .validate()
+        .map_err(|error| SidecarError::Product(error.to_string()))?;
+    let mut bytes = product.canonical_bytes();
+    bytes.push(b'\n');
+    if bytes.len() as u64 > request.limits.max_product_bytes {
+        return Err(SidecarError::Product(format!(
+            "the product is {} bytes (limit {})",
+            bytes.len(),
+            request.limits.max_product_bytes
+        )));
+    }
+    if !stage.is_dir() {
+        return Err(SidecarError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("staging directory {}", stage.display()),
+        )));
+    }
+    std::fs::write(stage.join(PRODUCT_FILE), bytes)?;
+    Ok(product)
+}
+
+/// The frame branch: cross-check the metadata against the request (shape,
+/// counts, exact times/indices), then compute the task over the packed RGB24.
+fn frame_result(
+    meta: &SampleMeta,
+    data_path: &Path,
+    requested: &FrameRequest,
+    task: &Task,
+) -> Result<ProductResult, SidecarError> {
     let SampleData::Frames {
         width,
         height,
@@ -1174,8 +1503,8 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
         indices,
     } = &meta.data
     else {
-        return Err(SidecarError::Unsupported(
-            "audio samples are not mean-luma input".to_string(),
+        return Err(SidecarError::CorruptInput(
+            "the request samples frames but the metadata is audio".to_string(),
         ));
     };
     if *width != requested.width || *height != requested.height {
@@ -1226,12 +1555,6 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
             }
         }
     }
-    if meta.bytes > MAX_SAMPLE_BYTES {
-        return Err(SidecarError::CorruptInput(format!(
-            "the sample is {} bytes (limit {MAX_SAMPLE_BYTES})",
-            meta.bytes
-        )));
-    }
     let stride = (*width as u64)
         .checked_mul(*height as u64)
         .and_then(|n| n.checked_mul(3))
@@ -1245,7 +1568,7 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
             meta.bytes
         )));
     }
-    let data = std::fs::read(&data_path)?;
+    let data = std::fs::read(data_path)?;
     if data.len() as u64 != expected {
         return Err(SidecarError::CorruptInput(format!(
             "packed payload is {} bytes, expected {expected}",
@@ -1253,10 +1576,10 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
         )));
     }
 
-    let result = match &task {
-        Task::MeanLuma => ProductResult::MeanLuma {
+    match task {
+        Task::MeanLuma => Ok(ProductResult::MeanLuma {
             luma_milli: mean_luma(&data, *width, *height, *frames)?,
-        },
+        }),
         Task::SubjectBoxes {
             labels,
             floor_milli,
@@ -1267,7 +1590,7 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
                         .to_string(),
                 ));
             };
-            ProductResult::SubjectBoxes {
+            Ok(ProductResult::SubjectBoxes {
                 grid: SampleGrid {
                     start: *start,
                     fps: *fps,
@@ -1284,46 +1607,181 @@ fn analyze_request(request: &AnalyzeRequest) -> Result<AnalysisProduct, SidecarE
                     labels,
                     *floor_milli,
                 )?,
-            }
+            })
         }
+        Task::AudioLevels { .. } => Err(SidecarError::Unsupported(
+            "audio_levels needs an audio sample, not frames".to_string(),
+        )),
+    }
+}
+
+/// The audio branch: cross-check rate/channels/count against the request and
+/// metadata, then tile the packed interleaved s16le into RMS/peak windows.
+fn audio_result(
+    meta: &SampleMeta,
+    data_path: &Path,
+    requested: &AudioRequest,
+    task: &Task,
+) -> Result<ProductResult, SidecarError> {
+    let SampleData::Audio {
+        sample_rate,
+        channels,
+        samples,
+    } = &meta.data
+    else {
+        return Err(SidecarError::CorruptInput(
+            "the request samples audio but the metadata is frames".to_string(),
+        ));
     };
-    let product = AnalysisProduct {
-        version: nle_core::analysis::PRODUCT_VERSION,
-        analyzer: task.builtin_analyzer(),
-        sample: ProductSample {
-            version: meta.version,
-            key: meta.key.clone(),
-            params: meta.params.clone(),
-            source: SourceSignature {
-                source: meta.source.clone(),
-                source_arg: meta.source_arg.clone(),
-                source_size: meta.source_size,
-                source_mtime_secs: meta.source_mtime_secs,
-                source_mtime_nanos: meta.source_mtime_nanos,
-            },
-        },
-        result,
-    };
-    product
-        .validate()
-        .map_err(|error| SidecarError::Product(error.to_string()))?;
-    let mut bytes = product.canonical_bytes();
-    bytes.push(b'\n');
-    if bytes.len() as u64 > request.limits.max_product_bytes {
-        return Err(SidecarError::Product(format!(
-            "the product is {} bytes (limit {})",
-            bytes.len(),
-            request.limits.max_product_bytes
+    if *sample_rate != requested.sample_rate || *channels != requested.channels {
+        return Err(SidecarError::CorruptInput(format!(
+            "metadata is {sample_rate} Hz × {channels} ch, request is {} Hz × {} ch",
+            requested.sample_rate, requested.channels
         )));
     }
-    if !stage.is_dir() {
-        return Err(SidecarError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("staging directory {}", stage.display()),
+    if *samples == 0 || *samples > requested.sample_count() {
+        return Err(SidecarError::CorruptInput(format!(
+            "metadata has {samples} samples, request allows at most {}",
+            requested.sample_count()
         )));
     }
-    std::fs::write(stage.join(PRODUCT_FILE), bytes)?;
-    Ok(product)
+    let unit = (*channels as u64)
+        .checked_mul(2)
+        .ok_or_else(|| SidecarError::CorruptInput("audio frame size overflows".to_string()))?;
+    let expected = samples
+        .checked_mul(unit)
+        .ok_or_else(|| SidecarError::CorruptInput("payload length overflows".to_string()))?;
+    if meta.bytes != expected {
+        return Err(SidecarError::CorruptInput(format!(
+            "metadata claims {} bytes, shape needs {expected}",
+            meta.bytes
+        )));
+    }
+    let data = std::fs::read(data_path)?;
+    if data.len() as u64 != expected {
+        return Err(SidecarError::CorruptInput(format!(
+            "packed payload is {} bytes, expected {expected}",
+            data.len()
+        )));
+    }
+    let Task::AudioLevels { window_samples } = task else {
+        return Err(SidecarError::Unsupported(format!(
+            "task {} needs a frame sample, not audio",
+            task.wire_name()
+        )));
+    };
+    Ok(ProductResult::AudioLevels {
+        start: requested.start,
+        sample_rate: *sample_rate,
+        channels: *channels,
+        window_samples: *window_samples,
+        windows: audio_windows(&data, *channels, *samples, *window_samples)?,
+    })
+}
+
+/// Tile the packed PCM into `window_samples`-per-channel windows and compute
+/// each window's RMS and peak. The last window may be short; earlier ones are
+/// always full, which is the shape [`nle_core::analysis::ProductResult::AudioLevels`]
+/// validates.
+fn audio_windows(
+    pcm: &[u8],
+    channels: u16,
+    samples: u64,
+    window_samples: u64,
+) -> Result<Vec<AudioWindowLevel>, SidecarError> {
+    let channels = usize::from(channels);
+    let samples = usize::try_from(samples)
+        .map_err(|_| SidecarError::CorruptInput("sample count exceeds memory".to_string()))?;
+    let unit = channels
+        .checked_mul(2)
+        .ok_or_else(|| SidecarError::CorruptInput("audio frame size overflows".to_string()))?;
+    let expected = samples
+        .checked_mul(unit)
+        .ok_or_else(|| SidecarError::CorruptInput("payload length overflows".to_string()))?;
+    if pcm.len() != expected {
+        return Err(SidecarError::CorruptInput(format!(
+            "packed payload is {} bytes, expected {expected}",
+            pcm.len()
+        )));
+    }
+    if window_samples == 0 {
+        return Err(SidecarError::BadRequest(
+            "window_samples must be positive".to_string(),
+        ));
+    }
+    let window_samples = usize::try_from(window_samples)
+        .map_err(|_| SidecarError::BadRequest("window_samples exceeds memory".to_string()))?;
+    let mut windows = Vec::new();
+    let mut start = 0;
+    while start < samples {
+        let len = window_samples.min(samples - start);
+        let frame = &pcm[start * unit..(start + len) * unit];
+        let (rms_millionths, peak_millionths) = audio_level(frame);
+        windows.push(AudioWindowLevel {
+            start: start as u64,
+            samples: len as u64,
+            rms_millionths,
+            peak_millionths,
+        });
+        start += len;
+    }
+    Ok(windows)
+}
+
+/// RMS and peak of one window of interleaved s16le, in millionths of full
+/// scale. Integer arithmetic throughout: a float's last bit must never decide
+/// an `a1-` address.
+fn audio_level(frame: &[u8]) -> (u32, u32) {
+    let mut sum_sq: u128 = 0;
+    let mut peak: u32 = 0;
+    let mut count: u128 = 0;
+    for sample in frame.as_chunks::<2>().0 {
+        let value = i64::from(i16::from_le_bytes([sample[0], sample[1]]));
+        let magnitude = value.unsigned_abs() as u32;
+        peak = peak.max(magnitude);
+        sum_sq += (value as i128 * value as i128) as u128;
+        count += 1;
+    }
+    let peak_millionths = ((u128::from(peak) * 1_000_000 + 16_384) / 32_768) as u32;
+    (rms_millionths(sum_sq, count), peak_millionths)
+}
+
+/// `round(1_000_000 × sqrt(sum_sq / count) / 32_768)`, exactly.
+///
+/// `floor(sqrt(a / b))` is `isqrt(floor(a / b))` for non-negative integers, and
+/// one comparison with the midpoint picks the nearest integer. `u128` holds
+/// the scaled sums even for a full 256 MiB sample.
+fn rms_millionths(sum_sq: u128, count: u128) -> u32 {
+    if count == 0 {
+        return 0;
+    }
+    let scaled = sum_sq.saturating_mul(1_000_000 * 1_000_000);
+    let full = count.saturating_mul(32_768 * 32_768);
+    if full == 0 {
+        return 0;
+    }
+    let floor = integer_sqrt(scaled / full);
+    let midpoint = (2 * floor + 1) * (2 * floor + 1);
+    let rounded = if scaled.saturating_mul(4) >= midpoint.saturating_mul(full) {
+        floor + 1
+    } else {
+        floor
+    };
+    rounded.min(1_000_000) as u32
+}
+
+/// Newton's integer square root. `x >= 1` keeps `x + n / x` in range.
+fn integer_sqrt(value: u128) -> u128 {
+    if value < 2 {
+        return value;
+    }
+    let mut x = value;
+    let mut next = x.div_ceil(2);
+    while next < x {
+        x = next;
+        next = (x + value / x) / 2;
+    }
+    x
 }
 
 fn require_absolute(value: &str, what: &str) -> Result<PathBuf, SidecarError> {
@@ -1543,7 +2001,7 @@ struct Analyze<'a> {
     id: u64,
     method: &'a str,
     input: InputRef<'a>,
-    request: FrameRequestRef<'a>,
+    request: RequestRef<'a>,
     task: TaskRef<'a>,
     stage: &'a str,
     limits: Limits,
@@ -1557,6 +2015,9 @@ enum TaskRef<'a> {
         labels: &'a [String],
         floor_milli: u32,
     },
+    AudioLevels {
+        window_samples: u64,
+    },
 }
 
 fn wire_task(task: &Task) -> TaskRef<'_> {
@@ -1569,15 +2030,19 @@ fn wire_task(task: &Task) -> TaskRef<'_> {
             labels,
             floor_milli: *floor_milli,
         },
+        Task::AudioLevels { window_samples } => TaskRef::AudioLevels {
+            window_samples: *window_samples,
+        },
     }
 }
 
 /// The window on the wire, tagged by mode. A grid carries its own clock; an
 /// index request carries the source rate and frame numbers, so the analyzer
-/// can derive the same times the sampler recorded.
+/// can derive the same times the sampler recorded; an audio request names the
+/// source window and the packed rate/channels.
 #[derive(Debug, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-enum FrameRequestRef<'a> {
+enum RequestRef<'a> {
     Grid {
         start: String,
         duration: String,
@@ -1591,26 +2056,40 @@ enum FrameRequestRef<'a> {
         width: u32,
         height: u32,
     },
+    Audio {
+        start: String,
+        duration: String,
+        sample_rate: u32,
+        channels: u16,
+    },
 }
 
-fn wire_request(spec: &FrameSpec) -> FrameRequestRef<'_> {
-    match &spec.mode {
-        FrameMode::Grid {
-            start,
-            duration,
-            fps,
-        } => FrameRequestRef::Grid {
-            start: rational(start),
-            duration: rational(duration),
-            fps: rational(fps),
-            width: spec.width,
-            height: spec.height,
+fn wire_request(request: SampleRequest<'_>) -> RequestRef<'_> {
+    match request {
+        SampleRequest::Frames(spec) => match &spec.mode {
+            FrameMode::Grid {
+                start,
+                duration,
+                fps,
+            } => RequestRef::Grid {
+                start: rational(start),
+                duration: rational(duration),
+                fps: rational(fps),
+                width: spec.width,
+                height: spec.height,
+            },
+            FrameMode::Indices { rate, indices } => RequestRef::Indices {
+                rate: rational(rate),
+                indices,
+                width: spec.width,
+                height: spec.height,
+            },
         },
-        FrameMode::Indices { rate, indices } => FrameRequestRef::Indices {
-            rate: rational(rate),
-            indices,
-            width: spec.width,
-            height: spec.height,
+        SampleRequest::Audio(spec) => RequestRef::Audio {
+            start: rational(&spec.start),
+            duration: rational(&spec.duration),
+            sample_rate: spec.sample_rate,
+            channels: spec.channels,
         },
     }
 }
@@ -1865,29 +2344,33 @@ mod tests {
 
     #[test]
     fn the_analyzer_parses_grid_and_index_requests() {
-        let grid = FrameRequest::parse(&FrameRequestIn {
+        let grid = FrameRequest::parse(&RequestIn {
             mode: "grid".to_string(),
             start: Some("0/1".to_string()),
             duration: Some("1/2".to_string()),
             fps: Some("2/1".to_string()),
             rate: None,
             indices: None,
-            width: 32,
-            height: 24,
+            width: Some(32),
+            height: Some(24),
+            sample_rate: None,
+            channels: None,
         })
         .unwrap();
         assert_eq!(grid.mode.frame_count(), 1);
         assert_eq!(grid.mode.time(0), Some(Seconds::from_integer(0)));
 
-        let index = FrameRequest::parse(&FrameRequestIn {
+        let index = FrameRequest::parse(&RequestIn {
             mode: "indices".to_string(),
             start: None,
             duration: None,
             fps: None,
             rate: Some("30000/1001".to_string()),
             indices: Some(vec![0, 7]),
-            width: 16,
-            height: 12,
+            width: Some(16),
+            height: Some(12),
+            sample_rate: None,
+            channels: None,
         })
         .unwrap();
         assert_eq!(index.mode.frame_count(), 2);
@@ -1895,28 +2378,32 @@ mod tests {
         assert_eq!(index.mode.indices(), Some([0, 7].as_slice()));
 
         // A mode cannot carry the other mode's fields.
-        let error = FrameRequest::parse(&FrameRequestIn {
+        let error = FrameRequest::parse(&RequestIn {
             mode: "grid".to_string(),
             start: Some("0/1".to_string()),
             duration: Some("1/1".to_string()),
             fps: Some("2/1".to_string()),
             rate: Some("30/1".to_string()),
             indices: None,
-            width: 4,
-            height: 4,
+            width: Some(4),
+            height: Some(4),
+            sample_rate: None,
+            channels: None,
         })
         .unwrap_err();
         assert!(matches!(error, SidecarError::BadRequest(_)), "{error:?}");
 
-        let error = FrameRequest::parse(&FrameRequestIn {
+        let error = FrameRequest::parse(&RequestIn {
             mode: "grid".to_string(),
             start: Some("-1/1".to_string()),
             duration: Some("1/2".to_string()),
             fps: Some("2/1".to_string()),
             rate: None,
             indices: None,
-            width: 32,
-            height: 24,
+            width: Some(32),
+            height: Some(24),
+            sample_rate: None,
+            channels: None,
         })
         .unwrap_err();
         assert!(matches!(error, SidecarError::BadRequest(_)), "{error:?}");
@@ -1975,6 +2462,59 @@ mod tests {
     }
 
     #[test]
+    fn audio_levels_use_millionths_of_full_scale() {
+        let pcm = |values: &[i16]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+
+        // ±16384 is half scale, so both RMS and peak are 500_000.
+        let half = pcm(&[16384, -16384, 16384, -16384]);
+        assert_eq!(audio_level(&half), (500_000, 500_000));
+
+        // A full-scale square wave: peak is exactly 1_000_000 and RMS is just
+        // under it (the two magnitudes differ by one).
+        let full = pcm(&[32767, -32768]);
+        let (rms, peak) = audio_level(&full);
+        assert_eq!(peak, 1_000_000);
+        assert!((999_000..=1_000_000).contains(&rms), "{rms}");
+
+        assert_eq!(audio_level(&pcm(&[0; 8])), (0, 0), "silence");
+    }
+
+    #[test]
+    fn audio_windows_tile_the_payload_with_a_partial_last_window() {
+        let pcm = |values: &[i16]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let windows = audio_windows(&pcm(&[100, 200, 300, 400, 500]), 1, 5, 2).unwrap();
+        let shape: Vec<(u64, u64)> = windows
+            .iter()
+            .map(|window| (window.start, window.samples))
+            .collect();
+        assert_eq!(shape, [(0, 2), (2, 2), (4, 1)]);
+
+        // Stereo counts frames, not interleaved values: three frames windowed
+        // by two are one full window plus one partial.
+        let stereo = pcm(&[100, 100, 200, 200, 300, 300]);
+        let windows = audio_windows(&stereo, 2, 3, 2).unwrap();
+        let shape: Vec<(u64, u64)> = windows
+            .iter()
+            .map(|window| (window.start, window.samples))
+            .collect();
+        assert_eq!(shape, [(0, 2), (2, 1)]);
+
+        // A payload that disagrees with its declared shape is corrupt input.
+        let error = audio_windows(&stereo, 2, 4, 2).unwrap_err();
+        assert!(matches!(error, SidecarError::CorruptInput(_)), "{error:?}");
+    }
+
+    #[test]
     fn a_task_is_typed_on_the_wire() {
         let value = serde_json::to_value(wire_task(&Task::MeanLuma)).unwrap();
         assert_eq!(value, serde_json::json!({"kind": "mean_luma"}));
@@ -1997,6 +2537,7 @@ mod tests {
             kind: "subject_boxes".to_string(),
             labels: Some(vec!["face".to_string(), "face".to_string()]),
             floor_milli: Some(500),
+            window_samples: None,
         }
         .parse()
         .expect("parse");
@@ -2007,10 +2548,41 @@ mod tests {
                 floor_milli: 500,
             }
         );
+
+        let audio = Task::AudioLevels {
+            window_samples: 4_800,
+        };
+        assert_eq!(
+            serde_json::to_value(wire_task(&audio)).unwrap(),
+            serde_json::json!({"kind": "audio_levels", "window_samples": 4800})
+        );
+        assert_eq!(
+            TaskIn {
+                kind: "audio_levels".to_string(),
+                labels: None,
+                floor_milli: None,
+                window_samples: Some(4_800),
+            }
+            .parse()
+            .expect("audio task"),
+            audio
+        );
+        // A zero window would produce no product, not an empty one.
+        let error = TaskIn {
+            kind: "audio_levels".to_string(),
+            labels: None,
+            floor_milli: None,
+            window_samples: Some(0),
+        }
+        .parse()
+        .unwrap_err();
+        assert!(matches!(error, SidecarError::BadRequest(_)), "{error:?}");
+
         let error = TaskIn {
             kind: "segmenter".to_string(),
             labels: None,
             floor_milli: None,
+            window_samples: None,
         }
         .parse()
         .unwrap_err();
@@ -2085,13 +2657,15 @@ mod tests {
             labels: vec!["red".to_string()],
             floor_milli: 0,
         };
-        require_result_shape(&product, &data, &spec, &task).expect("matching grid");
+        require_result_shape(&product, &data, SampleRequest::Frames(&spec), &task)
+            .expect("matching grid");
 
         let mut wrong = product.clone();
         if let ProductResult::SubjectBoxes { grid, .. } = &mut wrong.result {
             grid.fps = Seconds::from_integer(6);
         }
-        let error = require_result_shape(&wrong, &data, &spec, &task).unwrap_err();
+        let error =
+            require_result_shape(&wrong, &data, SampleRequest::Frames(&spec), &task).unwrap_err();
         assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
 
         let mut extra = product.clone();
@@ -2101,7 +2675,8 @@ mod tests {
                 boxes: Vec::new(),
             });
         }
-        let error = require_result_shape(&extra, &data, &spec, &task).unwrap_err();
+        let error =
+            require_result_shape(&extra, &data, SampleRequest::Frames(&spec), &task).unwrap_err();
         assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
     }
 
@@ -2148,11 +2723,25 @@ mod tests {
             width: 32,
             height: 24,
         };
-        let error = require_result_shape(&product, &frames(3), &spec, &Task::MeanLuma).unwrap_err();
+        let error = require_result_shape(
+            &product,
+            &frames(3),
+            SampleRequest::Frames(&spec),
+            &Task::MeanLuma,
+        )
+        .unwrap_err();
         assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
         assert!(error.to_string().contains("2 frame results"), "{error}");
 
-        assert!(require_result_shape(&product, &frames(2), &spec, &Task::MeanLuma).is_ok());
+        assert!(
+            require_result_shape(
+                &product,
+                &frames(2),
+                SampleRequest::Frames(&spec),
+                &Task::MeanLuma
+            )
+            .is_ok()
+        );
 
         let error = require_result_shape(
             &product,
@@ -2161,7 +2750,7 @@ mod tests {
                 channels: 2,
                 samples: 2,
             },
-            &spec,
+            SampleRequest::Frames(&spec),
             &Task::MeanLuma,
         )
         .unwrap_err();
@@ -2180,7 +2769,7 @@ mod tests {
             width: 32,
             height: 24,
         };
-        let grid = wire_request(&grid_spec);
+        let grid = wire_request(SampleRequest::Frames(&grid_spec));
         let json = serde_json::to_value(&grid).unwrap();
         assert_eq!(json["mode"], "grid");
         assert_eq!(json["fps"], "2/1");
@@ -2196,12 +2785,103 @@ mod tests {
             width: 16,
             height: 12,
         };
-        let index = wire_request(&index_spec);
+        let index = wire_request(SampleRequest::Frames(&index_spec));
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["mode"], "indices");
         assert_eq!(json["rate"], "30000/1001");
         assert_eq!(json["indices"], serde_json::json!([0, 7]));
         assert!(json.get("start").is_none(), "{json}");
+
+        let audio_spec = AudioSpec {
+            source: PathBuf::from("/media/tone.wav"),
+            start: Seconds::new(1, 2),
+            duration: Seconds::from_integer(1),
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        let audio = wire_request(SampleRequest::Audio(&audio_spec));
+        let json = serde_json::to_value(&audio).unwrap();
+        assert_eq!(json["mode"], "audio");
+        assert_eq!(json["start"], "1/2");
+        assert_eq!(json["duration"], "1/1");
+        assert_eq!(json["sample_rate"], 48_000);
+        assert_eq!(json["channels"], 1);
+        assert!(json.get("width").is_none(), "{json}");
+    }
+
+    #[test]
+    fn an_audio_product_must_cover_the_packed_payload() {
+        let spec = AudioSpec {
+            source: PathBuf::from("/media/tone.wav"),
+            start: Seconds::from_integer(0),
+            duration: Seconds::from_integer(5),
+            sample_rate: 2,
+            channels: 1,
+        };
+        let window = |start, samples| AudioWindowLevel {
+            start,
+            samples,
+            rms_millionths: 0,
+            peak_millionths: 0,
+        };
+        let product = AnalysisProduct {
+            version: nle_core::analysis::PRODUCT_VERSION,
+            analyzer: AnalyzerInfo {
+                name: AUDIO_NAME.to_string(),
+                version: AUDIO_VERSION,
+            },
+            sample: ProductSample {
+                version: SAMPLE_VERSION,
+                key: "0123456789abcdef".to_string(),
+                params: "fedcba9876543210".to_string(),
+                source: SourceSignature {
+                    source: "/media/tone.wav".to_string(),
+                    source_arg: "/media/tone.wav".to_string(),
+                    source_size: 1,
+                    source_mtime_secs: 2,
+                    source_mtime_nanos: 3,
+                },
+            },
+            result: ProductResult::AudioLevels {
+                start: Seconds::from_integer(0),
+                sample_rate: 2,
+                channels: 1,
+                window_samples: 2,
+                windows: vec![window(0, 2), window(2, 2), window(4, 1)],
+            },
+        };
+        let data = SampleData::Audio {
+            sample_rate: 2,
+            channels: 1,
+            samples: 5,
+        };
+        let task = Task::AudioLevels { window_samples: 2 };
+        require_audio_result(&product, &data, &spec, &task).expect("the windows cover the payload");
+
+        // A truncated result is refused rather than read as a shorter sample.
+        let mut short = product.clone();
+        if let ProductResult::AudioLevels { windows, .. } = &mut short.result {
+            windows.pop();
+        }
+        let error = require_audio_result(&short, &data, &spec, &task).unwrap_err();
+        assert!(error.to_string().contains("covers 4"), "{error}");
+
+        // Metadata cross-checks: rate, channels and the requested window.
+        let mut wrong_rate = product.clone();
+        if let ProductResult::AudioLevels { sample_rate, .. } = &mut wrong_rate.result {
+            *sample_rate = 4;
+        }
+        let error = require_audio_result(&wrong_rate, &data, &spec, &task).unwrap_err();
+        assert!(matches!(error, SidecarError::Product(_)), "{error:?}");
+
+        let error = require_audio_result(
+            &product,
+            &data,
+            &spec,
+            &Task::AudioLevels { window_samples: 3 },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("window"), "{error}");
     }
 
     /// The analyzer trusts `meta` for shape but re-derives the times and
@@ -2245,7 +2925,7 @@ mod tests {
                 data: data.display().to_string(),
                 meta: meta_path.display().to_string(),
             },
-            request: FrameRequestIn {
+            request: RequestIn {
                 mode: if indices.is_some() {
                     "indices".to_string()
                 } else {
@@ -2256,13 +2936,16 @@ mod tests {
                 fps: indices.is_none().then(|| "1/1".to_string()),
                 rate: indices.as_ref().map(|_| "1/1".to_string()),
                 indices,
-                width: 1,
-                height: 1,
+                width: Some(1),
+                height: Some(1),
+                sample_rate: None,
+                channels: None,
             },
             task: TaskIn {
                 kind: "mean_luma".to_string(),
                 labels: None,
                 floor_milli: None,
+                window_samples: None,
             },
             stage: stage.display().to_string(),
             limits: LimitsIn {
@@ -2304,6 +2987,108 @@ mod tests {
             None,
         );
         let error = analyze_request(&request(Some(vec![0, 1]))).unwrap_err();
+        assert!(matches!(error, SidecarError::CorruptInput(_)), "{error:?}");
+    }
+
+    /// The audio branch reads the same metadata envelope, cross-checks its
+    /// rate/channels/count against the request, and tiles the packed s16le.
+    #[test]
+    fn the_analyzer_computes_audio_levels_from_packed_pcm() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let data = dir.path().join("tone.raw");
+        let pcm: Vec<u8> = [16384_i16, -16384, 0, 0, 8192]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        std::fs::write(&data, &pcm).unwrap();
+        let meta_path = dir.path().join("tone.json");
+        let meta = SampleMeta {
+            version: SAMPLE_VERSION,
+            params: "fedcba9876543210".to_string(),
+            source: "/media/tone.wav".to_string(),
+            source_arg: "/media/tone.wav".to_string(),
+            source_size: 1,
+            source_mtime_secs: 2,
+            source_mtime_nanos: 3,
+            key: "0123456789abcdef".to_string(),
+            bytes: pcm.len() as u64,
+            data: SampleData::Audio {
+                sample_rate: 5,
+                channels: 1,
+                samples: 5,
+            },
+        };
+        std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        let request = AnalyzeRequest {
+            id: 2,
+            method: "analyze".to_string(),
+            input: InputRefOwned {
+                kind: "audio".to_string(),
+                sample: "0123456789abcdef".to_string(),
+                data: data.display().to_string(),
+                meta: meta_path.display().to_string(),
+            },
+            request: RequestIn {
+                mode: "audio".to_string(),
+                start: Some("0/1".to_string()),
+                duration: Some("1/1".to_string()),
+                fps: None,
+                rate: None,
+                indices: None,
+                width: None,
+                height: None,
+                sample_rate: Some(5),
+                channels: Some(1),
+            },
+            task: TaskIn {
+                kind: "audio_levels".to_string(),
+                labels: None,
+                floor_milli: None,
+                window_samples: Some(2),
+            },
+            stage: stage.display().to_string(),
+            limits: LimitsIn {
+                max_product_bytes: DEFAULT_MAX_PRODUCT_BYTES,
+            },
+        };
+        let product = analyze_request(&request).expect("audio levels");
+        let ProductResult::AudioLevels {
+            start,
+            sample_rate,
+            channels,
+            window_samples,
+            windows,
+        } = &product.result
+        else {
+            panic!("audio levels");
+        };
+        assert_eq!(*start, Seconds::from_integer(0));
+        assert_eq!((*sample_rate, *channels, *window_samples), (5, 1, 2));
+        let shape: Vec<(u64, u64, u32, u32)> = windows
+            .iter()
+            .map(|window| {
+                (
+                    window.start,
+                    window.samples,
+                    window.rms_millionths,
+                    window.peak_millionths,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0, 2, 500_000, 500_000),
+                (2, 2, 0, 0),
+                (4, 1, 250_000, 250_000),
+            ]
+        );
+
+        // A payload that does not match its metadata is corrupt input.
+        std::fs::write(&data, &pcm[..pcm.len() - 2]).unwrap();
+        let error = analyze_request(&request).unwrap_err();
         assert!(matches!(error, SidecarError::CorruptInput(_)), "{error:?}");
     }
 

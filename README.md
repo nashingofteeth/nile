@@ -369,6 +369,9 @@ nile analysis detect --asset 1 --duration 2 --fps 5 --label red
 # the same host, a subject detector; the bundled colour-box child is a test
 # double (exact labels red/green/blue/white/black). For real CV:
 #   nile analysis detect --asset 1 --analyzer /abs/detector --label face
+nile analysis analyze-audio --asset 1 --duration 1 --window 0.1
+# per-window RMS/peak from the asset's audio (millionths of full scale);
+# defaults to the probed rate/channels, else 48 kHz mono
 nile annotation add --expect words-complete --timeline --at 2 --to 5 --transcript t1-…
 nile annotation ls                        # id, status, anchor and text
 nile annotation resolve 1                 # undoable; rm deletes instead

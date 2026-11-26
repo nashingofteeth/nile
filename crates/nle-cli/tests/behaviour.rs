@@ -723,6 +723,208 @@ fn analysis_analyze_stores_a_mean_luma_product_and_reuses_the_sample_offline() {
 }
 
 #[test]
+fn analysis_analyze_audio_stores_levels_and_reuses_the_sample_offline() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6; red's asset is #1 (and has audio)
+    let project_before = s.read(P);
+    let args = [
+        "analysis",
+        "analyze-audio",
+        "--asset",
+        "1",
+        "--duration",
+        "1",
+        "--window",
+        "0.25",
+        "--sample-rate",
+        "8000",
+        "--channels",
+        "1",
+    ];
+    let hash = s.ok(&args).trim().to_string();
+    assert!(hash.starts_with("a1-"), "{hash}");
+    assert_eq!(hash.len(), 19, "{hash}");
+
+    let state = nle_core::state::state_dir(&s.file(P));
+    let product_path = state.join("analysis/products").join(&hash);
+    let product: serde_json::Value =
+        serde_json::from_slice(&fs::read(&product_path).expect("the audio product")).unwrap();
+    assert_eq!(product["analyzer"]["name"], "audio-levels");
+    assert_eq!(product["result"]["kind"], "audio_levels");
+    assert_eq!(product["result"]["start"], "0/1");
+    assert_eq!(product["result"]["sample_rate"], 8000);
+    assert_eq!(product["result"]["channels"], 1);
+    assert_eq!(product["result"]["window_samples"], 2000);
+    let windows = product["result"]["windows"]
+        .as_array()
+        .expect("per-window levels");
+    assert_eq!(windows.len(), 4, "1 s in 0.25 s windows");
+    for window in windows {
+        assert_eq!(window["samples"], 2000, "{window}");
+        let rms = window["rms_millionths"].as_u64().expect("integer RMS");
+        let peak = window["peak_millionths"].as_u64().expect("integer peak");
+        assert!(peak > 0, "the tone is audible: {window}");
+        assert!(rms <= peak && peak <= 1_000_000, "{window}");
+    }
+    assert_eq!(
+        s.read(P),
+        project_before,
+        "an analysis run must not rewrite the project"
+    );
+
+    let cache = state.join("cache/analysis");
+    let entries = || {
+        fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(entries().len(), 2, "{:?}", entries());
+    let staging = cache.join("staging");
+    assert!(
+        !staging.exists() || staging.read_dir().unwrap().next().is_none(),
+        "the per-run staging directory is removed"
+    );
+
+    // The same source sampled as frames is a different entry, and the two
+    // products name different samples: audio never reuses a frame payload.
+    let frame_hash = s
+        .ok(&[
+            "analysis",
+            "analyze",
+            "--asset",
+            "1",
+            "--duration",
+            "1",
+            "--fps",
+            "5",
+            "--width",
+            "8",
+            "--height",
+            "6",
+        ])
+        .trim()
+        .to_string();
+    assert_ne!(frame_hash, hash);
+    assert_eq!(entries().len(), 4, "one audio and one frame entry");
+    let frame: serde_json::Value = serde_json::from_slice(
+        &fs::read(state.join("analysis/products").join(&frame_hash)).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(
+        product["sample"]["key"], frame["sample"]["key"],
+        "the audio and frame samples are distinct"
+    );
+
+    // An audio-less asset is refused with a clear message, not an empty product.
+    s.ok(&["import", "video_only.mp4"]);
+    let text = s.err(&[
+        "analysis",
+        "analyze-audio",
+        "--asset",
+        "4",
+        "--duration",
+        "1",
+    ]);
+    assert!(text.contains("no audio stream"), "{text}");
+
+    // The source is gone, but the packed sample is enough: same address, no
+    // new cache entries, and the project is untouched by the offline run.
+    let project_before_offline = s.read(P);
+    fs::remove_file(s.file("red.mp4")).unwrap();
+    let again = s.ok(&args).trim().to_string();
+    assert_eq!(again, hash, "the offline sample produced the same product");
+    assert_eq!(entries().len(), 4, "the sample hit did not grow the cache");
+    assert_eq!(s.read(P), project_before_offline);
+}
+
+#[test]
+fn analysis_analyze_audio_defaults_to_the_probe_rate_and_channels() {
+    let s = Sandbox::new();
+    s.base();
+    // Read the probe from the project rather than hard-coding the fixture, so
+    // this asserts the default actually comes from the media.
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project json");
+    let audio = project["media"]
+        .as_array()
+        .expect("media")
+        .iter()
+        .find_map(|asset| {
+            asset["probe"]["streams"]
+                .as_array()?
+                .iter()
+                .find(|stream| stream["codec_type"] == "audio")
+        })
+        .expect("red.mp4 has an audio stream");
+    let rate = audio["sample_rate"]
+        .as_str()
+        .expect("probed sample rate")
+        .parse::<u64>()
+        .expect("integer rate");
+    let channels = audio["channels"].as_u64().expect("probed channels");
+
+    let hash = s
+        .ok(&[
+            "analysis",
+            "analyze-audio",
+            "--asset",
+            "1",
+            "--duration",
+            "0.5",
+        ])
+        .trim()
+        .to_string();
+    let state = nle_core::state::state_dir(&s.file(P));
+    let product: serde_json::Value = serde_json::from_slice(
+        &fs::read(state.join("analysis/products").join(&hash)).expect("audio product"),
+    )
+    .unwrap();
+    assert_eq!(product["result"]["sample_rate"], rate);
+    assert_eq!(product["result"]["channels"], channels);
+    assert_eq!(
+        product["result"]["window_samples"],
+        rate / 10,
+        "the default 0.1 s window at the probe rate"
+    );
+
+    // A window shorter than one sample at the chosen rate is refused before
+    // ffmpeg runs.
+    let text = s.err(&[
+        "analysis",
+        "analyze-audio",
+        "--asset",
+        "1",
+        "--duration",
+        "1",
+        "--window",
+        "0.000001",
+        "--sample-rate",
+        "8000",
+    ]);
+    assert!(text.contains("shorter than one sample"), "{text}");
+
+    // A shape over the 250 000-window cap is refused before sampling too.
+    let text = s.err(&[
+        "analysis",
+        "analyze-audio",
+        "--asset",
+        "1",
+        "--duration",
+        "5",
+        "--sample-rate",
+        "60000",
+        "--window",
+        "0.000017",
+    ]);
+    assert!(text.contains("300000"), "{text}");
+    assert!(text.contains("250000"), "{text}");
+    assert!(text.contains("longer --window"), "{text}");
+}
+
+#[test]
 fn analysis_detect_feeds_a_subject_in_frame_check() {
     let s = Sandbox::new();
     s.base(); // red 0–2, green 2–4, blue 4–6; red's asset is #1

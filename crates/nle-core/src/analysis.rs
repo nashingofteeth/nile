@@ -440,6 +440,27 @@ pub fn sort_detected_boxes(boxes: &mut [DetectedBox]) {
 /// not a detection; the host refuses it rather than dividing by zero later.
 pub const BOX_MIN_SIDE: u32 = 1;
 
+/// One RMS/peak window over packed s16le PCM, in **millionths of full scale**
+/// (`1_000_000` = the largest representable s16 amplitude). Integers keep the
+/// canonical bytes float-free, the same reason `luma_milli` and `BoxRect` are
+/// integers: a float's last bit must not decide an `a1-` address.
+///
+/// `start` is the first sample (per channel) of this window relative to the
+/// beginning of the packed sample, and `samples` is how many per-channel
+/// samples it covers. Windows tile the packed payload: the first starts at 0,
+/// each next starts where the previous ended, and only the last may be shorter
+/// than `window_samples`.
+///
+/// Both amplitudes aggregate **every channel** in the window into one scalar;
+/// there is no per-channel breakdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioWindowLevel {
+    pub start: u64,
+    pub samples: u64,
+    pub rms_millionths: u32,
+    pub peak_millionths: u32,
+}
+
 /// What an analyzer produced. Tagged so a second analyzer cannot be mistaken
 /// for the first; `luma_milli` is per-frame mean Rec. 709 luma × 1000, in
 /// presentation order (integer units keep the canonical bytes float-free).
@@ -458,6 +479,17 @@ pub enum ProductResult {
         labels: Vec<String>,
         floor_milli: u32,
         frames: Vec<FrameBoxes>,
+    },
+    /// RMS/peak levels over one packed audio window. `start` is the source
+    /// time of sample 0 of the packed payload; `windows[i].start` is an offset
+    /// from that point, so source time maps back through `sample_rate`.
+    AudioLevels {
+        #[serde(with = "rational_ser")]
+        start: Seconds,
+        sample_rate: u32,
+        channels: u16,
+        window_samples: u64,
+        windows: Vec<AudioWindowLevel>,
     },
 }
 
@@ -576,6 +608,15 @@ impl AnalysisProduct {
             } => {
                 validate_subject_boxes(grid, labels, *floor_milli, frames)?;
             }
+            ProductResult::AudioLevels {
+                start,
+                sample_rate,
+                channels,
+                window_samples,
+                windows,
+            } => {
+                validate_audio_levels(*start, *sample_rate, *channels, *window_samples, windows)?;
+            }
         }
         Ok(())
     }
@@ -680,6 +721,85 @@ fn validate_subject_boxes(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_audio_levels(
+    start: Seconds,
+    sample_rate: u32,
+    channels: u16,
+    window_samples: u64,
+    windows: &[AudioWindowLevel],
+) -> Result<(), ProductError> {
+    if start < Seconds::from_integer(0) {
+        return Err(ProductError::Invalid(
+            "the audio window starts before zero".into(),
+        ));
+    }
+    if sample_rate == 0 {
+        return Err(ProductError::Invalid(
+            "the audio window has a zero sample rate".into(),
+        ));
+    }
+    if channels == 0 {
+        return Err(ProductError::Invalid(
+            "the audio window has zero channels".into(),
+        ));
+    }
+    if window_samples == 0 {
+        return Err(ProductError::Invalid(
+            "the audio window length is zero samples".into(),
+        ));
+    }
+    if windows.is_empty() {
+        return Err(ProductError::Invalid(
+            "the product has no audio windows".into(),
+        ));
+    }
+    let mut expected = 0_u64;
+    for (position, window) in windows.iter().enumerate() {
+        if window.start != expected {
+            return Err(ProductError::Invalid(format!(
+                "audio window {position} starts at sample {} but the previous one ended at {expected}",
+                window.start
+            )));
+        }
+        if window.samples == 0 {
+            return Err(ProductError::Invalid(format!(
+                "audio window {position} is empty"
+            )));
+        }
+        if window.samples > window_samples {
+            return Err(ProductError::Invalid(format!(
+                "audio window {position} has {} samples (window length {window_samples})",
+                window.samples
+            )));
+        }
+        // Every window but the last is full: a short middle window would leave
+        // a hole the host's coverage check could not tell from a shorter sample.
+        let last = position + 1 == windows.len();
+        if !last && window.samples != window_samples {
+            return Err(ProductError::Invalid(format!(
+                "audio window {position} has {} of {window_samples} samples but is not last",
+                window.samples
+            )));
+        }
+        if window.rms_millionths > window.peak_millionths {
+            return Err(ProductError::Invalid(format!(
+                "audio window {position} has RMS {} above peak {}",
+                window.rms_millionths, window.peak_millionths
+            )));
+        }
+        if window.peak_millionths > 1_000_000 {
+            return Err(ProductError::Invalid(format!(
+                "audio window {position} peak {} is outside 0..=1000000",
+                window.peak_millionths
+            )));
+        }
+        expected = expected
+            .checked_add(window.samples)
+            .ok_or_else(|| ProductError::Invalid("the audio window coverage overflows".into()))?;
     }
     Ok(())
 }
@@ -1648,5 +1768,126 @@ mod tests {
         ));
         let product = product(Path::new("/media/red.mp4"), 1, 2, 3);
         assert!(matches!(store.import(&product), Err(ProductError::NoStore)));
+    }
+
+    fn audio_product(dir: &Path) -> AnalysisProduct {
+        let mut product = product_in(dir);
+        product.analyzer = AnalyzerInfo {
+            name: "audio-levels".to_string(),
+            version: 1,
+        };
+        product.result = ProductResult::AudioLevels {
+            start: s(0),
+            sample_rate: 48_000,
+            channels: 1,
+            window_samples: 2,
+            windows: vec![
+                AudioWindowLevel {
+                    start: 0,
+                    samples: 2,
+                    rms_millionths: 500_000,
+                    peak_millionths: 500_000,
+                },
+                AudioWindowLevel {
+                    start: 2,
+                    samples: 1,
+                    rms_millionths: 0,
+                    peak_millionths: 0,
+                },
+            ],
+        };
+        product
+    }
+
+    #[test]
+    fn audio_levels_round_trip_with_integer_amplitudes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProductStore::at(&dir.path().join("nile.json"));
+        let product = audio_product(dir.path());
+        let hash = store.import(&product).unwrap();
+        assert!(hash.starts_with("a1-"), "{hash}");
+        assert_eq!(store.load(&hash).unwrap(), product);
+        let text = String::from_utf8(product.canonical_bytes()).unwrap();
+        assert!(text.contains("\"kind\":\"audio_levels\""), "{text}");
+        assert!(text.contains("\"rms_millionths\":500000"), "{text}");
+        assert!(text.contains("\"peak_millionths\":500000"), "{text}");
+        assert!(!text.contains(".0,"), "amplitudes stay integers: {text}");
+    }
+
+    #[test]
+    fn audio_levels_validation_refuses_non_tiling_windows_and_bad_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let product = audio_product(dir.path());
+        product.validate().expect("the fixture is valid");
+
+        let mutate = |change: &dyn Fn(&mut ProductResult)| {
+            let mut bad = product.clone();
+            change(&mut bad.result);
+            bad.validate().unwrap_err().to_string()
+        };
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { windows, .. } = result else {
+                panic!("audio")
+            };
+            windows[0].start = 1;
+        });
+        assert!(error.contains("starts at sample"), "{error}");
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { windows, .. } = result else {
+                panic!("audio")
+            };
+            windows[1].start = 3;
+        });
+        assert!(error.contains("previous one ended"), "{error}");
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { window_samples, .. } = result else {
+                panic!("audio")
+            };
+            *window_samples = 0;
+        });
+        assert!(error.contains("zero samples"), "{error}");
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { windows, .. } = result else {
+                panic!("audio")
+            };
+            windows[0].samples = 1;
+        });
+        assert!(error.contains("not last"), "{error}");
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { windows, .. } = result else {
+                panic!("audio")
+            };
+            windows[0].rms_millionths = 600_000;
+        });
+        assert!(error.contains("above peak"), "{error}");
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { windows, .. } = result else {
+                panic!("audio")
+            };
+            windows[0].peak_millionths = 1_000_001;
+        });
+        assert!(error.contains("outside"), "{error}");
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { windows, .. } = result else {
+                panic!("audio")
+            };
+            windows.clear();
+        });
+        assert!(error.contains("no audio windows"), "{error}");
+
+        let error = mutate(&|result| {
+            let ProductResult::AudioLevels { start, .. } = result else {
+                panic!("audio")
+            };
+            *start = s(-1);
+        });
+        assert!(error.contains("before zero"), "{error}");
     }
 }

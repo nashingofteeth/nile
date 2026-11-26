@@ -10,7 +10,7 @@ use nle_core::analysis::{
 };
 use nle_core::time::checked_sub;
 use nle_core::{Project, Seconds, parse_time};
-use nle_ffmpeg::sampling::{FrameMode, FrameSpec, SampleCache};
+use nle_ffmpeg::sampling::{AudioSpec, FrameMode, FrameSpec, SampleCache, samples_in};
 
 use crate::{analysis, parse_fps_arg, say};
 
@@ -50,6 +50,30 @@ pub(crate) struct AnalyzeArgs<'a> {
 
 const BAD_WINDOW: &str = "--duration must be positive (the window ends at or before its start)";
 
+/// The most level windows one product may contain. A one-sample window over a
+/// long payload would build millions of entries before the product-byte cap
+/// ever noticed; this refuses the shape up front, before sampling.
+const MAX_AUDIO_WINDOWS: u64 = 250_000;
+
+/// `ceil(samples / window_samples)`; zero samples or a zero window have no
+/// windows rather than dividing by zero.
+fn audio_window_count(samples: u64, window_samples: u64) -> u64 {
+    if window_samples == 0 {
+        return 0;
+    }
+    samples / window_samples + u64::from(!samples.is_multiple_of(window_samples))
+}
+
+fn check_audio_window_budget(samples: u64, window_samples: u64) -> Result<()> {
+    let windows = audio_window_count(samples, window_samples);
+    if windows > MAX_AUDIO_WINDOWS {
+        bail!(
+            "the window would make {windows} audio windows (limit {MAX_AUDIO_WINDOWS}); use a longer --window or a shorter --duration"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<()> {
     let project = Project::load(project_path)?;
     let spec = sample_spec(
@@ -67,7 +91,7 @@ pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<
     let stage = analysis::StageDir::create(cache.root())?;
     let store = ProductStore::at(project_path);
     let hash = analysis::run_sidecar(
-        &spec,
+        analysis::SampleRequest::Frames(&spec),
         &entry,
         &stage,
         &store,
@@ -137,7 +161,7 @@ pub(crate) fn cmd_detect(project_path: &Path, args: DetectArgs<'_>) -> Result<()
     let stage = analysis::StageDir::create(cache.root())?;
     let store = ProductStore::at(project_path);
     let hash = analysis::run_sidecar(
-        &spec,
+        analysis::SampleRequest::Frames(&spec),
         &entry,
         &stage,
         &store,
@@ -146,6 +170,49 @@ pub(crate) fn cmd_detect(project_path: &Path, args: DetectArgs<'_>) -> Result<()
             floor_milli,
         },
         &analyzer,
+    )?;
+    let product: AnalysisProduct = store.load(&hash)?;
+    product
+        .validate()
+        .map_err(|error| anyhow::anyhow!("stored product: {error}"))?;
+    say!("{hash}");
+    Ok(())
+}
+
+/// `nile analysis analyze-audio --asset N …` — sample an audio window and run
+/// the bundled level analyzer out of process.
+pub(crate) struct AnalyzeAudioArgs<'a> {
+    pub(crate) asset: u32,
+    pub(crate) start: Option<&'a str>,
+    pub(crate) duration: Option<&'a str>,
+    pub(crate) window: Option<&'a str>,
+    pub(crate) sample_rate: Option<u32>,
+    pub(crate) channels: Option<u16>,
+}
+
+pub(crate) fn cmd_analyze_audio(project_path: &Path, args: AnalyzeAudioArgs<'_>) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let (spec, window_samples) = audio_spec(
+        &project,
+        args.asset,
+        args.start,
+        args.duration,
+        args.window,
+        args.sample_rate,
+        args.channels,
+    )?;
+    check_audio_window_budget(spec.sample_count(), window_samples)?;
+    let cache = SampleCache::new(analysis::sample_cache_dir(project_path));
+    let (_sample, entry) = cache.audio_entry(&spec)?;
+    let stage = analysis::StageDir::create(cache.root())?;
+    let store = ProductStore::at(project_path);
+    let hash = analysis::run_sidecar(
+        analysis::SampleRequest::Audio(&spec),
+        &entry,
+        &stage,
+        &store,
+        &analysis::Task::AudioLevels { window_samples },
+        &analysis::Analyzer::Bundled,
     )?;
     let product: AnalysisProduct = store.load(&hash)?;
     product
@@ -167,6 +234,88 @@ fn resolve_analyzer(path: Option<&Path>) -> Result<analysis::Analyzer> {
         bail!("analyzer path must be absolute: {}", selected.display());
     }
     Ok(analysis::Analyzer::External(selected))
+}
+
+/// Resolve the audio window and its window length in samples per channel.
+///
+/// Rate and channels default to the asset's own audio stream (48 kHz mono when
+/// the probe does not say), so a caller gets a sample at the media's rate
+/// without repeating the probe; `--sample-rate`/`--channels` override.
+fn audio_spec(
+    project: &Project,
+    asset: u32,
+    start: Option<&str>,
+    duration: Option<&str>,
+    window: Option<&str>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+) -> Result<(AudioSpec, u64)> {
+    let media = project
+        .asset(asset)
+        .with_context(|| format!("asset #{asset} is not in the media pool"))?;
+    if !media.probe.has_audio() {
+        bail!("asset #{asset} has no audio stream to sample");
+    }
+    let start = match start {
+        Some(value) => parse_cli_time(value, "--start")?,
+        None => Seconds::from_integer(0),
+    };
+    let duration = match duration {
+        Some(value) => parse_cli_time(value, "--duration")?,
+        None => {
+            let asset_duration = media.duration().with_context(|| {
+                format!("asset #{asset} has no probed duration; pass --duration")
+            })?;
+            default_duration(asset_duration, start)?
+        }
+    };
+    if duration <= Seconds::from_integer(0) {
+        bail!(BAD_WINDOW);
+    }
+    let stream = media.probe.audio();
+    let sample_rate = match sample_rate {
+        Some(rate) => rate,
+        None => stream
+            .and_then(|audio| audio.sample_rate.as_deref())
+            .and_then(|rate| rate.parse::<u32>().ok())
+            .filter(|rate| *rate > 0)
+            .unwrap_or(48_000),
+    };
+    if sample_rate == 0 {
+        bail!("--sample-rate must be non-zero");
+    }
+    let channels = match channels {
+        Some(channels) => channels,
+        None => stream
+            .and_then(|audio| audio.channels)
+            .and_then(|channels| u16::try_from(channels).ok())
+            .filter(|channels| *channels > 0)
+            .unwrap_or(1),
+    };
+    if channels == 0 {
+        bail!("--channels must be non-zero");
+    }
+    let window = match window {
+        Some(value) => parse_cli_time(value, "--window")?,
+        None => Seconds::new(1, 10),
+    };
+    if window <= Seconds::from_integer(0) {
+        bail!("--window must be positive");
+    }
+    let window_samples = samples_in(window, sample_rate);
+    if window_samples == 0 {
+        bail!("--window is shorter than one sample at {sample_rate} Hz");
+    }
+    Ok((
+        AudioSpec {
+            source: media.path.clone(),
+            start,
+            duration,
+            sample_rate,
+            channels,
+        },
+        window_samples,
+    ))
 }
 
 /// Resolve the shared source window into the grid the sampler will pack.
@@ -260,5 +409,27 @@ mod tests {
         // The ordinary non-integer case still subtracts exactly.
         let duration = default_duration(Seconds::new(10, 3), Seconds::new(1, 3)).unwrap();
         assert_eq!(duration, Seconds::from_integer(3));
+    }
+
+    #[test]
+    fn audio_window_count_rounds_up_and_the_cap_names_the_shape() {
+        assert_eq!(audio_window_count(0, 10), 0);
+        assert_eq!(
+            audio_window_count(9, 10),
+            1,
+            "a partial window still counts"
+        );
+        assert_eq!(audio_window_count(10, 10), 1);
+        assert_eq!(audio_window_count(11, 10), 2);
+        assert_eq!(audio_window_count(1, 0), 0, "no zero-sample window");
+
+        assert!(check_audio_window_budget(MAX_AUDIO_WINDOWS, 1).is_ok());
+        let error = check_audio_window_budget(MAX_AUDIO_WINDOWS + 1, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("250001"), "{error}");
+        assert!(error.contains("250000"), "{error}");
+        assert!(error.contains("--window"), "{error}");
+        assert!(error.contains("--duration"), "{error}");
     }
 }

@@ -1481,6 +1481,7 @@ fn result_kind(result: &ProductResult) -> &'static str {
     match result {
         ProductResult::MeanLuma { .. } => "mean_luma",
         ProductResult::SubjectBoxes { .. } => "subject_boxes",
+        ProductResult::AudioLevels { .. } => "audio_levels",
     }
 }
 
