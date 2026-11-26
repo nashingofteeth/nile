@@ -252,6 +252,19 @@ fn audio_post_chain(audio: &AudioSettings, duration: Seconds, audible: bool) -> 
     chain
 }
 
+/// The same chain as an `-af` argument for a caller that joins audio first
+/// (the chunk scheduler's final mux). `None` when the sequence opts out or
+/// there is no audio material to shape.
+pub fn audio_post_filter(project: &Project) -> Option<String> {
+    let chain = audio_post_chain(
+        &project.audio,
+        project.timeline.end(),
+        has_audio_material(project),
+    );
+    let chain = chain.strip_prefix(',').unwrap_or(&chain);
+    (!chain.is_empty()).then(|| chain.to_string())
+}
+
 fn keyed_crop(clip: &Clip) -> Option<&Effect> {
     clip.effects.iter().find(|effect| {
         matches!(
@@ -1738,6 +1751,25 @@ mod tests {
         let g = compile_export(&p).unwrap().graph;
         assert!(!g.contains("loudnorm"), "{g}");
         assert!(!g.contains("afade"), "{g}");
+    }
+
+    #[test]
+    fn audio_post_filter_is_none_by_default_and_strips_the_concat_comma() {
+        assert_eq!(audio_post_filter(&project_with_two_clips()), None);
+        let mut p = project_with_two_clips();
+        p.audio = AudioSettings {
+            normalize: true,
+            fade_in: Seconds::new(1, 2),
+            fade_out: Seconds::new(1, 4),
+        };
+        let filter = audio_post_filter(&p).expect("the sequence opted in");
+        assert!(filter.starts_with(LOUDNORM_FILTER), "{filter}");
+        assert!(filter.contains(",aresample=48000"), "{filter}");
+        assert!(filter.ends_with("afade=t=out:st=14.75:d=0.25"), "{filter}");
+        assert!(
+            !filter.starts_with(','),
+            "the final mux passes this to -af, not to a label:\n{filter}"
+        );
     }
 
     #[test]

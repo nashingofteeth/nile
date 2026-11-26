@@ -451,8 +451,9 @@ nile export -o final.mp4 --parallel 2      # chunked export, opt-in
 # grid. If a hardware chunk fails, the whole run retries on the CPU rather than
 # mixing encoder heads in one stream-copied file. Auto mode stays single-worker:
 # local tests showed no gain.
-# A sequence with audio post (normalize/fades) also stays single: those filters
-# shape the whole programme, so chunks would repeat them at every seam.
+# A sequence with audio post (normalize/fades) also chunks: chunks are plain
+# PCM and the final mux applies the chain once over the joined programme,
+# before its single AAC encode.
 
 nile bench [--runs N] [--preset preview|balanced|max] [--parallel N]
 # Renders to a temp file and reports wall time and effective fps.
