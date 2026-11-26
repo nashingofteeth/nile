@@ -35,7 +35,7 @@ use nle_core::analysis::{
 };
 use nle_ffmpeg::sampling::{
     AudioSpec, FrameMode, FrameSpec, MAX_SAMPLE_BYTES, SAMPLE_VERSION, SampleData, SampleEntry,
-    SampleMeta,
+    SampleMeta, samples_in,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -1376,14 +1376,9 @@ impl AudioRequest {
         Ok(())
     }
 
-    /// `floor(duration × sample_rate)` in exact integers.
+    /// The sample count the request allows, from the shared exact floor.
     fn sample_count(&self) -> u64 {
-        let numerator = i128::from(*self.duration.numer()) * i128::from(self.sample_rate);
-        let denominator = i128::from(*self.duration.denom());
-        if numerator <= 0 || denominator <= 0 {
-            return 0;
-        }
-        (numerator / denominator).min(u64::MAX as i128) as u64
+        samples_in(self.duration, self.sample_rate)
     }
 }
 

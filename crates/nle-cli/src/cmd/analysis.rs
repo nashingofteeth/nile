@@ -10,7 +10,7 @@ use nle_core::analysis::{
 };
 use nle_core::time::checked_sub;
 use nle_core::{Project, Seconds, parse_time};
-use nle_ffmpeg::sampling::{AudioSpec, FrameMode, FrameSpec, SampleCache};
+use nle_ffmpeg::sampling::{AudioSpec, FrameMode, FrameSpec, SampleCache, samples_in};
 
 use crate::{analysis, parse_fps_arg, say};
 
@@ -49,6 +49,30 @@ pub(crate) struct AnalyzeArgs<'a> {
 }
 
 const BAD_WINDOW: &str = "--duration must be positive (the window ends at or before its start)";
+
+/// The most level windows one product may contain. A one-sample window over a
+/// long payload would build millions of entries before the product-byte cap
+/// ever noticed; this refuses the shape up front, before sampling.
+const MAX_AUDIO_WINDOWS: u64 = 250_000;
+
+/// `ceil(samples / window_samples)`; zero samples or a zero window have no
+/// windows rather than dividing by zero.
+fn audio_window_count(samples: u64, window_samples: u64) -> u64 {
+    if window_samples == 0 {
+        return 0;
+    }
+    samples / window_samples + u64::from(!samples.is_multiple_of(window_samples))
+}
+
+fn check_audio_window_budget(samples: u64, window_samples: u64) -> Result<()> {
+    let windows = audio_window_count(samples, window_samples);
+    if windows > MAX_AUDIO_WINDOWS {
+        bail!(
+            "the window would make {windows} audio windows (limit {MAX_AUDIO_WINDOWS}); use a longer --window or a shorter --duration"
+        );
+    }
+    Ok(())
+}
 
 pub(crate) fn cmd_analyze(project_path: &Path, args: AnalyzeArgs<'_>) -> Result<()> {
     let project = Project::load(project_path)?;
@@ -177,6 +201,7 @@ pub(crate) fn cmd_analyze_audio(project_path: &Path, args: AnalyzeAudioArgs<'_>)
         args.sample_rate,
         args.channels,
     )?;
+    check_audio_window_budget(spec.sample_count(), window_samples)?;
     let cache = SampleCache::new(analysis::sample_cache_dir(project_path));
     let (_sample, entry) = cache.audio_entry(&spec)?;
     let stage = analysis::StageDir::create(cache.root())?;
@@ -277,7 +302,7 @@ fn audio_spec(
     if window <= Seconds::from_integer(0) {
         bail!("--window must be positive");
     }
-    let window_samples = floor_samples(window, sample_rate);
+    let window_samples = samples_in(window, sample_rate);
     if window_samples == 0 {
         bail!("--window is shorter than one sample at {sample_rate} Hz");
     }
@@ -291,17 +316,6 @@ fn audio_spec(
         },
         window_samples,
     ))
-}
-
-/// `floor(window × sample_rate)` in exact integers: a window is a whole number
-/// of samples, never a rounded-up one that would overrun the payload.
-fn floor_samples(window: Seconds, sample_rate: u32) -> u64 {
-    let numerator = i128::from(*window.numer()) * i128::from(sample_rate);
-    let denominator = i128::from(*window.denom());
-    if numerator <= 0 || denominator <= 0 {
-        return 0;
-    }
-    (numerator / denominator).min(u64::MAX as i128) as u64
 }
 
 /// Resolve the shared source window into the grid the sampler will pack.
@@ -395,5 +409,27 @@ mod tests {
         // The ordinary non-integer case still subtracts exactly.
         let duration = default_duration(Seconds::new(10, 3), Seconds::new(1, 3)).unwrap();
         assert_eq!(duration, Seconds::from_integer(3));
+    }
+
+    #[test]
+    fn audio_window_count_rounds_up_and_the_cap_names_the_shape() {
+        assert_eq!(audio_window_count(0, 10), 0);
+        assert_eq!(
+            audio_window_count(9, 10),
+            1,
+            "a partial window still counts"
+        );
+        assert_eq!(audio_window_count(10, 10), 1);
+        assert_eq!(audio_window_count(11, 10), 2);
+        assert_eq!(audio_window_count(1, 0), 0, "no zero-sample window");
+
+        assert!(check_audio_window_budget(MAX_AUDIO_WINDOWS, 1).is_ok());
+        let error = check_audio_window_budget(MAX_AUDIO_WINDOWS + 1, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("250001"), "{error}");
+        assert!(error.contains("250000"), "{error}");
+        assert!(error.contains("--window"), "{error}");
+        assert!(error.contains("--duration"), "{error}");
     }
 }

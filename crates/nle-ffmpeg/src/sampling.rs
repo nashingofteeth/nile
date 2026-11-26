@@ -419,13 +419,23 @@ pub struct AudioSpec {
     pub channels: u16,
 }
 
+/// `floor(duration × sample_rate)` in exact integers, the one definition of an
+/// audio sample count. The sampler, the CLI's `--window` conversion and the
+/// sidecar request all cross-check counts against it, so they cannot disagree
+/// by a rounding rule.
+pub fn samples_in(duration: Seconds, sample_rate: u32) -> u64 {
+    let numerator = i128::from(*duration.numer()) * i128::from(sample_rate);
+    let denominator = i128::from(*duration.denom());
+    if numerator <= 0 || denominator <= 0 {
+        return 0;
+    }
+    (numerator / denominator).min(u64::MAX as i128) as u64
+}
+
 impl AudioSpec {
     /// Samples per channel in the requested range.
     pub fn sample_count(&self) -> u64 {
-        product_floor(
-            self.duration,
-            Seconds::from_integer(self.sample_rate as i64),
-        )
+        samples_in(self.duration, self.sample_rate)
     }
 
     fn validate(&self) -> Result<(), SampleError> {
