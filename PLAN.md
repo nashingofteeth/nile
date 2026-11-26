@@ -612,7 +612,7 @@ shared by the TUI and agents — with no clipgen code present.
   moved note to the right frame; a cancelled job leaves no deliverable and its
   report records the snapshot revision.
 
-### 6. Analysis sampling + sidecar contract (sampler + sidecar landed; CV pending)
+### 6. Analysis sampling + sidecar contract (sampler + sidecar + subject boxes landed; audio pending)
 
 - Landed: `nle-ffmpeg/src/sampling.rs` — `FrameSpec`/`AudioSpec`, packed
   RGB24/PCM, and a `SampleCache` keyed by version + params + canonical source
@@ -625,9 +625,13 @@ shared by the TUI and agents — with no clipgen code present.
 - Landed: per-frame times and exact source-frame index requests (at most 96
   per request; a request naming a frame past the media end is refused), sampler
   byte/frame caps, and `nile cache prune` coverage for `cache/analysis` plus
-  abandoned staging (products are never swept). Pending: audio analysis and
-  CV-backed checks. ML stays out of process and out of the Rust dependency
-  graph.
+  abandoned staging (products are never swept). Subject boxes landed:
+  `nile analysis detect` samples a grid and runs an out-of-process detector
+  (bundled colour test double, or an absolute `--analyzer`), products carry
+  normalized millionth boxes on a `SampleGrid`, and `subject-in-frame` maps
+  each output frame through the report to the product grid and the clip's
+  crop. Protocol 2; project v19/history v25. Pending: audio analysis. ML stays
+  out of process and out of the Rust dependency graph.
 
 ### 7. Toolkit hooks (after the core)
 
