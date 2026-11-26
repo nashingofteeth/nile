@@ -18,3 +18,12 @@ Read before touching `crates/nle-core/src/otio.rs` or `import-otio`.
   `serde_json::Value`; a `#[serde(tag)]` enum breaks on a version bump.
 - **`Clip.2` nests media under `media_references.DEFAULT_MEDIA`** (a map),
   while `Clip.1` uses a singular `media_reference` — handle both.
+
+- **`--append` adds after the current sequence end.** Every imported track
+  keeps its kind **and `enabled`/mute state**: it reuses the first unclaimed
+  existing track with the same pair, otherwise creates a track with that mute
+  flag. `--track N` chooses the target video track and refuses a mute
+  mismatch. Targets are padded to the common end. The project's frame rate and
+  canvas size win — conflicting `--fps`/`--size` values are refused — and
+  `--force` conflicts with `--append`. Already-pooled clip paths are reused
+  instead of re-probed.

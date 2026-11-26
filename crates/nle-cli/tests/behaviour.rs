@@ -2558,6 +2558,323 @@ fn otio_import_round_trip() {
     s.assert_dur("otio.mp4", 5.0, "5 s");
 }
 
+/// `--append` adds after the current sequence end instead of replacing it.
+/// The imported record gap (event 2 starts one second late) lands after the
+/// first appended clip, so the seam and the gap are both visible.
+#[test]
+fn edl_import_append_after_the_timeline() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.write(
+        "extra.edl",
+        "TITLE: extra\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: blue.mp4\n\
+         002  AX  V  C  00:00:00:00 00:00:01:00 01:00:02:00 01:00:03:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    s.ok(&["import-edl", "extra.edl", "--media", ".", "--append"]);
+    // The original three clips are untouched; the import starts at 6 s, its
+    // interior record gap lands at 7–8 s.
+    assert!(s.show().contains("9 s"), "6 s + 3 s: {}", s.show());
+    s.export("edl-append.mp4");
+    s.assert_dur("edl-append.mp4", 9.0, "the timeline grew, not replaced");
+    s.assert_px("edl-append.mp4", 1.0, RED, "original event 1");
+    s.assert_px("edl-append.mp4", 3.0, GREEN, "original event 2");
+    s.assert_px("edl-append.mp4", 5.0, BLUE, "original event 3");
+    s.assert_px("edl-append.mp4", 6.5, BLUE, "appended event 1");
+    s.assert_px("edl-append.mp4", 7.5, BLACK, "the appended record gap");
+    s.assert_px("edl-append.mp4", 8.5, RED, "appended event 2");
+}
+
+/// `--append --track N` targets a video track other than the base one; the
+/// base sequence is left alone (the target is padded to the common end).
+#[test]
+fn edl_import_append_can_target_an_overlay_track() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.ok(&["track", "add", "video"]);
+    s.write(
+        "one.edl",
+        "TITLE: one\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    s.ok(&[
+        "import-edl",
+        "one.edl",
+        "--media",
+        ".",
+        "--append",
+        "--track",
+        "2",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let tracks = project["sequences"][0]["timeline"]["tracks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        tracks[0]["segments"].as_array().unwrap().len(),
+        3,
+        "the base track did not change"
+    );
+    let overlay = tracks[1]["segments"].as_array().unwrap();
+    assert_eq!(overlay.len(), 2, "padding gap + clip: {overlay:?}");
+    assert!(overlay[0].get("Gap").is_some(), "the target was padded");
+    assert!(
+        overlay[1].get("Clip").is_some(),
+        "the clip landed on track 2"
+    );
+}
+
+/// An audio-only EDL imports as the model's smallest pictureless shape: an
+/// empty base video track plus the audio track. No video clip is invented,
+/// and the black canvas still exports because `--size` supplies the frame
+/// geometry that audio-only media cannot.
+#[test]
+fn edl_import_audio_only() {
+    let s = Sandbox::new();
+    let media = s.path().join("audio-media");
+    fs::create_dir(&media).unwrap();
+    fs::copy(s.file("audio_only.m4a"), media.join("audio_only.m4a")).unwrap();
+    s.write(
+        "audio.edl",
+        "TITLE: audio\nFCM: NON-DROP FRAME\n\n\
+         001  MU  A  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: audio_only.m4a\n\
+         002  MU  A  C  00:00:00:00 00:00:01:00 01:00:02:00 01:00:03:00\n\
+         * FROM CLIP NAME: audio_only.m4a\n",
+    );
+
+    // A pictureless pool has no size to infer, and an unexportable project is
+    // not a successful import: refuse before writing anything.
+    let out = s.run(&[
+        "import-edl",
+        "audio.edl",
+        "--media",
+        "audio-media",
+        "--fps",
+        "30",
+    ]);
+    let text = merged(&out);
+    assert!(!out.status.success(), "a missing size must refuse:\n{text}");
+    assert!(text.contains("no video size known"), "{text}");
+    assert!(text.contains("--size"), "{text}");
+    assert!(!s.file(P).exists(), "the refusal wrote a project");
+
+    s.ok(&[
+        "import-edl",
+        "audio.edl",
+        "--media",
+        "audio-media",
+        "--fps",
+        "30",
+        "--size",
+        "1280x720",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let tracks = project["sequences"][0]["timeline"]["tracks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(tracks.len(), 2, "empty video + audio");
+    assert_eq!(tracks[0]["kind"], "Video");
+    assert!(
+        tracks[0]["segments"].as_array().unwrap().is_empty(),
+        "no video material was invented: {}",
+        tracks[0]
+    );
+    assert_eq!(tracks[1]["kind"], "Audio");
+    let segments = tracks[1]["segments"].as_array().unwrap();
+    assert_eq!(segments.len(), 3, "clip, record gap, clip");
+    assert!(segments[0].get("Clip").is_some());
+    assert!(segments[1].get("Gap").is_some());
+    let asset = segments[0]["Clip"]["asset"].as_u64().expect("asset id");
+    let path = project["media"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"].as_u64() == Some(asset))
+        .and_then(|a| a["path"].as_str())
+        .expect("the audio asset");
+    assert!(path.ends_with("audio_only.m4a"), "{path}");
+    assert!(
+        s.show().contains("3 s"),
+        "audio drives the length: {}",
+        s.show()
+    );
+
+    // The empty base video track is a black canvas, not an export blocker.
+    s.export("audio-only.mp4");
+    s.assert_dur("audio-only.mp4", 3.0, "audio-only timeline");
+    assert_eq!(s.size("audio-only.mp4"), (1280, 720), "--size wins");
+    assert!(s.has_audio("audio-only.mp4"), "the audio track was mixed");
+    s.assert_px("audio-only.mp4", 0.5, BLACK, "no invented picture");
+}
+
+/// `--append` uses the same flag for OTIO: clips land after the current
+/// sequence end, gaps included.
+#[test]
+fn otio_import_append_after_the_timeline() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.write("extra.otio", OTIO);
+    s.ok(&["import-otio", "extra.otio", "--append"]);
+    assert!(s.show().contains("11 s"), "6 s + 5 s: {}", s.show());
+    s.export("otio-append.mp4");
+    s.assert_dur("otio-append.mp4", 11.0, "the timeline grew, not replaced");
+    s.assert_px("otio-append.mp4", 1.0, RED, "original clip 1");
+    s.assert_px("otio-append.mp4", 5.0, BLUE, "original clip 3");
+    s.assert_px("otio-append.mp4", 6.5, RED, "appended clip 1");
+    s.assert_px("otio-append.mp4", 8.5, BLACK, "the appended OTIO gap");
+    s.assert_px("otio-append.mp4", 10.0, GREEN, "appended clip 2");
+}
+
+/// A mixed EDL (picture plus a distinct audio event) appends both tracks at
+/// the same end: the base video has no leading gap, the new audio track is
+/// padded with one, so the pair starts together at 6 s.
+#[test]
+fn edl_import_append_mixed_video_and_audio_stays_aligned() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.write(
+        "mixed.edl",
+        "TITLE: mixed\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n\
+         * FROM CLIP NAME: red.mp4\n\
+         002  MU  A  C  00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n\
+         * FROM CLIP NAME: audio_only.m4a\n",
+    );
+    s.ok(&["import-edl", "mixed.edl", "--media", ".", "--append"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let tracks = project["sequences"][0]["timeline"]["tracks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(tracks.len(), 2, "video + appended audio track");
+    let video = tracks[0]["segments"].as_array().unwrap();
+    assert_eq!(video.len(), 4, "three base clips + the appended video clip");
+    assert!(video[3].get("Clip").is_some());
+    let audio = tracks[1]["segments"].as_array().unwrap();
+    assert_eq!(audio.len(), 2, "padding gap + audio clip");
+    assert_eq!(audio[0]["Gap"]["duration"], "6/1", "audio starts at 6 s");
+    assert!(audio[1].get("Clip").is_some());
+
+    s.export("mixed-append.mp4");
+    s.assert_dur("mixed-append.mp4", 8.0, "both tracks run 6–8 s");
+    s.assert_px("mixed-append.mp4", 6.5, RED, "the appended picture");
+    assert!(
+        s.has_audio("mixed-append.mp4"),
+        "the appended audio is mixed"
+    );
+}
+
+/// A disabled OTIO track keeps its mute state on append: it lands on the
+/// existing muted track, not the unmuted base, and the unmuted track is
+/// untouched. The muted clip contributes no picture.
+#[test]
+fn otio_import_append_preserves_mute() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.ok(&["track", "add", "video"]);
+    s.ok(&["track", "mute", "2"]);
+    s.write(
+        "muted.otio",
+        r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
+          { "OTIO_SCHEMA": "Track.1", "kind": "Video", "enabled": false, "children": [
+            { "OTIO_SCHEMA": "Clip.1", "name": "red.mp4",
+              "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 30, "value": 0 },
+                "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": 30, "value": 30 } },
+              "media_reference": { "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": "red.mp4" } }
+          ] }
+        ] } }"#,
+    );
+    s.ok(&["import-otio", "muted.otio", "--append"]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let tracks = project["sequences"][0]["timeline"]["tracks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        tracks[0]["segments"].as_array().unwrap().len(),
+        3,
+        "the unmuted base track was untouched"
+    );
+    assert_eq!(tracks[1]["muted"], true, "the muted target stayed muted");
+    let muted = tracks[1]["segments"].as_array().unwrap();
+    assert_eq!(muted.len(), 2, "padding gap + clip");
+    assert!(muted[0].get("Gap").is_some());
+    assert!(muted[1].get("Clip").is_some());
+
+    // The muted track extends the timeline to 7 s but contributes no picture.
+    s.export("muted-append.mp4");
+    s.assert_dur("muted-append.mp4", 7.0, "the muted clip still sets length");
+    s.assert_px(
+        "muted-append.mp4",
+        6.5,
+        BLACK,
+        "a muted clip is not composited",
+    );
+}
+
+/// An explicit `--track` whose mute state disagrees with the imported track is
+/// refused, rather than silently changing what the user hears/sees.
+#[test]
+fn otio_import_append_refuses_a_track_mute_mismatch() {
+    let s = Sandbox::new();
+    s.local_base();
+    s.ok(&["track", "add", "video"]);
+    let before = s.read(P);
+    s.write(
+        "muted.otio",
+        r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
+          { "OTIO_SCHEMA": "Track.1", "kind": "Video", "enabled": false, "children": [
+            { "OTIO_SCHEMA": "Clip.1", "name": "red.mp4",
+              "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 30, "value": 0 },
+                "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": 30, "value": 30 } },
+              "media_reference": { "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": "red.mp4" } }
+          ] }
+        ] } }"#,
+    );
+    let text = s.err(&["import-otio", "muted.otio", "--append", "--track", "2"]);
+    assert!(text.contains("mute state"), "{text}");
+    assert_eq!(s.read(P), before, "the refusal wrote the project");
+}
+
+/// An append keeps the sequence's canvas; asking for a different `--size` is
+/// the size equivalent of a conflicting `--fps`.
+#[test]
+fn import_append_refuses_a_conflicting_size() {
+    let s = Sandbox::new();
+    s.local_base();
+    let before = s.read(P);
+    s.write(
+        "one.edl",
+        "TITLE: one\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    let text = s.err(&[
+        "import-edl",
+        "one.edl",
+        "--media",
+        ".",
+        "--append",
+        "--size",
+        "1280x720",
+    ]);
+    assert!(
+        text.contains("--append keeps the project's 320x240"),
+        "{text}"
+    );
+    assert_eq!(s.read(P), before, "the refusal wrote the project");
+}
+
 #[test]
 fn transitions() {
     let s = Sandbox::new();

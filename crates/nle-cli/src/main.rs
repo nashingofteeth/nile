@@ -445,6 +445,15 @@ enum Cmd {
         /// Group files as one recording: NAME=FILE,FILE,… (repeatable)
         #[arg(long = "group", value_name = "NAME=FILE,…")]
         group: Vec<GroupSpec>,
+        /// Append to the existing project instead of replacing it
+        #[arg(long, conflicts_with = "force")]
+        append: bool,
+        /// Video track to append to (1-based; default: first video track)
+        #[arg(long, value_name = "N", requires = "append")]
+        track: Option<usize>,
+        /// Output size for a project with no video asset: WxH (e.g. 1280x720)
+        #[arg(long, value_name = "WxH")]
+        size: Option<String>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -465,6 +474,15 @@ enum Cmd {
         /// Group files as one recording: NAME=FILE,FILE,… (repeatable)
         #[arg(long = "group", value_name = "NAME=FILE,…")]
         group: Vec<GroupSpec>,
+        /// Append to the existing project instead of replacing it
+        #[arg(long, conflicts_with = "force")]
+        append: bool,
+        /// Video track to append to (1-based; default: first video track)
+        #[arg(long, value_name = "N", requires = "append")]
+        track: Option<usize>,
+        /// Output size for a project with no video asset: WxH (e.g. 1280x720)
+        #[arg(long, value_name = "WxH")]
+        size: Option<String>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -1267,6 +1285,9 @@ fn main() -> Result<()> {
             src_offset,
             map,
             group,
+            append,
+            track,
+            size,
             force,
         } => {
             return cmd_import_edl(EdlImport {
@@ -1277,6 +1298,9 @@ fn main() -> Result<()> {
                 src_offset,
                 maps: map,
                 groups: group,
+                append: *append,
+                track: *track,
+                size: size.as_deref(),
                 force: *force,
             });
         }
@@ -1286,6 +1310,9 @@ fn main() -> Result<()> {
             fps,
             remap,
             group,
+            append,
+            track,
+            size,
             force,
         } => {
             return cmd_import_otio(OtioImport {
@@ -1295,6 +1322,9 @@ fn main() -> Result<()> {
                 fps: fps.as_deref(),
                 remaps: remap,
                 groups: group,
+                append: *append,
+                track: *track,
+                size: size.as_deref(),
                 force: *force,
             });
         }

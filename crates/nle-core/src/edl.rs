@@ -167,8 +167,12 @@ pub type ReelMap<'a> = dyn Fn(&EdlEvent) -> Option<u32> + 'a;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum BuildError {
-    #[error("no video events in the EDL")]
-    NoVideo,
+    #[error("the EDL has no events")]
+    Empty,
+    #[error(
+        "event {event}: unknown channel {channel:?} (expected V, A, A2, AA, B, or a slash combination)"
+    )]
+    UnknownChannel { event: u32, channel: String },
     #[error("event {event}: overlapping record time (cuts only)")]
     Overlap { event: u32 },
     #[error("event {event}: source out is not after source in")]
@@ -201,14 +205,31 @@ pub fn is_black_reel(reel: &str) -> bool {
     )
 }
 
-/// The audio channel a code names (`AA/V` → `AA`, `A2/V` → `A2`), or `None`
-/// when it names no audio. The parts are the grouping key, so `AA/V` and `AA`
-/// land on the same track.
+/// Is this channel code entirely known? Parts combine with `/`, and each
+/// must name video (`V…`), audio (`A…`) or both audio channels (`B`). An
+/// unknown part is a hard error in [`build`] — dropping the event silently
+/// would make the rest of the record timeline look right while one event
+/// vanished.
+fn valid_channel(channel: &str) -> bool {
+    channel.split('/').all(|part| {
+        let part = part.trim().to_ascii_uppercase();
+        !part.is_empty() && (part == "B" || part.starts_with('A') || part.starts_with('V'))
+    })
+}
+
+/// The audio channel a code names (`AA/V` → `AA`, `A2/V` → `A2`, `B` → `AA`),
+/// or `None` when it names no audio. The parts are the grouping key, so
+/// `AA/V` and `AA` land on the same track; `B` is CMX for both audio
+/// channels, so it groups with `AA` instead of inventing a third channel.
 fn audio_channel(channel: &str) -> Option<String> {
     let parts: Vec<String> = channel
         .split('/')
         .map(|p| p.trim().to_ascii_uppercase())
-        .filter(|p| p.starts_with('A'))
+        .filter_map(|p| match p.as_str() {
+            "B" => Some("AA".to_string()),
+            _ if p.starts_with('A') => Some(p),
+            _ => None,
+        })
         .collect();
     (!parts.is_empty()).then(|| parts.join("/"))
 }
@@ -218,30 +239,43 @@ fn frames_of(tc: Timecode, doc: &EdlDoc, fps: Seconds) -> i64 {
 }
 
 /// Build a timeline from `doc`: video events become video track 0, then one
-/// audio track per distinct audio channel. Record-position gaps become `Gap`
-/// segments; source timecodes map to file time by subtracting
-/// `src_offset_frames`. A clip plays at `source_span / record_span` — for a
-/// plain 1× edit that is exactly `1`, and when an EDL came out of an edit
-/// with a speed change the ratio recovers it (so the built timeline still
-/// matches the record times instead of drifting after the event). Audio
-/// events whose reel + source range match a video event are *linked* (the
-/// video clip already carries that audio) and are skipped, so linked a/v
-/// doesn't double.
+/// audio track per distinct audio channel. A document with no video events is
+/// audio-only — the model requires a video track, so track 0 is still present
+/// but empty (no invented picture), and the timeline's length comes from the
+/// audio tracks. Record-position gaps become `Gap` segments; source
+/// timecodes map to file time by subtracting `src_offset_frames`. A clip
+/// plays at `source_span / record_span` — for a plain 1× edit that is exactly
+/// `1`, and when an EDL came out of an edit with a speed change the ratio
+/// recovers it (so the built timeline still matches the record times instead
+/// of drifting after the event). Audio events whose reel + source range match
+/// a video event are *linked* (the video clip already carries that audio) and
+/// are skipped, so linked a/v doesn't double.
 pub fn build(
     doc: &EdlDoc,
     fps: Seconds,
     src_offset_frames: i64,
     resolve: &ReelMap,
 ) -> Result<Timeline, BuildError> {
+    // An event's channel must name picture or sound. Refuse an unknown code
+    // instead of dropping the event: a missing event shifts every later cut
+    // off record time, which looks like a conform bug rather than bad input.
+    if doc.events.is_empty() {
+        return Err(BuildError::Empty);
+    }
+    for ev in &doc.events {
+        if !valid_channel(&ev.channel) {
+            return Err(BuildError::UnknownChannel {
+                event: ev.num,
+                channel: ev.channel.clone(),
+            });
+        }
+    }
     let mut video: Vec<&EdlEvent> = doc
         .events
         .iter()
         .filter(|e| channel_has(&e.channel, 'V'))
         .collect();
     video.sort_by_key(|e| frames_of(e.rec_in, doc, fps));
-    if video.is_empty() {
-        return Err(BuildError::NoVideo);
-    }
 
     let mut next_id = 1u32;
     // Standard EDLs start record time at 01:00:00:00 — the earliest event
@@ -655,5 +689,73 @@ FCM: NON-DROP FRAME
         // The linked A event (same reel + src as the video) is skipped;
         // only the MU event remains.
         assert_eq!(tl.tracks[1].segments.len(), 1);
+    }
+
+    // An audio-only EDL has no picture to invent: the base video track is
+    // present (the model requires one) but empty, and the record layout lives
+    // on the audio track. Timeline length comes from the audio, not from 0.
+    #[test]
+    fn an_audio_only_edl_builds_an_empty_video_track() {
+        let edl = "\
+001 MU A C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+002 MU A C 00:00:02:00 00:00:03:00 01:00:03:00 01:00:04:00
+";
+        let doc = parse(edl).unwrap();
+        let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
+        assert_eq!(tl.tracks.len(), 2, "empty video + audio");
+        assert_eq!(tl.tracks[0].kind, TrackKind::Video);
+        assert!(tl.tracks[0].segments.is_empty(), "no invented picture");
+        assert_eq!(tl.tracks[1].kind, TrackKind::Audio);
+        // Event 2 starts one second late: clip, gap, clip on the audio track.
+        assert_eq!(tl.tracks[1].segments.len(), 3);
+        assert!(matches!(
+            &tl.tracks[1].segments[1],
+            Segment::Gap(g) if g.duration == Seconds::from_integer(1)
+        ));
+        assert_eq!(tl.end(), Seconds::from_integer(4), "record time wins");
+        tl.validate().expect("a video track may be empty");
+    }
+
+    // CMX `B` is both audio channels, so it is audio (grouped like `AA`), not
+    // an unknown code and not picture.
+    #[test]
+    fn a_b_channel_is_audio_not_an_unknown() {
+        let edl = "001 MU B C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n";
+        let doc = parse(edl).unwrap();
+        let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
+        assert_eq!(tl.tracks.len(), 2);
+        assert!(tl.tracks[0].segments.is_empty());
+        assert_eq!(tl.tracks[1].kind, TrackKind::Audio);
+        assert_eq!(tl.tracks[1].segments.len(), 1);
+    }
+
+    // An empty document has nothing to build; an empty project is not an
+    // import. (A document with only audio events is valid, see above.)
+    #[test]
+    fn an_empty_edl_is_refused() {
+        let doc = EdlDoc {
+            title: None,
+            drop_frame: false,
+            events: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let err = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap_err();
+        assert_eq!(err, BuildError::Empty);
+    }
+
+    // An unknown channel is refused by name; dropping it would delete an
+    // event and shift the rest of the record timeline.
+    #[test]
+    fn an_unknown_channel_is_refused() {
+        for channel in ["X", "V/X", "N"] {
+            let edl =
+                format!("001 MU {channel} C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n");
+            let doc = parse(&edl).unwrap();
+            let err = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap_err();
+            assert!(
+                matches!(&err, BuildError::UnknownChannel { event: 1, channel: c } if c == channel),
+                "{channel}: {err:?}"
+            );
+        }
     }
 }
