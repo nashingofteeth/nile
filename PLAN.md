@@ -594,24 +594,32 @@ shared by the TUI and agents — with no clipgen code present.
   with TUI and `sequence.audio` parity; one-pass `loudnorm` at -16 LUFS/
   -1.5 dBTP/LRA 11 plus clamped programme fades, applied once after the final
   mix at 48 kHz. Chunked export stays single while audio post is active.
-  Remaining: move the chain to the scheduler's final mux so parallel chunks
-  can carry it, then jobs. Known gaps: silent-stream loudnorm detection;
+  Remaining: move the audio chain to the scheduler's final mux so parallel
+  chunks can carry it. Jobs also landed: `nile serve` owns durable
+  `.nile/<stem>/jobs/<id>/` records, snapshotted at submit
+  (`job.submit|list|get|cancel|remove` on protocol v5, revision CAS,
+  one-at-a-time FIFO, startup recovery, cancel, retained reports, `nile job …`
+  and the TUI `:jobs` panel). Remaining: silent-stream loudnorm detection,
+  async job-event push, orphan-temp cleanup, age/count job pruning. Known gap:
   explicit EDL/OTIO `--map`/`--group` non-UTF-8 paths (CLI import and the
   `--media` scan are guarded).
-- **Gate:** a keyframed crop export is frame-exact and its report maps a
-  moved note to the right frame; a cancelled job leaves no half-written
-  deliverable.
+- **Gate (met):** a keyframed crop export is frame-exact and its report maps a
+  moved note to the right frame; a cancelled job leaves no deliverable and its
+  report records the snapshot revision.
 
-### 6. Analysis sampling + sidecar contract (sampler landed; sidecar pending)
+### 6. Analysis sampling + sidecar contract (sampler + sidecar landed; CV pending)
 
 - Landed: `nle-ffmpeg/src/sampling.rs` — `FrameSpec`/`AudioSpec`, packed
   RGB24/PCM, and a `SampleCache` keyed by version + params + canonical source
   + size/mtime, with offline lookup and atomic raw+meta writes.
   `docs/pitfalls/analysis.md` is the contract.
-- Pending: the cache-root wiring in `nile-cli`, the NDJSON sidecar and staged
-  products under `analysis/products/`, per-frame times/indices, byte/frame
-  caps, the hidden trivial analyzer, and CV-backed checks. ML stays out of
-  process and out of the Rust dependency graph.
+- Sidecar landed: `nile analysis analyze` samples through
+  `.nile/<stem>/cache/analysis`, spawns the hidden `nile analysis-analyzer`
+  over NDJSON, and stages/validates products under `analysis/products/`
+  (`a1-…`); the bundled mean-luma analyzer proves the contract.
+- Pending: per-frame times/indices, byte/frame caps, cache-prune for samples
+  and staging, audio analysis, and CV-backed checks. ML stays out of process
+  and out of the Rust dependency graph.
 
 ### 7. Toolkit hooks (after the core)
 
