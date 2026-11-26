@@ -57,13 +57,16 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   - `subject-in-frame --asset N --product a1-… --label NAME [--subject-id ID]
     [--margin P] [--min-confidence F] [--tolerance-frames N]`: every detected
     box of that label (optionally one detector instance) with confidence at
-    least F (default 1.0) stays inside the clip's crop window with P% of the
-    window on every side (default 5). The `a1-…` is the `analysis detect`
-    product for that asset; evaluation maps each output frame through the
-    report to its source time, then to the product's sample grid, so it checks
-    the delivered picture rather than the clip plan. Missing box is a fail;
-    blend frames, `scale`/`offset`, an out-of-grid frame and a product for
-    another source are unverifiable. Details: `docs/pitfalls/analysis.md`.
+    least F (default 0.0: every box the product retained) stays inside the
+    clip's crop window with P% of the window on every side (default 5). The
+    `a1-…` is the `analysis detect` product for that asset; the detector's own
+    retention floor is set there with `--min-confidence`, while this flag only
+    narrows what the check consumes. Evaluation maps each output frame through
+    the report to its source time, then to the product's sample grid, so it
+    checks the delivered picture rather than the clip plan. Missing box is a
+    fail; blend frames, `scale`/`offset`, an out-of-grid frame and a product
+    for another source are unverifiable. Details:
+    `docs/pitfalls/analysis.md`.
   - `words-complete [--min-coverage F] [--transcript HASH]`: without a
     transcript, F of the checked frames carry audio (default 1.0). With a
     `t1-…` hash, F of the relevant words must be whole: a trim, split or span

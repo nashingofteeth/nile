@@ -139,8 +139,9 @@ Packed bytes never travel on the wire — only paths.
 - **Handshake.** Host: `{"id":1,"method":"hello","protocol":2}`; analyzer:
   `{"id":1,"ok":{"protocol":2,"analyzer":{"name","version"},
   "tasks":["mean_luma","subject_boxes"]}}`. A protocol mismatch refuses to
-  run, and so does asking for a task the analyzer did not advertise (before
-  sampling, so an unsupported detector never decodes a window).
+  run, and so does asking for a task the analyzer did not advertise. The host
+  samples before the handshake, so an unsupported detector still pays for the
+  packed window (the sample is cached); the child never reads or decodes it.
 - **Request.** `analyze` carries `input` (`kind`, `sample` — the cache key —
   plus the absolute `data` and `meta` paths), `request` (tagged by `mode`: a
   grid's `start`/`duration`/`fps`, or an index request's `rate`/`indices`, plus
@@ -284,7 +285,11 @@ check, never a sample of the composited render:
    covered frame **fails** — this check asserts presence, unlike
    `words_complete`'s vacuous empty-span pass. If the product's retention
    floor is above the check's threshold the answer is **unverifiable** (the
-   product cannot say "absent" below its own floor).
+   product cannot say "absent" below its own floor). `min_confidence` defaults
+   to 0, so every box the product retained counts; the detector's retention
+   floor belongs to `analysis detect`. If boxes exist but all are below the
+   check's threshold, the detail names the highest one instead of claiming
+   the subject is absent.
 
 A missing/corrupt product, a product for another source, a non-`subject_boxes`
 result, a label the product did not detect, an incompatible

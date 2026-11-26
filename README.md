@@ -356,7 +356,7 @@ nile annotation add "this take" --timeline --at 2 --to 5 # range
 nile annotation add --expect cam --asset 1 --timeline --at 2 --to 5
 nile annotation add --expect crop-stable --max-move 10 --timeline --at 2 --track 2
 nile annotation add --expect subject-in-frame --asset 1 --product a1-… \
-  --label face --timeline --at 2 --to 5
+  --label red --timeline --at 2 --to 5
 nile annotation check --report final.mp4   # video or .report.json
 nile annotation check --report final.mp4 --sequence 2 --id 3 --json
 # exit 0 pass · 1 fail or unverifiable · 2 error
@@ -364,9 +364,10 @@ nile analysis import --asset 1 take.json    # prints the t1-… transcript hash
 nile analysis analyze --asset 1 --duration 1 --fps 5 --width 32 --height 24
 # samples the source window, runs the bundled mean-luma analyzer as a child
 # process, and prints the a1-… product hash (stored under analysis/products/)
-nile analysis detect --asset 1 --duration 2 --fps 5 --label face
+nile analysis detect --asset 1 --duration 2 --fps 5 --label red
 # the same host, a subject detector; the bundled colour-box child is a test
-# double, --analyzer /abs/path (or NILE_ANALYZER) runs a real detector
+# double (exact labels red/green/blue/white/black). For real CV:
+#   nile analysis detect --asset 1 --analyzer /abs/detector --label face
 nile annotation add --expect words-complete --timeline --at 2 --to 5 --transcript t1-…
 nile annotation ls                        # id, status, anchor and text
 nile annotation resolve 1                 # undoable; rm deletes instead
