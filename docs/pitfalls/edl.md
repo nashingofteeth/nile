@@ -13,9 +13,25 @@ Read before touching `crates/nle-core/src/edl.rs` or the `import-edl` path.
   Only an explicit `--map` or a `SOURCE FILE`/`FROM CLIP NAME` hint resolves
   one. `B` is not in the black list — it is a plausible tape name.
 - **A channel code combines with `/`** (`AA/V` = both audio channels *plus*
-  video): match any part, or `AA/V` reads as audio-only and the import dies
-  with "no video events". A video clip carries its embedded audio, so a
-  combined event's sound is linked, not doubled.
+  video): match any part, or `AA/V` reads as audio-only and loses the picture.
+  A video clip carries its embedded audio, so a combined event's sound is
+  linked, not doubled.
+- **An audio-only EDL is representable.** The model requires a video track but
+  not video *material*: `build` emits an empty base video track plus one audio
+  track per channel (`A`, `A2`, `AA`/`B`), and the timeline length comes from
+  the audio. No black or placeholder clip is invented. CMX `B` means both
+  audio channels, so it groups with `AA`. Audio-only media carries no frame
+  rate, so pass `--fps` (or keep a video file in `--media` to seed it).
+- **Every event's channel must name picture or sound.** An unknown part
+  (`X`, `N`, `V/X`) is `BuildError::UnknownChannel`; dropping it would silently
+  shift every later event off record time. Zero-length and non-cut events keep
+  their existing warn-and-continue path.
+- **`--append` adds after the current sequence end.** Each imported track keeps
+  its kind (first video → `--track N` or the first video track; audio → the
+  next audio track, created if needed) and is padded with a gap to the common
+  end, so the imported tracks stay aligned. `--append` uses the project's frame
+  rate — a conflicting `--fps` is refused — and conflicts with `--force`
+  (`--force` means replace). Like other imports it re-baselines history.
 - **Record time starts at `01:00:00:00`** — the timeline origin is the
   *earliest* event, not 0. Treating 0 as the origin turns the first hour
   into one giant gap.

@@ -331,6 +331,8 @@ nile group ls                             # part count and group end
 nile group rm 1                           # undoable; assets stay pooled
 nile import-edl show.edl --media . --group "CAM 3=cam3_a.mp4,cam3_b.mp4"
 nile import-otio show.otio --group "CAM 3=cam3_a.mp4,cam3_b.mp4"
+nile import-edl extra.edl --media . --append  # add after the sequence end
+nile import-otio extra.otio --append --track 2  # target another video track
 # explicit parts join one recording (argument order; repeatable flag)
 nile import "clip one.mp4" 'b roll.mov'   # quoted paths (the shell eats these)
 nile add intro.mp4 --in 2.5 --out 7       # auto-imports a new file
@@ -431,9 +433,15 @@ picture.
 nile import-edl sequence.edl --media ~/footage
 # Cuts only: dissolves/wipes/keys become cuts (each reported); black becomes
 # a gap; zero-length events are skipped. --fps/--src-offset/--map/--force.
+nile import-edl extra.edl --media ~/footage --append
+# --append adds after the current sequence end instead of replacing the
+# project; --track N picks another video track. An EDL with only audio
+# channels imports as an empty video track plus audio (no invented picture).
 nile import-otio sequence.otio
 # OpenTimelineIO e.g. a Kdenlive export; media paths come from the file;
 # --media/--remap/--fps. Kdenlive timewarps import as clip speed.
+nile import-otio extra.otio --append
+# --append is shared by both importers; --force conflicts with it (replace).
 nile detect-edits edit.mov [--list]
 nile detect-edits edit.mov --append --track 2
 # One clip per detected shot; black spans become gaps. Tune with
