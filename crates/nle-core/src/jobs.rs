@@ -75,6 +75,10 @@ pub enum JobError {
     },
     #[error("job #{0} not found")]
     NotFound(u64),
+    #[error(
+        "job id high-water mark {path} is not a positive integer — repair it before submitting jobs"
+    )]
+    NextId { path: PathBuf },
     #[error("sequence #{0} not found")]
     Sequence(u32),
 }
@@ -278,7 +282,7 @@ impl JobStore {
     /// scan alone is not enough, because `remove`/`prune` can delete the
     /// highest id.
     fn next_id(&self) -> Result<u64, JobError> {
-        let mut next = self.stored_next_id().unwrap_or(1);
+        let mut next = self.stored_next_id()?.unwrap_or(1);
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(next),
@@ -297,9 +301,21 @@ impl JobStore {
         Ok(next)
     }
 
-    fn stored_next_id(&self) -> Option<u64> {
-        let text = std::fs::read_to_string(self.dir.join(NEXT_ID_FILE)).ok()?;
-        text.trim().parse::<u64>().ok().filter(|id| *id > 0)
+    /// Read the persisted high-water mark. A missing file is normal (a project
+    /// that predates the marker); an unreadable or non-positive one is an
+    /// error, because silently falling back to the directory scan could
+    /// recycle an id deleted before the marker was written.
+    fn stored_next_id(&self) -> Result<Option<u64>, JobError> {
+        let path = self.dir.join(NEXT_ID_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(JobError::io(&path, e)),
+        };
+        match text.trim().parse::<u64>().ok().filter(|id| *id > 0) {
+            Some(id) => Ok(Some(id)),
+            None => Err(JobError::NextId { path }),
+        }
     }
 
     /// Persist the high-water mark before the record is written: a crash
@@ -426,8 +442,18 @@ impl JobStore {
 
     /// Delete a job directory (record + snapshot). The caller decides whether
     /// the state allows it; an unknown id is [`JobError::NotFound`].
+    ///
+    /// The high-water mark is advanced *before* the directory disappears. A
+    /// project written before `.next-id` existed has no marker, so removing its
+    /// highest id would otherwise make `next_id` scan back over it and recycle
+    /// the id on the next submit.
     pub fn remove(&self, id: u64) -> Result<(), JobError> {
         let dir = self.job_dir(id);
+        if !dir.exists() {
+            return Err(JobError::NotFound(id));
+        }
+        let next = self.next_id()?.max(id.saturating_add(1));
+        self.write_next_id(next)?;
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(JobError::NotFound(id)),
@@ -1022,6 +1048,93 @@ mod tests {
             )
             .expect("create");
         assert_eq!(third.id, 3);
+    }
+
+    #[test]
+    fn an_upgraded_store_advances_the_marker_when_the_highest_id_is_removed() {
+        let (_dir, store) = store();
+        let project = project();
+        let first = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/one.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        let second = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/two.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        assert_eq!((first.id, second.id), (1, 2));
+        // Simulate a project written before `.next-id` existed: only the
+        // directories carry the high-water mark. Removing the highest id must
+        // still advance it, or the next create recycles 2.
+        std::fs::remove_file(store.dir().join(NEXT_ID_FILE)).expect("remove marker");
+        store.remove(second.id).expect("remove");
+        assert_eq!(store.next_id().expect("next id"), 3);
+        let third = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/three.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        assert_eq!(third.id, 3, "an upgraded store does not recycle ids");
+    }
+
+    #[test]
+    fn a_corrupt_high_water_mark_is_an_error_not_a_rebuild() {
+        let (_dir, store) = store();
+        let project = project();
+        let job = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/one.mp4"),
+                JobExport::default(),
+            )
+            .expect("create");
+        for text in ["not a number\n", "0\n", "-1\n", "\n"] {
+            std::fs::write(store.dir().join(NEXT_ID_FILE), text).expect("write marker");
+            let error = store
+                .create(
+                    &project,
+                    1,
+                    PathBuf::from("/tmp/two.mp4"),
+                    JobExport::default(),
+                )
+                .expect_err("corrupt marker");
+            assert!(
+                matches!(error, JobError::NextId { .. }),
+                "{text:?}: {error:?}"
+            );
+            assert!(error.to_string().contains("high-water"), "{error}");
+            // Removal needs a trustworthy marker too: deleting without one
+            // could recycle the id.
+            let error = store.remove(job.id).expect_err("corrupt marker");
+            assert!(
+                matches!(error, JobError::NextId { .. }),
+                "{text:?}: {error:?}"
+            );
+        }
+        // Repairing the marker recovers the store without a directory scan.
+        std::fs::write(store.dir().join(NEXT_ID_FILE), "2\n").expect("repair");
+        assert!(store.get(job.id).expect("get").is_some());
+        let next = store
+            .create(
+                &project,
+                1,
+                PathBuf::from("/tmp/two.mp4"),
+                JobExport::default(),
+            )
+            .expect("create after repair");
+        assert_eq!(next.id, 2);
     }
 
     #[test]
