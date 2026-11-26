@@ -767,7 +767,8 @@ pub(crate) fn open_jobs(app: &mut App) {
     match refresh_jobs(app) {
         Ok(()) => {
             let n = app.jobs.len();
-            app.set_message(&format!("jobs: {n} (x cancel · o report · q close)"));
+            // The keys live in `hints_for`; the message only reports the list.
+            app.set_message(&format!("jobs: {n}"));
         }
         Err(e) => app.fail(&e),
     }
