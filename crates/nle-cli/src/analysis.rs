@@ -1405,12 +1405,16 @@ fn detect_subject_boxes(
     floor_milli: u32,
 ) -> Result<Vec<FrameBoxes>, SidecarError> {
     for label in labels {
-        if label_matches(label, [0, 0, 0]).is_none() {
+        if Color::parse(label).is_none() {
             return Err(SidecarError::Unsupported(format!(
-                "the bundled analyzer only detects red/green/blue/white/black, not {label:?}; pass --analyzer for a real detector"
+                "the bundled analyzer only detects the exact labels red/green/blue/white/black, not {label:?}; pass --analyzer for a real detector"
             )));
         }
     }
+    let colors: Vec<(Color, &String)> = labels
+        .iter()
+        .map(|label| (Color::parse(label).expect("checked above"), label))
+        .collect();
     if floor_milli > 1000 {
         return Err(SidecarError::BadRequest(format!(
             "floor_milli {floor_milli} is outside 0..=1000"
@@ -1437,13 +1441,13 @@ fn detect_subject_boxes(
     for index in 0..count {
         let frame = &rgb[index * stride..(index + 1) * stride];
         let mut boxes = Vec::new();
-        for label in labels {
-            let Some(rect) = color_box(frame, width, height, label) else {
+        for (color, label) in &colors {
+            let Some(rect) = color_box(frame, width, height, *color) else {
                 continue;
             };
             boxes.push(DetectedBox {
                 subject: SubjectKey {
-                    label: label.clone(),
+                    label: (*label).clone(),
                     id: None,
                 },
                 rect,
@@ -1460,21 +1464,44 @@ fn detect_subject_boxes(
     Ok(out)
 }
 
-fn label_matches(label: &str, [red, green, blue]: [u8; 3]) -> Option<bool> {
-    match label.to_ascii_lowercase().as_str() {
-        "red" => Some(red >= 128 && green <= 96 && blue <= 96),
-        "green" => Some(green >= 128 && red <= 96 && blue <= 96),
-        "blue" => Some(blue >= 128 && red <= 96 && green <= 96),
-        "white" => Some(red >= 200 && green >= 200 && blue >= 200),
-        "black" => Some(red <= 60 && green <= 60 && blue <= 60),
-        _ => None,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Color {
+    Red,
+    Green,
+    Blue,
+    White,
+    Black,
+}
+
+impl Color {
+    /// The bundled detector's labels are exact lowercase class names; an
+    /// external detector keeps whatever case its product declares.
+    fn parse(label: &str) -> Option<Self> {
+        match label {
+            "red" => Some(Color::Red),
+            "green" => Some(Color::Green),
+            "blue" => Some(Color::Blue),
+            "white" => Some(Color::White),
+            "black" => Some(Color::Black),
+            _ => None,
+        }
+    }
+
+    fn matches(self, [red, green, blue]: [u8; 3]) -> bool {
+        match self {
+            Color::Red => red >= 128 && green <= 96 && blue <= 96,
+            Color::Green => green >= 128 && red <= 96 && blue <= 96,
+            Color::Blue => blue >= 128 && red <= 96 && green <= 96,
+            Color::White => red >= 200 && green >= 200 && blue >= 200,
+            Color::Black => red <= 60 && green <= 60 && blue <= 60,
+        }
     }
 }
 
-fn color_box(frame: &[u8], width: u32, height: u32, label: &str) -> Option<BoxRect> {
+fn color_box(frame: &[u8], width: u32, height: u32, color: Color) -> Option<BoxRect> {
     let mut bounds: Option<(u32, u32, u32, u32)> = None;
     for (pixel, rgb) in frame.as_chunks::<3>().0.iter().enumerate() {
-        if label_matches(label, *rgb) != Some(true) {
+        if !color.matches(*rgb) {
             continue;
         }
         let x = (pixel as u32) % width;
@@ -1940,6 +1967,10 @@ mod tests {
 
         // The bundled detector is a test double, not an arbitrary classifier.
         let error = detect_subject_boxes(&rgb, 4, 2, 1, &["face".to_string()], 0).unwrap_err();
+        assert!(matches!(error, SidecarError::Unsupported(_)), "{error:?}");
+        // Labels are exact lowercase class names: no silent case folding that
+        // the check (an exact comparison) could not match later.
+        let error = detect_subject_boxes(&rgb, 4, 2, 1, &["RED".to_string()], 0).unwrap_err();
         assert!(matches!(error, SidecarError::Unsupported(_)), "{error:?}");
     }
 
