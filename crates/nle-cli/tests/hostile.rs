@@ -498,6 +498,16 @@ fn odd_media() {
          001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
          * FROM CLIP NAME: red.mp4\n",
     );
+    // A two-second record gap after event 1: at an extreme (but accepted)
+    // frame rate its frame count has no exact `Ratio<i64>` seconds.
+    s.write(
+        "gap.edl",
+        "TITLE: gap\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n\
+         002  AX  V  C  00:00:00:00 00:00:01:00 01:00:03:00 01:00:04:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
     s.write("bad.otio", "not json");
     run(
         &s,
@@ -549,6 +559,28 @@ fn odd_media() {
             (
                 "detect-edits an audio-only file",
                 &[&["detect-edits", "audio_only.m4a", "--force"]],
+            ),
+            (
+                "detect-edits at an unrepresentable frame rate",
+                &[&[
+                    "detect-edits",
+                    "red.mp4",
+                    "--force",
+                    "--fps",
+                    "9223372036854775807/86400",
+                ]],
+            ),
+            (
+                "import-edl at an unrepresentable frame rate",
+                &[&[
+                    "import-edl",
+                    "gap.edl",
+                    "--media",
+                    ".",
+                    "--force",
+                    "--fps",
+                    "9223372036854775807/86400",
+                ]],
             ),
             (
                 "import-edl a missing file",
