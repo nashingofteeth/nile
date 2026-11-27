@@ -829,15 +829,16 @@ pub(crate) fn media_ls_command(app: &App) -> String {
     format!("{} asset(s) · {used} in use", app.project.media.len())
 }
 
-/// `:sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]]` —
-/// list, switch, or add sequences. Switching is session state: it saves the
+/// `:sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]
+/// |derive --from N --name NAME [--size WxH] [--fps RATE]]` — list, switch,
+/// add, or snapshot-copy sequences. Switching is session state: it saves the
 /// project (active + playhead), switches undo, and reloads the monitor.
 pub(crate) fn sequence_command(
     app: &mut App,
     player: &dyn Mpv,
     f: &mut action::Flags,
 ) -> Option<String> {
-    const USAGE: &str = "usage: :sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]|audio [--normalize [BOOL] --fade-in S --fade-out S]]";
+    const USAGE: &str = "usage: :sequence [ls|N|use N|add NAME [--width W --height H --fps RATE]|derive --from N --name NAME [--size WxH] [--fps RATE]|audio [--normalize [BOOL] --fade-in S --fade-out S]]";
     const AUDIO_USAGE: &str =
         "usage: :sequence audio [--normalize [BOOL]] [--fade-in S] [--fade-out S]";
     let verb = f.positional();
@@ -989,6 +990,45 @@ pub(crate) fn sequence_command(
             }
             Some(format!(
                 "sequence #{id} {name} added (not active — `:sequence use {id}`)"
+            ))
+        }
+        Some("derive") => {
+            let from = match f.take("from") {
+                Some(value) => match value.parse::<u32>() {
+                    Ok(id) => id,
+                    Err(_) => return Some(format!("--from expects a number, got {value:?}")),
+                },
+                None => return Some(USAGE.to_string()),
+            };
+            let Some(name) = f.take("name") else {
+                return Some(USAGE.to_string());
+            };
+            let video = match f.take("size") {
+                Some(size) => match crate::cmd::import::parse_size_arg(&size) {
+                    Ok((width, height)) => Some(nle_core::VideoSettings { width, height }),
+                    Err(e) => return Some(e.to_string()),
+                },
+                None => None,
+            };
+            let fps = match f.take("fps") {
+                Some(rate) => match crate::parse_fps_arg(&rate) {
+                    Ok(rate) => Some(rate),
+                    Err(e) => return Some(e.to_string()),
+                },
+                None => None,
+            };
+            if let Err(e) = f.finish(USAGE) {
+                return Some(e.to_string());
+            }
+            let id = match app.project.derive_sequence(from, name.clone(), fps, video) {
+                Ok(id) => id,
+                Err(e) => return Some(e.to_string()),
+            };
+            if !persist_and_refresh(app, player) {
+                return None;
+            }
+            Some(format!(
+                "sequence #{id} {name} derived from #{from} (not active — `:sequence use {id}`)"
             ))
         }
         Some(id) => {

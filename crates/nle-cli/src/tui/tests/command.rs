@@ -94,6 +94,91 @@ fn sequence_command_switches_undo_and_adds() {
 }
 
 #[test]
+fn sequence_derive_copies_without_switching() {
+    let path = temp_project_path("sequence-derive");
+    let p = asset_project();
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+    let source_segments = app.project.timeline.tracks[0].segments.len();
+
+    let derived = cmd(
+        &mut app,
+        "sequence derive --from 1 --name Copy --size 1080x1920 --fps 24",
+    );
+    assert!(derived.contains("derived from #1"), "{derived}");
+    assert!(derived.contains("not active"), "{derived}");
+    assert_eq!(app.project.sequences.len(), 2);
+    assert_eq!(app.project.active_id(), 1, "the copy is not active");
+    let copy = app.project.sequences.last().unwrap();
+    assert_eq!(copy.id, 2);
+    assert_eq!(copy.name, "Copy");
+    assert_eq!(copy.fps, Some(Seconds::from_integer(24)));
+    assert_eq!(
+        copy.video,
+        Some(nle_core::VideoSettings {
+            width: 1080,
+            height: 1920
+        })
+    );
+    assert_eq!(copy.timeline.tracks[0].segments.len(), source_segments);
+    assert_eq!(
+        copy.playhead,
+        Seconds::from_integer(0),
+        "a copy starts at its own head"
+    );
+
+    // A snapshot copy, not a live derivation: the source keeps its timeline.
+    assert!(cmd(&mut app, "split --at 1").contains("split"));
+    assert_eq!(
+        app.project.timeline.tracks[0].segments.len(),
+        source_segments + 1
+    );
+    assert_eq!(
+        app.project.sequence(2).unwrap().timeline.tracks[0]
+            .segments
+            .len(),
+        source_segments,
+        "editing the source left the copy untouched"
+    );
+
+    // And its undo is its own: the copy starts empty.
+    assert!(cmd(&mut app, "sequence 2").contains("Copy"));
+    assert_eq!(app.project.depth(), 0, "the copy has no inherited history");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
+fn sequence_derive_refuses_bad_arguments() {
+    let path = temp_project_path("sequence-derive-bad");
+    let p = asset_project();
+    p.save(&path).unwrap();
+    let mut app = App::new(p, path.clone());
+    let before = app.project.sequences.len();
+
+    let bad_size = cmd(
+        &mut app,
+        "sequence derive --from 1 --name Copy --size 1080by1920",
+    );
+    assert!(bad_size.contains("invalid --size"), "{bad_size}");
+    let bad_fps = cmd(&mut app, "sequence derive --from 1 --name Copy --fps 0");
+    assert!(bad_fps.contains("--fps must be positive"), "{bad_fps}");
+    let missing = cmd(&mut app, "sequence derive --from 9 --name Copy");
+    assert!(missing.contains("sequence #9 not found"), "{missing}");
+    let no_name = cmd(&mut app, "sequence derive --from 1");
+    assert!(no_name.contains("usage: :sequence"), "{no_name}");
+    assert_eq!(
+        app.project.sequences.len(),
+        before,
+        "no refused derive left a sequence behind"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+}
+
+#[test]
 fn sequence_audio_command_sets_prints_and_undoes() {
     let path = temp_project_path("sequence-audio");
     let p = asset_project();
