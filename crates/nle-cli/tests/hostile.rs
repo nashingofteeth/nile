@@ -1449,6 +1449,11 @@ fn hostile_frame_fields() {
     fn absurd_fps(project: &mut serde_json::Value) {
         project["sequences"][0]["fps"] = json!("9223372036854775807/1");
     }
+    // A rate finer than `Ratio<i64>` can encode a whole second: `snap` and
+    // the frame→seconds helpers must refuse, not panic.
+    fn overflow_fps(project: &mut serde_json::Value) {
+        project["sequences"][0]["fps"] = json!("9223372036854775807/86400");
+    }
 
     let s = Sandbox::new();
     type Refusal = (&'static str, fn(&mut serde_json::Value), &'static str);
@@ -1511,21 +1516,47 @@ fn hostile_frame_fields() {
     }
     s.assert_loads("absurd fps", &format!("{shown}\n{saved}"));
 
-    // A clip|clip seam at an extreme rate: the intermediate prefix sum needs
-    // a denominator the exact rational can't hold. The transition must refuse
-    // in `track_shift`, not panic in `Track::start_of`.
+    // An extreme rate's `snap` saturates `t >= 1` to 1 s, so the seam has to
+    // be one it can address: at 0 the right clip's head trim leaves a
+    // duration (`2 - 1/i64::MAX`) whose exact prefix sum the rational can't
+    // hold. The transition must refuse in `track_shift` (the timeline-limit
+    // `TooLong`), not panic in `Track::start_of`.
     let t = Sandbox::new();
     t.local_base();
     let mut project: serde_json::Value =
         serde_json::from_str(&t.read(P)).expect("the local base project");
     absurd_fps(&mut project);
     t.write(P, &serde_json::to_string_pretty(&project).expect("json"));
-    t.insist(
-        "absurd fps clip-clip transition",
+    let text = t.insist(
+        "absurd fps track-start transition",
         P,
-        &["transition", "--at", "2", "--frames", "1"],
+        &["transition", "--at", "0", "--frames", "1"],
     );
-    t.assert_loads("absurd fps clip-clip transition", "");
+    assert!(
+        text.contains("longer than"),
+        "the transition must reach the typed TooLong refusal, not \
+         `nothing to trim`:\n{text}"
+    );
+    t.assert_loads("absurd fps track-start transition", "");
+
+    // A whole second at a rate whose frame is finer than `Ratio<i64>` can
+    // encode: every frame→seconds crossing (`snap`, the clamp's frame grid,
+    // `grid_time`) must refuse or fall back, never panic.
+    s.hostile_base();
+    let mut project: serde_json::Value =
+        serde_json::from_str(&s.read(P)).expect("the base project");
+    overflow_fps(&mut project);
+    s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+    for argv in [
+        &["show"][..],
+        &["seek", "1"][..],
+        &["split", "--at", "1"][..],
+        &["yank", "--seg", "0"][..],
+        &["gap", "--at", "0", "--frames", "9223372036854775806"][..],
+    ] {
+        s.insist("overflow fps", P, argv);
+    }
+    s.assert_loads("overflow fps", "");
 
     // A tiny positive rate is the inverse extreme: `dur.den * rate.den`
     // overflows the frame-grid product, so the checked comparison must not

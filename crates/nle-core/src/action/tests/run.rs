@@ -1,5 +1,37 @@
 use super::*;
 
+// `track_shift` compares exact prefix sums. At an extreme rate the edited
+// track can hold a segment (`2 - 1/i64::MAX`) whose exact duration exceeds
+// the rational grid even though each neighbour validates; the sync planner
+// must return `TooLong`, not panic in `Track::start_of`.
+#[test]
+fn track_shift_refuses_an_unrepresentable_prefix_sum() {
+    let clip = |asset_in: Seconds, asset_out: Seconds| {
+        Segment::Clip(Clip {
+            id: 1,
+            asset: 1,
+            asset_in,
+            asset_out,
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })
+    };
+    let old = Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: vec![clip(Seconds::from_integer(0), Seconds::from_integer(2))],
+    };
+    let new = Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: vec![clip(Seconds::new(1, i64::MAX), Seconds::from_integer(2))],
+    };
+    assert!(matches!(
+        track_shift(&old, &new),
+        Err(EditError::TooLong(MAX_TIMELINE_SECONDS))
+    ));
+}
+
 #[test]
 fn edits_record_undo_history() {
     let mut p = fixture();
