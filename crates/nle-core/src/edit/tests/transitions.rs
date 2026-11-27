@@ -300,16 +300,27 @@ fn retime_a_trailing_fade_at_its_far_edge() {
         Segment::Transition(_)
     ));
 
-    // Both lookup and retime accept the far edge.
-    assert!(
-        transition_at(&p, 0, 3.0).unwrap().is_some(),
-        "the far edge identifies the trailing blend"
-    );
+    // Both lookup and retime accept the far edge, and the lookup pins where
+    // the blend starts (where the clip gave up 5/2 s).
+    let (_, _, start) = transition_at(&p, 0, 3.0)
+        .unwrap()
+        .expect("the far edge identifies the trailing blend");
+    assert_eq!(start, Seconds::new(5, 2));
     let batch = retime_transition_on(&p, 0, 3.0, Seconds::from_integer(1))
         .unwrap()
         .expect("a change");
     h.apply(&mut p, batch, 0).unwrap();
     let track = p.timeline.video_track().unwrap();
+    match &track.segments[0] {
+        Segment::Clip(c) => {
+            assert_eq!(
+                c.asset_out,
+                Seconds::from_integer(2),
+                "the clip gives up another 5/2 s for the longer fade"
+            );
+        }
+        s => panic!("expected a clip, got {s:?}"),
+    }
     let Segment::Transition(t) = &track.segments[1] else {
         panic!("expected a blend")
     };

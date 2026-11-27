@@ -1113,8 +1113,11 @@ fn deleting_both_sides_of_a_transition_removes_the_blend() {
     let mut p = transitioned_pair(); // [C1 0..2][T][C2 3..5]
     let before = p.timeline.video_track().unwrap().segments.clone();
     let mut h = History::default();
-    // The range covers both sides and the blend between them.
+    // The range covers both sides and the blend between them, so it must take
+    // the transition-aware path, not a generic removal that happens to leave
+    // the track empty.
     let batch = delete_range_on(&p, 0, 0, 2).unwrap();
+    assert!(batch.desc.contains("through transitions"), "{}", batch.desc);
     h.apply(&mut p, batch, 0).unwrap();
     assert!(
         p.timeline.video_track().unwrap().segments.is_empty(),
@@ -1126,6 +1129,22 @@ fn deleting_both_sides_of_a_transition_removes_the_blend() {
         p.timeline.video_track().unwrap().segments,
         before,
         "one undo restores the whole track"
+    );
+}
+
+// `blend_index_at` falls back to the last segment only when that segment *is*
+// a blend; a clip (or gap) ending at the timeline end must not masquerade as
+// one just because `index_at` is half-open.
+#[test]
+fn a_lookup_at_the_end_of_a_clip_ending_timeline_finds_no_transition() {
+    let p = transitioned_pair(); // [C1 0..2][T 2..3][C2 3..5]
+    assert_eq!(
+        p.timeline.video_track().unwrap().end(),
+        Seconds::from_integer(5)
+    );
+    assert!(
+        transition_at(&p, 0, 5.0).unwrap().is_none(),
+        "the last segment is a clip, so the timeline end is not inside a blend"
     );
 }
 
