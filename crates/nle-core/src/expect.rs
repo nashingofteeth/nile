@@ -1156,55 +1156,100 @@ fn check_work_in_frame(ctx: &Ctx<'_>, mut out: CheckOutcome, margin: f64) -> Che
             out.detail = Some(format!("clip #{id} is not in sequence #{}", ctx.sequence));
             return out;
         };
-        let Some(crop) = clip
-            .effects
-            .iter()
-            .find(|effect| matches!(effect, Effect::Crop { .. }))
-        else {
-            continue; // no crop: the whole picture is in frame
-        };
-        let Some((from, to)) = run_window(&run, ctx.span, start) else {
-            continue;
-        };
-        let segments = crop_segments(crop, clip.duration());
-        // A point anchor samples the one frame it names. An interval samples
-        // each segment's ends: x/y are linear inside a segment and w/h are
-        // constant, so a margin extreme is always at an end — no per-frame
-        // walk.
-        let windows = if from == to {
-            segments
-                .iter()
-                .rev()
-                .find(|segment| segment.start <= from)
-                .map(|segment| vec![segment.window_at(from)])
-                .unwrap_or_default()
-        } else {
-            let mut windows = Vec::new();
-            for segment in &segments {
-                let a = segment.start.max(from);
-                let b = segment.end.min(to);
-                if b <= a {
-                    continue;
+        // A keyed crop renders through its own pass graph, so its window is a
+        // percentage of the picture at each key (the exporter's crop window).
+        if let Some(crop) = clip.effects.iter().find(|effect| effect.is_keyed_crop()) {
+            let Some((from, to)) = run_window(&run, ctx.span, start) else {
+                continue;
+            };
+            let segments = crop_segments(crop, clip.duration());
+            // A point anchor samples the one frame it names. An interval
+            // samples each segment's ends: x/y are linear inside a segment and
+            // w/h are constant, so a margin extreme is always at an end — no
+            // per-frame walk.
+            let windows = if from == to {
+                segments
+                    .iter()
+                    .rev()
+                    .find(|segment| segment.start <= from)
+                    .map(|segment| vec![segment.window_at(from)])
+                    .unwrap_or_default()
+            } else {
+                let mut windows = Vec::new();
+                for segment in &segments {
+                    let a = segment.start.max(from);
+                    let b = segment.end.min(to);
+                    if b <= a {
+                        continue;
+                    }
+                    windows.push(segment.window_at(a));
+                    windows.push(segment.window_at(b));
                 }
-                windows.push(segment.window_at(a));
-                windows.push(segment.window_at(b));
+                windows
+            };
+            for window in windows {
+                if window.x < margin
+                    || window.y < margin
+                    || window.x + window.w > limit
+                    || window.y + window.h > limit
+                {
+                    return failed(
+                        out,
+                        format!(
+                            "clip #{id} crop leaves the {margin}% margin: x {:.1}, y {:.1}, w {:.1}, h {:.1}",
+                            window.x, window.y, window.w, window.h
+                        ),
+                    );
+                }
             }
-            windows
+            continue;
+        }
+        // Static geometry is time-independent: compose the whole chain with
+        // the export's own tracker and judge the picture left on the canvas.
+        if !clip.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Crop { .. } | Effect::Scale { .. } | Effect::Offset { .. }
+            )
+        }) {
+            continue; // no geometry: the whole picture fills the frame
+        }
+        let Some(canvas) = ctx
+            .project
+            .asset(clip.asset)
+            .and_then(|asset| asset.video_size())
+        else {
+            out.detail = Some(format!(
+                "clip #{id} has geometry effects but asset #{} has no frame size",
+                clip.asset
+            ));
+            return out;
         };
-        for window in windows {
-            if window.x < margin
-                || window.y < margin
-                || window.x + window.w > limit
-                || window.y + window.h > limit
-            {
-                return failed(
-                    out,
-                    format!(
-                        "clip #{id} crop leaves the {margin}% margin: x {:.1}, y {:.1}, w {:.1}, h {:.1}",
-                        window.x, window.y, window.w, window.h
-                    ),
-                );
-            }
+        let geometry = Effect::geometry(&clip.effects, canvas);
+        if geometry.is_empty() {
+            return failed(out, format!("clip #{id} has no picture left on the canvas"));
+        }
+        // A no-op scale or a full-window crop leaves the frame untouched and
+        // is not a crop to judge.
+        if !geometry.changes_picture() {
+            continue;
+        }
+        let (x, y, w, h) = geometry.visible();
+        let width = f64::from(canvas.0);
+        let height = f64::from(canvas.1);
+        let left = x as f64 * 100.0 / width;
+        let top = y as f64 * 100.0 / height;
+        let right = (x + w) as f64 * 100.0 / width;
+        let bottom = (y + h) as f64 * 100.0 / height;
+        if left < margin || top < margin || right > limit || bottom > limit {
+            return failed(
+                out,
+                format!(
+                    "clip #{id} picture leaves the {margin}% margin: x {left:.1}, y {top:.1}, w {:.1}, h {:.1}",
+                    right - left,
+                    bottom - top
+                ),
+            );
         }
     }
     passed(out)
@@ -1353,23 +1398,50 @@ fn check_subject_in_frame(
             ));
             return out;
         };
-        if let Some(effect) = clip
-            .effects
-            .iter()
-            .find(|effect| matches!(effect, Effect::Scale { .. } | Effect::Offset { .. }))
-        {
+        let has_geometry = clip.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Crop { .. } | Effect::Scale { .. } | Effect::Offset { .. }
+            )
+        });
+        let keyed_crop = clip.effects.iter().find(|effect| effect.is_keyed_crop());
+        // A keyed crop is the only effect its pass graph can carry, so mixing
+        // it with another effect has no single code path to judge.
+        if keyed_crop.is_some() && clip.effects.len() > 1 {
             out.detail = Some(format!(
-                "frame {frame}: subject-in-frame does not model {}",
-                effect.kind()
+                "frame {frame}: keyed crop shares clip #{clip_id} with another effect"
             ));
             return out;
         }
+        // Static crop/scale/offset compose through the export's own geometry
+        // tracker, so the box is judged against the picture actually left on
+        // the canvas. A keyed crop and an effect-free clip keep the percentage
+        // window below.
+        let static_geometry = if keyed_crop.is_some() || !has_geometry {
+            None
+        } else {
+            let Some(canvas) = ctx
+                .project
+                .asset(clip.asset)
+                .and_then(|asset| asset.video_size())
+            else {
+                out.detail = Some(format!(
+                    "frame {frame}: clip #{clip_id} has geometry effects but asset #{} has no frame size",
+                    clip.asset
+                ));
+                return out;
+            };
+            let geometry = Effect::geometry(&clip.effects, canvas);
+            if geometry.is_empty() {
+                return failed(
+                    out,
+                    format!("frame {frame}: clip #{clip_id} leaves no picture on the canvas"),
+                );
+            }
+            Some(geometry)
+        };
         let at = clip.timeline_offset_of(source);
-        let window = match clip
-            .effects
-            .iter()
-            .find(|effect| matches!(effect, Effect::Crop { .. }))
-        {
+        let window = match keyed_crop {
             None => CropWindow {
                 x: 0.0,
                 y: 0.0,
@@ -1423,16 +1495,36 @@ fn check_subject_in_frame(
                 continue;
             }
             selected += 1;
-            let bx = (f64::from(detected.rect.x) / 10_000.0 - window.x) * 100.0 / window.w;
-            let by = (f64::from(detected.rect.y) / 10_000.0 - window.y) * 100.0 / window.h;
-            let bw = f64::from(detected.rect.w) / 10_000.0 * 100.0 / window.w;
-            let bh = f64::from(detected.rect.h) / 10_000.0 * 100.0 / window.h;
+            let (bx, by, bw, bh) = match static_geometry {
+                Some(geometry) => {
+                    let (x, y, w, h) = geometry.project(
+                        f64::from(detected.rect.x) / 1_000_000.0,
+                        f64::from(detected.rect.y) / 1_000_000.0,
+                        f64::from(detected.rect.w) / 1_000_000.0,
+                        f64::from(detected.rect.h) / 1_000_000.0,
+                    );
+                    let (vx, vy, vw, vh) = geometry.visible();
+                    let (vw, vh) = (vw as f64, vh as f64);
+                    (
+                        (x - vx as f64) * 100.0 / vw,
+                        (y - vy as f64) * 100.0 / vh,
+                        w * 100.0 / vw,
+                        h * 100.0 / vh,
+                    )
+                }
+                None => (
+                    (f64::from(detected.rect.x) / 10_000.0 - window.x) * 100.0 / window.w,
+                    (f64::from(detected.rect.y) / 10_000.0 - window.y) * 100.0 / window.h,
+                    f64::from(detected.rect.w) / 10_000.0 * 100.0 / window.w,
+                    f64::from(detected.rect.h) / 10_000.0 * 100.0 / window.h,
+                ),
+            };
             let limit = 100.0 - margin;
             if bx < margin || by < margin || bx + bw > limit || by + bh > limit {
                 return failed(
                     out,
                     format!(
-                        "frame {frame} (source {}): {} box leaves the {margin}% margin — x {:.1}, y {:.1}, w {:.1}, h {:.1} in the crop window",
+                        "frame {frame} (source {}): {} box leaves the {margin}% margin — x {:.1}, y {:.1}, w {:.1}, h {:.1} in the visible window",
                         format_seconds(&source),
                         detected.subject.label,
                         bx,
@@ -2302,6 +2394,47 @@ mod tests {
     }
 
     #[test]
+    fn work_in_frame_composes_static_scale_and_offset() {
+        let report = report(&[(150, shot(1, 1))]);
+        let expect = |margin| range(Expectation::WorkInFrame { margin_pct: margin }, 0, 5);
+
+        // A 10% crop shrunk to 50% leaves a 30% margin on every side.
+        let shrunk = project_with(vec![track(vec![clip_with(vec![
+            crop(Vec::new()),
+            Effect::Scale { w: 50.0, h: 50.0 },
+        ])])]);
+        let outcome = evaluate(&shrunk, &report, &expect(5.0));
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        // A small offset on that inset picture still keeps every margin.
+        let shifted = project_with(vec![track(vec![clip_with(vec![
+            crop(Vec::new()),
+            Effect::Scale { w: 50.0, h: 50.0 },
+            Effect::Offset { x: 10.0, y: 0.0 },
+        ])])]);
+        let outcome = evaluate(&shifted, &report, &expect(5.0));
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        // A 200% zoom clips back to the full canvas: the picture touches
+        // every edge.
+        let zoomed = project_with(vec![track(vec![clip_with(vec![Effect::Scale {
+            w: 200.0,
+            h: 200.0,
+        }])])]);
+        let outcome = evaluate(&zoomed, &report, &expect(5.0));
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("margin"));
+
+        // An offset that pushes the picture to the edge loses its margin.
+        let pushed = project_with(vec![track(vec![clip_with(vec![Effect::Offset {
+            x: 50.0,
+            y: 0.0,
+        }])])]);
+        let outcome = evaluate(&pushed, &report, &expect(5.0));
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+    }
+
+    #[test]
     fn subject_in_frame_passes_a_box_that_keeps_the_margin() {
         let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
         let report = report_at(s(5), &[(5, shot(1, 1))]);
@@ -2379,6 +2512,98 @@ mod tests {
     }
 
     #[test]
+    fn subject_in_frame_composes_static_scale_and_offset() {
+        let report = report_at(s(5), &[(5, shot(1, 1))]);
+        // A box at 10..20% keeps the 5% margin at 1x.
+        let product = subject_fixture(
+            s(5),
+            5,
+            vec![detected(100_000, 100_000, 100_000, 100_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+        let expect = range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1);
+
+        let plain = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let outcome = evaluate_with(&plain, &report, &expect, &stores);
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        // Shrinking keeps the box's place inside the visible window.
+        let shrunk = project_with(vec![track(vec![clip_with(vec![Effect::Scale {
+            w: 50.0,
+            h: 50.0,
+        }])])]);
+        let outcome = evaluate_with(&shrunk, &report, &expect, &stores);
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        // A 200% centre zoom pushes that near-edge box outside the frame.
+        let zoomed = project_with(vec![track(vec![clip_with(vec![Effect::Scale {
+            w: 200.0,
+            h: 200.0,
+        }])])]);
+        let outcome = evaluate_with(&zoomed, &report, &expect, &stores);
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("margin"));
+
+        // Moving the picture right pushes a centred box into the right edge.
+        let centred = subject_fixture(
+            s(5),
+            5,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&centred);
+        let expect = range(subject(&centred.hash(), "face", None, 5.0, 1.0), 0, 1);
+        let right = project_with(vec![track(vec![clip_with(vec![Effect::Offset {
+            x: 50.0,
+            y: 0.0,
+        }])])]);
+        let outcome = evaluate_with(&right, &report, &expect, &stores);
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("margin"));
+
+        // A smaller offset keeps it inside.
+        let nudged = project_with(vec![track(vec![clip_with(vec![Effect::Offset {
+            x: 20.0,
+            y: 0.0,
+        }])])]);
+        let outcome = evaluate_with(&nudged, &report, &expect, &stores);
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+    }
+
+    #[test]
+    fn subject_in_frame_checks_a_keyed_crop_at_each_key() {
+        let report = report_at(s(30), &[(300, shot(1, 1))]);
+        let product = subject_fixture(
+            s(30),
+            300,
+            vec![detected(300_000, 300_000, 200_000, 200_000, 1000)],
+        );
+        let (_dir, stores) = subject_stores(&product);
+
+        // From 0 to 5 s the keyed crop ramps from the full frame to the right
+        // half; the centred box stays visible early, then is cut away.
+        let project = project_with(vec![track(vec![clip_with(vec![crop(vec![
+            key(0, 0.0, 0.0, 100.0, 100.0),
+            key(5, 50.0, 0.0, 50.0, 100.0),
+        ])])])]);
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 0, 1),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            &range(subject(&product.hash(), "face", None, 5.0, 1.0), 5, 6),
+            &stores,
+        );
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("margin"));
+    }
+
+    #[test]
     fn subject_in_frame_fails_when_the_subject_is_absent_or_the_frame_is_wrong() {
         let project = project_with(vec![track(vec![clip(1, 1, 10)])]);
         let report = report_at(s(5), &[(5, shot(1, 1))]);
@@ -2437,14 +2662,14 @@ mod tests {
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
         assert!(outcome.detail.unwrap().contains("blend"));
 
-        let scaled = project_with(vec![track(vec![clip_with(vec![Effect::Scale {
-            w: 100.0,
-            h: 100.0,
-        }])])]);
+        let mixed = project_with(vec![track(vec![clip_with(vec![
+            crop(vec![key(0, 10.0, 10.0, 80.0, 80.0)]),
+            Effect::Scale { w: 50.0, h: 50.0 },
+        ])])]);
         let report = report_at(s(5), &[(5, shot(1, 1))]);
-        let outcome = evaluate_with(&scaled, &report, &expect, &stores);
+        let outcome = evaluate_with(&mixed, &report, &expect, &stores);
         assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
-        assert!(outcome.detail.unwrap().contains("scale"));
+        assert!(outcome.detail.unwrap().contains("keyed crop"));
     }
 
     #[test]
