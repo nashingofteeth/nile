@@ -230,7 +230,8 @@ pub enum Action {
         track: usize,
     },
     /// Remove a track and its clips (`:track rm N`).
-    /// Recorded as an undoable track-list change; a no-op records nothing.
+    /// Recorded as an undoable track-list change; removing an absent track is
+    /// refused.
     TrackRm {
         track: usize,
     },
