@@ -85,6 +85,76 @@ fn the_fixture_show_imports_to_the_golden_project() {
     assert_atem_matches(&expected);
 }
 
+/// The golden show's video ids (1, 2, 3) line up with their base-track
+/// indices, so an id-vs-index regression would pass unnoticed. The audio clip
+/// added after the import has id 4 at track 2 index 0: deleting the *video*
+/// id 2 must remove that event and leave the audio alone, and id 4 must still
+/// resolve to its own track's first clip.
+#[test]
+fn the_golden_show_addresses_clips_by_id_not_index() {
+    let sandbox = fixture_sandbox();
+    sandbox.ok(&["import-edl", "show.edl", "--media", ".", "--force"]);
+    sandbox.ok(&["track", "add", "audio"]);
+    sandbox.ok(&[
+        "add", "mic.m4a", "--track", "2", "--at", "0", "--in", "0", "--out", "6",
+    ]);
+
+    let before: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(clip_ids(&before, 0), vec![1, 2, 3], "the video ids");
+    assert_eq!(
+        clip_ids(&before, 1),
+        vec![4],
+        "the audio id is not its index (track 2 index 0)"
+    );
+
+    // id 2 is the base track's second segment; an index-based lookup would
+    // delete id 3 instead.
+    sandbox.ok(&["delete", "--clip", "2"]);
+    let after: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(
+        clip_ids(&after, 0),
+        vec![1, 3],
+        "the id, not the index, left the base track"
+    );
+    assert_eq!(
+        clip_ids(&after, 1),
+        vec![4],
+        "the audio clip survives the video edit"
+    );
+
+    // id 4 names a clip no base-track index can reach: it is track 2's first
+    // segment, not the timeline's fourth.
+    sandbox.ok(&["delete", "--clip", "4"]);
+    let ended: Value =
+        serde_json::from_str(&sandbox.ok(&["show", "--json"])).expect("project JSON");
+    assert_eq!(clip_ids(&ended, 0), vec![1, 3], "the base is untouched");
+    assert!(
+        clip_ids(&ended, 1).is_empty(),
+        "id 4 was the audio track's only clip"
+    );
+    sandbox.assert_loads("golden show by id", "");
+}
+
+/// Clip ids on one track of the active sequence, in segment order.
+fn clip_ids(project: &Value, track: usize) -> Vec<u64> {
+    let active = project["active"].as_u64().expect("active sequence");
+    let sequence = project["sequences"]
+        .as_array()
+        .expect("sequences")
+        .iter()
+        .find(|sequence| sequence["id"].as_u64() == Some(active))
+        .expect("active sequence");
+    sequence["timeline"]["tracks"][track]["segments"]
+        .as_array()
+        .expect("segments")
+        .iter()
+        .filter_map(|segment| segment.get("Clip"))
+        .filter_map(|clip| clip["id"].as_u64())
+        .collect()
+}
+
 #[test]
 fn the_fixture_show_exports_and_matches_the_program() {
     let sandbox = fixture_sandbox();

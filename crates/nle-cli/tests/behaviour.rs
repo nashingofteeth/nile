@@ -2403,6 +2403,51 @@ fn ripple_delete_keeps_a_separate_audio_track_in_sync() {
     );
 }
 
+/// A 0.005 s source span is below one frame at 30 fps (0.15 frames). The
+/// clamp after the edit must drop it and say why, leaving no zero-width
+/// sliver for the export to skip — and the project must load again, because
+/// "dropped" is a model write, not a refusal.
+#[test]
+fn a_sub_frame_audio_clip_is_dropped_with_a_note() {
+    let s = Sandbox::new();
+    s.local_base(); // 30 fps: red 0–2, green 2–4, blue 4–6
+    s.ok(&["track", "add", "audio"]);
+    let out = s.run(&[
+        "add",
+        "subframe.m4a",
+        "--track",
+        "2",
+        "--at",
+        "0",
+        "--in",
+        "0",
+        "--out",
+        "0.005",
+    ]);
+    let text = merged(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        text.contains("holds no whole frame"),
+        "the clamp must name the drop:\n{text}"
+    );
+    s.assert_loads("sub-frame audio clip", &text);
+
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project JSON");
+    let audio = &project["sequences"][0]["timeline"]["tracks"][1];
+    assert_eq!(
+        audio["kind"], "Audio",
+        "the track survives its dropped clip"
+    );
+    assert!(
+        audio["segments"]
+            .as_array()
+            .is_some_and(|segments| segments.iter().all(|seg| seg.get("Clip").is_none())),
+        "the sub-frame clip is not on the track:\n{audio:#}"
+    );
+}
+
 #[test]
 fn importing_a_directory_is_one_undoable_batch() {
     let s = Sandbox::new();
