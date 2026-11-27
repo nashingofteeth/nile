@@ -300,10 +300,8 @@ pub(crate) fn apply_extend_plan(app: &mut App, player: &dyn Mpv, plan: ExtendPla
     app.pool_on_monitor = false;
     app.pool_handoff = None;
     let flag = if ripple { " · RIPPLE" } else { "" };
-    app.set_message(&format!(
-        "extend {}{flag} — navigate, e to commit",
-        armed_desc(&plan.armed)
-    ));
+    // The mode's keys live in `hints_for`; name the armed edge instead.
+    app.set_message(&format!("extend {}{flag}", armed_desc(&plan.armed)));
     app.mode = Mode::Extend(ExtendState {
         track: plan.track,
         armed: plan.armed,

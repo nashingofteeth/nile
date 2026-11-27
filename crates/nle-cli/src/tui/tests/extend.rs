@@ -2,6 +2,7 @@ use super::super::keys::extend::{
     ExtendPreviewSpec, Side, armed_on_side, clamp_extend, extend_step_index, plan_extend,
     plan_for_armed, projected_total, run_commit_action, snap_extend_target,
 };
+use super::super::keys::handle_key;
 use super::super::motion::{on_boundary, secs};
 use super::super::panels::timeline::render_timeline;
 use super::*;
@@ -681,4 +682,26 @@ fn projected_total_reflects_pending_commit() {
     // A clip tail grown past the end projects the new end.
     let (app, st) = make(true, Armed::Clip { id: 2, head: false }, 7.0, 8.0);
     assert_eq!(projected_total(&app, &st), 8.0);
+}
+
+// Entering the mode names the armed edge; the keys stay in `hints_for`.
+#[test]
+fn entering_extend_does_not_put_key_hints_in_the_message() {
+    let fake = FakeMpv::new();
+    let mut app = App::new(blend_pair(), temp_project_path("extend-hints"));
+    app.loaded = true;
+    app.playhead = 3.0;
+    handle_key(&mut app, &fake, key(']'));
+    assert!(matches!(app.mode, Mode::Extend(_)), "{}", app.message);
+    assert_eq!(
+        app.message, "extend tail of clip #1",
+        "the notice says what was armed, not how to commit"
+    );
+    let hints = super::super::panels::hints_for(&app);
+    assert!(
+        hints
+            .iter()
+            .any(|line| line.contains("e commit") && line.contains("Esc cancel")),
+        "hints_for still renders the extend keys: {hints:?}"
+    );
 }

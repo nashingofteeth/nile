@@ -61,6 +61,29 @@ fn x_on_a_transition_opens_the_length_form() {
     assert!(app.message.contains("retime transition"), "{}", app.message);
 }
 
+#[test]
+fn opening_transition_form_does_not_put_key_hints_in_the_message() {
+    let mut app = App::new(asset_project(), temp_project_path("trans-hints"));
+    app.loaded = true;
+    app.playhead = 3.0;
+    let fake = FakeMpv::new();
+    handle_key(&mut app, &fake, key('X')); // add the dissolve to open on
+    handle_key(&mut app, &fake, key('x'));
+    let Mode::Transition(form) = &app.mode else {
+        panic!("expected the transition form, got {:?}", app.mode)
+    };
+    assert_eq!(
+        app.message,
+        format!("transition #{}", form.id),
+        "the notice names the target, not the form's keys"
+    );
+    let hints = super::super::panels::hints_for(&app).join("\n");
+    assert!(
+        hints.contains("digits edit") && hints.contains("enter"),
+        "hints_for still renders the form keys: {hints}"
+    );
+}
+
 // `X` on a blend opens the same form; a count pre-fills the frames.
 #[test]
 fn x_and_a_count_edit_the_transition_frames() {

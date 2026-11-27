@@ -66,7 +66,8 @@ pub(crate) fn open_transition_form(app: &mut App, prefill: Option<i64>) {
         frames: prefill.map(|n| n.to_string()).unwrap_or_default(),
         current,
     });
-    app.set_message(&format!("transition #{id} — enter frames, enter applies"));
+    // The form's keys live in `hints_for`; the message only names the target.
+    app.set_message(&format!("transition #{id}"));
 }
 
 /// Transition form keys: digits edit the frame count; enter applies.
