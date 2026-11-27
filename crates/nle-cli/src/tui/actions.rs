@@ -258,8 +258,16 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
             }
             app.set_message(&outcome.desc);
             // The register is shared with the CLI (`nile yank`/`nile paste`).
-            if app.project.save_register().is_ok() {
-                app.note_register();
+            // Check for a foreign write *before* saving it: the save re-stamps
+            // the file, which would hide the shell's yank from
+            // `persist_and_refresh`'s guard and clobber it for good.
+            match persist_register(app) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let file = app.foreign_file().unwrap_or("a session file");
+                    return adopt_foreign(app, player, file);
+                }
+                Err(e) => app.fail(&format!("register save failed: {e}")),
             }
             if outcome.changed {
                 persist_and_refresh(app, player);
@@ -271,6 +279,36 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
             false
         }
     }
+}
+
+/// Save the shared register unless a shell wrote one of the session files
+/// first. `Ok(false)` = refused, so the caller adopts the file instead of
+/// clobbering it — the same guard as `persist_playhead`, and it must run
+/// before the write: saving re-stamps the file, so a check afterwards can
+/// never see the change the write just covered.
+fn persist_register(app: &mut App) -> std::io::Result<bool> {
+    if app.external_change() {
+        return Ok(false);
+    }
+    app.project.save_register()?;
+    app.note_register();
+    Ok(true)
+}
+
+/// Adopt the shared file we refused to write over and report the action as
+/// not applied: the reload replaces the state the action changed, so `false`
+/// is the honest answer. Same notice shape as `persist_and_refresh`'s
+/// refusal, naming the file that actually moved.
+fn adopt_foreign(app: &mut App, player: &dyn Mpv, file: &str) -> bool {
+    if let Err(e) = reload_project(app, player, true) {
+        app.fail(&format!("reload failed: {e}"));
+        return false;
+    }
+    let prev = app.message.clone();
+    app.fail(&format!(
+        "{prev} — not saved: {file} changed on disk (reloaded)"
+    ));
+    false
 }
 
 /// Atomic save + view refresh. Called after every successful edit (and
@@ -286,13 +324,14 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) -> bool {
         Ok(false) => {
             // A shell wrote the project first: adopt theirs rather than
             // clobber it, and say so — this edit was not saved.
+            let file = app.foreign_file().unwrap_or("a session file");
             if let Err(e) = reload_project(app, player, true) {
                 app.fail(&format!("reload failed: {e}"));
                 return false;
             }
             let prev = app.message.clone();
             app.fail(&format!(
-                "{prev} — not saved: nile.json changed on disk (reloaded)"
+                "{prev} — not saved: {file} changed on disk (reloaded)"
             ));
             return false;
         }

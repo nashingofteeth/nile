@@ -477,15 +477,29 @@ impl App {
         self.seen.register = stamp(&action::register_path(self.project.path()));
     }
 
+    /// The shared session file a shell wrote since we last read or wrote it,
+    /// named as the sidecar on disk. `None` = in sync. The name is what the
+    /// refusal notice shows, so it must match the file that actually changed.
+    fn foreign_file(&self) -> Option<&'static str> {
+        if self.project.is_remote() {
+            return None;
+        }
+        if stamp(self.project.path()) != self.seen.project {
+            return Some("nile.json");
+        }
+        if stamp(&Histories::sidecar_path(self.project.path())) != self.seen.history {
+            return Some("history.json");
+        }
+        if stamp(&action::register_path(self.project.path())) != self.seen.register {
+            return Some("clipboard.json");
+        }
+        None
+    }
+
     /// Whether a shell wrote one of the shared files since we last read or
     /// wrote it.
     fn external_change(&self) -> bool {
-        if self.project.is_remote() {
-            return false;
-        }
-        stamp(self.project.path()) != self.seen.project
-            || stamp(&Histories::sidecar_path(self.project.path())) != self.seen.history
-            || stamp(&action::register_path(self.project.path())) != self.seen.register
+        self.foreign_file().is_some()
     }
 
     pub fn sync(&mut self, st: &PlaybackState) {
