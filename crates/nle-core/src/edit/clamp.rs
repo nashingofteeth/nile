@@ -3,28 +3,8 @@
 //! sub-frame leftovers a grid-snapped edit can strand.
 
 use crate::project::Project;
-use crate::time::{Seconds, checked_frames_to_seconds, format_seconds};
+use crate::time::{Seconds, checked_frames_to_seconds, format_seconds, whole_frames};
 use crate::timeline::{Clip, Gap, Segment, Track, TransitionSource, offset_of_source, source_time};
-
-/// Whole frames in `span` at `fps`, rounded, or `None` when that count does
-/// not fit `i64`. The i128 product keeps `span * fps` exact instead of letting
-/// `Rational64` cross-multiply two i64s into an overflow (a debug panic, a
-/// silent wrap in release); an unrepresentable count means the grid is finer
-/// than any position this timeline can encode, so callers leave the value be.
-fn whole_frames(span: Seconds, fps: Seconds) -> Option<i64> {
-    let num = i128::from(*span.numer()) * i128::from(*fps.numer());
-    let den = i128::from(*span.denom()) * i128::from(*fps.denom());
-    if den == 0 {
-        return None;
-    }
-    // Half away from zero, like `Rational64::round`.
-    let rounded = if num >= 0 {
-        (num + den / 2) / den
-    } else {
-        (num - den / 2) / den
-    };
-    i64::try_from(rounded).ok()
-}
 
 /// Keep one track's clips inside their media and on the frame grid. The
 /// source range is clamped to `[0, media]` (in-point ≥ 0, out-point ≤ the

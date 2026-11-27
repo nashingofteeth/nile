@@ -462,8 +462,12 @@ pub(crate) fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
     // inserted clips are clean.
     let whole = match (dur, app.project.fps.as_ref()) {
         (Some(d), Some(fps)) => {
-            let frames = (secs(&d) * secs(fps)).floor().max(1.0);
-            Seconds::new(frames as i64, 1) / *fps
+            let frames = (secs(&d) * secs(fps)).floor().max(1.0) as i64;
+            // A grid finer than `Ratio<i64>` can encode has no exact `n/fps`;
+            // snap to the nearest whole second (the same fallback `grid_time`
+            // uses) instead of keeping the raw media duration, which would
+            // drop the whole-frame floor and let a later split strand a stump.
+            nle_core::frame_to_seconds_nearest(frames, *fps)
         }
         (Some(d), None) => d,
         (None, _) => {

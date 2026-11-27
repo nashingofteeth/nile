@@ -39,7 +39,9 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nle_core::Seconds;
-use nle_core::time::format_seconds;
+use nle_core::frame_to_seconds_nearest;
+use nle_core::frames_to_seconds;
+use nle_core::time::{checked_sub, format_seconds, half_frame};
 use thiserror::Error;
 
 /// Bump when the *meaning* of a sample changes (a different pixel format, a
@@ -151,11 +153,12 @@ impl FrameMode {
                     return None;
                 }
                 let index = i64::try_from(index).ok()?;
-                Some(*start + Seconds::from_integer(index) / *fps)
+                let at = frames_to_seconds(index, *fps)?;
+                Some(*start + at)
             }
             FrameMode::Indices { rate, indices } => {
                 let source = i64::try_from(*indices.get(index)?).ok()?;
-                Some(Seconds::from_integer(source) / *rate)
+                frames_to_seconds(source, *rate)
             }
         }
     }
@@ -1305,14 +1308,20 @@ fn frame_args(spec: &FrameSpec) -> Vec<OsString> {
 /// first index through the frame after the last. The half-frame margin keeps
 /// `-ss` (printed to six decimals by [`format_seconds`]) strictly before the
 /// first wanted frame, so accurate seek keeps it.
+///
+/// Every conversion is checked: `frame / rate` can overflow `i64` at a
+/// hostile rate, so an unrepresentable bound falls back to the nearest whole
+/// second (the same bound `grid_time` uses) instead of panicking in `Ratio`.
 fn index_window(rate: &Seconds, indices: &[u64]) -> (Seconds, Seconds) {
     let first = *indices.first().expect("an index request names frames") as i64;
     let last = *indices.last().expect("an index request names frames") as i64;
-    let frame = Seconds::from_integer(1) / *rate;
-    let start = (Seconds::from_integer(first) / *rate - frame / Seconds::from_integer(2))
-        .max(Seconds::from_integer(0));
-    let end = Seconds::from_integer(last + 1) / *rate;
-    (start, end - start)
+    let zero = Seconds::from_integer(0);
+    let first_at = frame_to_seconds_nearest(first, *rate);
+    let start = checked_sub(&first_at, &half_frame(*rate).unwrap_or(zero))
+        .unwrap_or(first_at)
+        .max(zero);
+    let end = frame_to_seconds_nearest(last.saturating_add(1), *rate);
+    (start, checked_sub(&end, &start).unwrap_or(zero))
 }
 
 /// The exact argv for an audio sample. `atrim=end_sample` makes the sample
@@ -2271,6 +2280,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unrepresentable_index_window_is_built_not_panicked() {
+        // Frame 2 at 1/i64::MAX fps has no representable seconds; the window
+        // falls back to whole seconds instead of panicking in `Ratio`, so the
+        // full argv still builds (ffmpeg will report a clean miss).
+        let spec = index_spec(Path::new("in.mp4"), Seconds::new(1, i64::MAX), vec![2]);
+        let args = frame_args(&spec);
+        let line = args_line(&args);
+        assert!(line.contains("select=eq(n\\,0)"), "{line}");
+        assert!(line.contains("-ss "), "{line}");
+        assert!(line.contains("-t "), "{line}");
+        assert_eq!(args[args.len() - 2], "--");
+    }
+
+    #[test]
     fn a_rational_fps_is_spelled_as_a_ratio() {
         assert_eq!(rate_arg(&Seconds::from_integer(30)), "30");
         assert_eq!(rate_arg(&Seconds::new(30_000, 1001)), "30000/1001");
@@ -2320,6 +2343,25 @@ mod tests {
         assert_eq!(spec.time_of(0), Some(Seconds::from_integer(0)));
         assert_eq!(spec.time_of(1), Some(Seconds::new(7 * 1001, 30_000)));
         assert_eq!(spec.time_of(2), Some(Seconds::new(29 * 1001, 30_000)));
+    }
+
+    #[test]
+    fn an_unrepresentable_frame_time_is_refused_not_panicked() {
+        // A tiny rate makes `index / rate` overflow i64; `time` reports the
+        // unrepresentable frame instead of panicking in the division.
+        let indices = FrameMode::Indices {
+            rate: Seconds::new(1, i64::MAX),
+            indices: vec![2],
+        };
+        assert_eq!(indices.time(0), None);
+
+        // One frame at the huge reciprocal rate is still exactly representable.
+        let grid = FrameMode::Grid {
+            start: Seconds::from_integer(0),
+            duration: Seconds::from_integer(1),
+            fps: Seconds::new(i64::MAX, 86400),
+        };
+        assert_eq!(grid.time(1), Some(Seconds::new(86400, i64::MAX)));
     }
 
     #[test]

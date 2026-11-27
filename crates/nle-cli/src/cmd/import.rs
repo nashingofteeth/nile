@@ -740,7 +740,10 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
     }
     settle_video_size(&mut project, append, size_arg, size)?;
 
-    let offset_frames = timecode_to_frames(parse_timecode(src_offset)?, fps, doc.drop_frame);
+    let offset_frames = timecode_to_frames(parse_timecode(src_offset)?, fps, doc.drop_frame)
+        .with_context(|| {
+            format!("--src-offset {src_offset:?} is too long to represent at this frame rate")
+        })?;
     let timeline = edl::build(&doc, fps, offset_frames, &|ev| {
         resolve_reel(&project, &map, ev)
     })

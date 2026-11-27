@@ -730,6 +730,7 @@ const MEDIA: &[&str] = &[
     "audio_only.m4a",
     "subframe.m4a",
     "tiny.mp4",
+    "seven.mp4",
     "empty.mp4",
     "notmedia.txt",
 ];
@@ -755,6 +756,10 @@ fn media_dir() -> &'static Path {
         // sliver that no export can render.
         gen_a(d, "subframe.m4a", "0.005");
         gen_v(d, "tiny.mp4", "gray", "0.1");
+        // 7 s is coprime with 86400, so a 7 * i64::MAX rational product does
+        // not reduce: the extreme-rate tests need a duration that exposes the
+        // overflow (5 s reduces and passes by coincidence).
+        gen_v(d, "seven.mp4", "teal", "7");
         fs::write(d.join("empty.mp4"), b"").expect("empty.mp4");
         fs::write(d.join("notmedia.txt"), b"not media").expect("notmedia.txt");
         dir

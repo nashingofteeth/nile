@@ -480,6 +480,32 @@ fn tracks_and_pool() {
     );
 }
 
+/// The 7 s asset is coprime with 86400: at this rate the old `snap` computed
+/// `7 * i64::MAX` inside `Ratio<i64>` and panicked. The reconstruction now
+/// keeps the unsnapped position, so the command succeeds and the project
+/// still loads with the whole 7 s. (A 5 s asset reduces and hides the bug.)
+#[test]
+fn detect_edits_survives_an_extreme_frame_rate() {
+    let s = Sandbox::new();
+    let out = s.run(&[
+        "detect-edits",
+        "seven.mp4",
+        "--force",
+        "--fps",
+        "9223372036854775807/86400",
+    ]);
+    let text = merged(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(!text.contains("panicked"), "{text}");
+    s.assert_loads("detect-edits at an extreme frame rate", &text);
+    let project = nle_core::Project::load(&s.file(P)).expect("the project loads");
+    assert_eq!(
+        project.timeline.end(),
+        nle_core::Seconds::from_integer(7),
+        "the full shot is reconstructed"
+    );
+}
+
 #[test]
 fn odd_media() {
     let s = Sandbox::new();
@@ -496,6 +522,24 @@ fn odd_media() {
         "one.edl",
         "TITLE: one\nFCM: NON-DROP FRAME\n\n\
          001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    // A two-second record gap after event 1: at an extreme (but accepted)
+    // frame rate its frame count has no exact `Ratio<i64>` seconds.
+    s.write(
+        "gap.edl",
+        "TITLE: gap\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n\
+         * FROM CLIP NAME: red.mp4\n\
+         002  AX  V  C  00:00:00:00 00:00:01:00 01:00:03:00 01:00:04:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    // A 99-hour timecode: at an extreme (but accepted) frame rate its frame
+    // count overflows i64 before the timeline is built.
+    s.write(
+        "long.edl",
+        "TITLE: long\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  99:00:00:00 99:00:01:00 99:00:00:00 99:00:01:00\n\
          * FROM CLIP NAME: red.mp4\n",
     );
     s.write("bad.otio", "not json");
@@ -549,6 +593,54 @@ fn odd_media() {
             (
                 "detect-edits an audio-only file",
                 &[&["detect-edits", "audio_only.m4a", "--force"]],
+            ),
+            (
+                "detect-edits at an unrepresentable frame rate",
+                &[&[
+                    "detect-edits",
+                    "seven.mp4",
+                    "--force",
+                    "--fps",
+                    "9223372036854775807/86400",
+                ]],
+            ),
+            (
+                "import-edl at an unrepresentable frame rate",
+                &[&[
+                    "import-edl",
+                    "gap.edl",
+                    "--media",
+                    ".",
+                    "--force",
+                    "--fps",
+                    "9223372036854775807/86400",
+                ]],
+            ),
+            (
+                "import-edl a 99-hour timecode at an unrepresentable frame rate",
+                &[&[
+                    "import-edl",
+                    "long.edl",
+                    "--media",
+                    ".",
+                    "--force",
+                    "--fps",
+                    "9223372036854775807/86400",
+                ]],
+            ),
+            (
+                "import-edl a 99-hour --src-offset at an unrepresentable frame rate",
+                &[&[
+                    "import-edl",
+                    "one.edl",
+                    "--media",
+                    ".",
+                    "--force",
+                    "--fps",
+                    "9223372036854775807/86400",
+                    "--src-offset",
+                    "99:00:00:00",
+                ]],
             ),
             (
                 "import-edl a missing file",

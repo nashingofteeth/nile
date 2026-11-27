@@ -29,7 +29,7 @@ use nle_core::analysis::{AnalysisError, Transcript, TranscriptStore, Word};
 use nle_core::edit::Actor;
 use nle_core::{
     Action, Asset, AudioSettings, EditError, Outcome as ActionOutcome, Project, Seconds, TrackKind,
-    frame_of, frames_to_seconds, secs_f64,
+    frame_of, frame_to_seconds_nearest, frames_to_seconds, secs_f64,
 };
 use nle_ffmpeg::probe;
 use nle_protocol::{
@@ -805,11 +805,36 @@ impl ServeHandler {
     }
 
     /// A history frame as exact timeline seconds. Without an fps the model's
-    /// frame is a second (the same fallback `frame_to_secs` uses).
-    fn frame_seconds(&self, frame: i64) -> Seconds {
+    /// frame is a second (the same fallback `frame_to_secs` uses). An extreme
+    /// rate can make the frame unrepresentable; refuse it with a clear error
+    /// instead of panicking in the rational division.
+    fn frame_seconds(&self, frame: i64) -> Result<Seconds, RpcError> {
         match self.session.project().fps.as_ref() {
-            Some(fps) => frames_to_seconds(frame, *fps),
-            None => Seconds::from_integer(frame),
+            Some(fps) => frames_to_seconds(frame, *fps).ok_or_else(|| {
+                RpcError::internal(format!(
+                    "playhead frame {frame} is not representable at the project frame rate"
+                ))
+            }),
+            None => Ok(Seconds::from_integer(frame)),
+        }
+    }
+
+    /// Like [`Self::frame_seconds`], but an unrepresentable frame lands on the
+    /// nearest expressible whole second instead of failing. The write path
+    /// uses this: by the time the reply playhead is known the session has
+    /// already been mutated and its revision bumped, so an error there would
+    /// leave the model and the reply disagreeing.
+    fn frame_seconds_nearest(&self, frame: i64) -> Seconds {
+        match self.frame_seconds(frame) {
+            Ok(at) => at,
+            Err(_) => {
+                let project = self.session.project();
+                match project.fps.as_ref() {
+                    Some(fps) => frame_to_seconds_nearest(frame, *fps)
+                        .clamp(Seconds::from_integer(0), project.last_frame()),
+                    None => Seconds::from_integer(frame),
+                }
+            }
         }
     }
 
@@ -1028,7 +1053,8 @@ impl ServeHandler {
         let playhead = preview
             .outcome
             .playhead
-            .map(|frame| self.frame_seconds(frame));
+            .map(|frame| self.frame_seconds(frame))
+            .transpose()?;
         let outcome = self.wire_outcome(preview.outcome, self.session.revision(), playhead);
         Ok(Reply::Preview(Preview {
             outcome,
@@ -1083,7 +1109,10 @@ impl ServeHandler {
             )
         } else if let Some(frame) = outcome.playhead {
             // A batch has no one edge to follow: its last explicit playhead.
-            Some(secs_f64(&self.frame_seconds(frame)))
+            // An extreme rate can make that frame unrepresentable; land on the
+            // nearest expressible bound instead of failing after the session
+            // was mutated (its revision is bumped and saved by then).
+            Some(secs_f64(&self.frame_seconds_nearest(frame)))
         } else if outcome.changed {
             Some(current.clamp(0.0, secs_f64(&self.session.project().last_frame())))
         } else {
@@ -1202,8 +1231,114 @@ mod tests {
     #[test]
     fn frames_convert_with_the_project_rate() {
         let h = handler();
-        assert_eq!(h.frame_seconds(30), Seconds::from_integer(1));
-        assert_eq!(h.frame_seconds(15), Seconds::new(1, 2));
+        assert_eq!(h.frame_seconds(30).unwrap(), Seconds::from_integer(1));
+        assert_eq!(h.frame_seconds(15).unwrap(), Seconds::new(1, 2));
+    }
+
+    #[test]
+    fn an_unrepresentable_playhead_frame_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(Seconds::new(i64::MAX, 86400));
+        project.save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start(&path).expect("queue");
+        let h = ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: None,
+            jobs,
+        };
+        assert_eq!(h.frame_seconds(1).unwrap(), Seconds::new(86400, i64::MAX));
+        let error = h.frame_seconds(i64::MAX - 1).expect_err("unrepresentable");
+        assert!(error.message.contains("not representable"), "{error:?}");
+    }
+
+    #[test]
+    fn a_batch_playhead_at_an_extreme_rate_lands_on_a_representable_bound() {
+        use nle_core::timeline::{Gap, Segment};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(Seconds::new(i64::MAX, 86400));
+        project.timeline.tracks[0].segments = vec![
+            Segment::Gap(Gap {
+                duration: Seconds::new(1, 2),
+            }),
+            Segment::Gap(Gap {
+                duration: Seconds::new(1, 2),
+            }),
+            Segment::Gap(Gap {
+                duration: Seconds::new(1, 2),
+            }),
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+        ];
+        project.save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start(&path).expect("queue");
+        let mut h = ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: None,
+            jobs,
+        };
+        let base = h.session.revision();
+        // The first delete folds the two half-second neighbours into one
+        // second; the second deletes the trailing gap and its playhead is 1 s,
+        // whose frame is not representable at this rate. Before the fix
+        // `apply` returned an internal error after the session had changed.
+        let frame = frame_of(h.session.project().fps.as_ref(), 1.0);
+        assert!(
+            h.frame_seconds(frame).is_err(),
+            "the test must exercise the unrepresentable playhead"
+        );
+        let actions = [
+            Action::DeleteRange {
+                track: 0,
+                start: 1,
+                end: 1,
+            },
+            Action::DeleteRange {
+                track: 0,
+                start: 1,
+                end: 1,
+            },
+        ];
+        let reply = h
+            .apply(base, &actions, Some(Seconds::from_integer(1)))
+            .expect("the batch applies and replies");
+        let Reply::Outcome(outcome) = reply else {
+            panic!("expected an outcome reply");
+        };
+        let revision = h.session.revision();
+        assert_eq!(
+            outcome.revision, revision,
+            "the reply revision is the model's"
+        );
+        assert!(revision > base, "the model changed and was saved");
+        assert!(outcome.changed);
+        assert_eq!(
+            h.session.project().timeline.tracks[0].segments.len(),
+            1,
+            "both range deletes landed"
+        );
+        let playhead = outcome.playhead.expect("a batch reports its playhead");
+        assert_eq!(
+            h.session.project().playhead,
+            playhead,
+            "the reply and the model agree"
+        );
+        assert!(
+            playhead <= h.session.project().last_frame(),
+            "the fallback stays inside the timeline"
+        );
+        let loaded = Project::load(&path).expect("the saved project loads");
+        assert_eq!(loaded.revision, revision);
+        assert_eq!(loaded.playhead, playhead);
     }
 
     fn handler_with_runner(
