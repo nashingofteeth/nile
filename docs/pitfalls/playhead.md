@@ -67,5 +67,7 @@ one row cannot carry have their own guards:
 `redo_restores_the_clamped_pre_edit_position` (the undo/redo restore),
 `tail_extend_commit_lands_on_the_new_end` (the committed edge),
 `non_reanchoring_actions_leave_the_playhead_put` (`reanchors`, one row per
-excluded action), `the_playhead_clamps_to_the_last_frame_after_a_trim` and
-`a_track_removal_leaves_the_playhead_put`.
+non-media action) and `a_track_removal_leaves_the_playhead_put` (the re-index
+case), the direct classification `non_media_actions_do_not_reanchor`
+(`session/playhead.rs`), `the_playhead_clamps_to_the_last_frame_after_a_trim`
+and `a_restored_frame_past_the_end_clamps_to_last_frame` (the `land` clamp).
