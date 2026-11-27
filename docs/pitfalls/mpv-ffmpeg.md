@@ -87,11 +87,17 @@ just no longer drags the audio clock with it.
 
 - `--` stops option parsing, not ffmpeg's URL parser: a relative path whose
   first component contains `:` (`a:b.mp4`) is read as protocol `a` and fails
-  with "Protocol not found". Pass positional ffmpeg/ffprobe paths through
-  `local_path_arg` (`nle-ffmpeg/src/paths.rs`), which prefixes `./` only when
-  needed; absolute and `sub/a:b.mp4` paths stay unchanged. Guards:
-  `a_protocol_like_path_is_rendered_as_a_local_file`, and the end-to-end
-  `a_relative_export_name_with_a_colon_renders`.
+  with "Protocol not found". This applies to `-i` values too — option values
+  are consumed literally, but the input is still opened as a URL. Pass every
+  ffmpeg/ffprobe path through `local_path_arg`
+  (`nle-ffmpeg/src/paths.rs`), which prefixes `./` only when needed;
+  absolute and `sub/a:b.mp4` paths stay unchanged.
+- An explicit `file:`/`pipe:` prefix is a protocol escape, not part of the
+  name: leave it alone (`file:out.mp4` writes `out.mp4`, `pipe:1` is a
+  stream). Nile output names are local unless the user says otherwise.
+  Guards: `a_protocol_like_path_is_rendered_as_a_local_file`,
+  `an_explicit_protocol_escape_is_left_alone`, `a_colon_input_is_read_as_a_local_file`,
+  and the end-to-end `a_relative_export_name_with_a_colon_renders`.
 
 ## Filter-graph gotchas
 
