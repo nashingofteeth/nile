@@ -86,10 +86,14 @@ fn socket_path(pid: u32) -> Result<PathBuf, MpvError> {
 ///
 /// `--no-config` keeps the user's `mpv.conf`, input bindings and Lua scripts
 /// from changing monitor behaviour: nile needs an isolated config as much as
-/// an isolated IPC socket.
+/// an isolated IPC socket. It also discards the user's `hwdec`/`vo`/`ao`, so
+/// nile states its own `--hwdec=auto-safe`: the default is software decode,
+/// and a user who had hardware decode would silently lose it. `auto-safe`
+/// only picks drivers mpv considers safe and falls back to software.
 fn spawn_args(socket_path: &Path, window_title: &str, media_title: &str) -> Vec<String> {
     vec![
         "--no-config".to_string(),
+        "--hwdec=auto-safe".to_string(),
         "--no-terminal".to_string(),
         "--idle=yes".to_string(),         // stay alive before/after files
         "--keep-open=always".to_string(), // at EOF: pause at the end, don't quit
@@ -464,10 +468,16 @@ mod tests {
         let args = spawn_args(&socket, "nile", "nile — preview");
 
         // User config (mpv.conf, input bindings, scripts) must not load: the
-        // monitor's behaviour has to be the same on every machine.
+        // monitor's behaviour has to be the same on every machine. Hardware
+        // decode is the one preference `--no-config` would silently drop, so
+        // it is re-stated explicitly (and safely: software is the fallback).
         assert!(
             args.iter().any(|arg| arg == "--no-config"),
             "missing --no-config in {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--hwdec=auto-safe"),
+            "missing --hwdec=auto-safe in {args:?}"
         );
         assert!(
             args.iter()
