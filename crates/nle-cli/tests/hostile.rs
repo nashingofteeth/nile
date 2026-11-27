@@ -851,40 +851,43 @@ fn odd_media() {
 }
 
 /// A project saved while its media was valid can be reopened after that file
-/// becomes 0 bytes (a truncated recording, a failed copy). `show`, `export`
-/// and `seek` must refuse cleanly or accept, never panic, and the project must
-/// still load with a finite length — the add/import probe is not the only path
+/// becomes 0 bytes (a truncated recording, a failed copy). Emptying the saved
+/// path rather than repointing `media[0]` keeps the asset's identity, cache
+/// and anchoring in play; `show` and `seek` still read the model, but `export`
+/// must refuse and leave no render — the add/import probe is not the only path
 /// to a zero-byte asset.
 #[test]
 fn a_saved_project_with_zero_byte_media_is_refused_cleanly() {
     let s = Sandbox::new();
     s.local_base(); // init + import red/green/blue + three clips
-    let empty = s.file("empty.mp4");
+    fs::write(s.file("red.mp4"), b"").expect("truncate red.mp4");
     assert_eq!(
-        fs::metadata(&empty).expect("empty.mp4").len(),
+        fs::metadata(s.file("red.mp4")).expect("red.mp4").len(),
         0,
-        "the fixture is 0 bytes"
+        "the saved asset is now 0 bytes"
     );
-    let mut project: serde_json::Value =
-        serde_json::from_str(&s.read(P)).expect("the base project");
-    project["media"][0]["path"] = json!(empty.display().to_string());
-    s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
 
-    for argv in [
-        &["show"][..],
-        &["export", "-o", "z.mp4"][..],
-        &["seek", "1"][..],
-    ] {
+    for argv in [&["show"][..], &["seek", "1"][..]] {
         let out = s.run(argv);
         let text = merged(&out);
         assert!(!text.contains("panicked"), "{argv:?} panicked:\n{text}");
-        assert!(
-            matches!(out.status.code(), Some(0 | 1)),
-            "{argv:?} exited {:?}, want 0 or 1:\n{text}",
-            out.status.code()
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{argv:?} still reads the model:\n{text}"
         );
     }
-    s.assert_loads("zero-byte media path", "");
+
+    let export = s.run(&["export", "-o", "z.mp4"]);
+    let text = merged(&export);
+    assert!(!text.contains("panicked"), "export panicked:\n{text}");
+    assert_eq!(
+        export.status.code(),
+        Some(1),
+        "export refuses zero-byte media:\n{text}"
+    );
+    assert!(!s.file("z.mp4").exists(), "the failed export left a file");
+    s.assert_loads("zero-byte media", &text);
 }
 
 #[test]

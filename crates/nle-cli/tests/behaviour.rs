@@ -2403,14 +2403,19 @@ fn ripple_delete_keeps_a_separate_audio_track_in_sync() {
     );
 }
 
-/// A 0.005 s source span is below one frame at 30 fps (0.15 frames). The
-/// clamp after the edit must drop it and say why, leaving no zero-width
-/// sliver for the export to skip — and the project must load again, because
-/// "dropped" is a model write, not a refusal.
+/// A 0.005 s tone is below one frame at 30 fps (0.15 frames). With no `--out`
+/// the probed asset duration drives the clip, so the clamp after the edit must
+/// drop it and say why, leaving no zero-width sliver for the export to skip —
+/// and the project must load again, because "dropped" is a model write, not a
+/// refusal.
 #[test]
 fn a_sub_frame_audio_clip_is_dropped_with_a_note() {
     let s = Sandbox::new();
     s.local_base(); // 30 fps: red 0–2, green 2–4, blue 4–6
+    assert!(
+        s.duration("subframe.m4a") < 1.0 / 30.0,
+        "subframe.m4a is not below one frame at 30 fps"
+    );
     s.ok(&["track", "add", "audio"]);
     let out = s.run(&[
         "add",
@@ -2421,8 +2426,6 @@ fn a_sub_frame_audio_clip_is_dropped_with_a_note() {
         "0",
         "--in",
         "0",
-        "--out",
-        "0.005",
     ]);
     let text = merged(&out);
     assert!(out.status.success(), "{text}");
