@@ -1244,6 +1244,9 @@ fn purge_stumps(
         }
     }
     if repairs.is_empty() {
+        // Same backstop as `History::apply`'s empty batch: a no-op still
+        // refuses a project that does not validate.
+        project.validate()?;
         return Ok(Outcome {
             desc: "purged 0 sub-frame segment(s), adjusted 0 clip(s)".to_string(),
             changed: false,
