@@ -37,7 +37,8 @@ entry, and edits still take an explicit `--at`.
 - **Every playhead write clamps to `last_frame`** (`dur - 1/fps`), never
   `end`: an edit that shortens the timeline — or a redo restoring a pre-edit
   position into a shorter one — must not park the playhead past the final
-  frame (`Project::last_frame`; the same rule as a seek).
+  frame (`Project::last_frame`; the same rule as a seek). `Document::save`
+  clamps the stored cursor of **every** sequence, not only the active one.
 - **A track or pool change leaves the playhead put** (`reanchors`): it doesn't
   move the active track's media, and `track rm` re-indexes — an anchor taken
   against the old active track would resolve against the wrong one.

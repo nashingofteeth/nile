@@ -500,18 +500,19 @@ impl Document {
     /// so it bumps the revision; a clean save — the normal case, and every
     /// playhead-only one — leaves it alone.
     pub fn save(&mut self, path: &Path) -> Result<(), ProjectError> {
-        if !edit::clamp_project_all(&mut self.project).is_empty() {
-            self.project.bump_revision();
+        // Repair a copy: clamping (including each sequence's stored playhead,
+        // session state a front-end may have left outside `[0, last_frame]`)
+        // and the revision bump are writes. A model `validate` refuses must
+        // leave the in-memory document exactly as it was; only a persist that
+        // succeeded adopts the repaired copy.
+        let mut project = self.project.clone();
+        if !edit::clamp_project_all(&mut project).is_empty() {
+            project.bump_revision();
         }
-        // The stored playhead is session state, but a file must never hold one
-        // outside `[0, last_frame]`: every front-end reads it back and trusts
-        // it. Clamping here covers a path that forgets to write it back.
-        let last = self.project.last_frame();
-        if self.project.playhead > last {
-            self.project.playhead = last;
-        }
-        self.project.validate()?;
-        self.project.save(path)
+        project.validate()?;
+        project.save(path)?;
+        self.project = project;
+        Ok(())
     }
 
     /// Persist the undo stack beside the project.

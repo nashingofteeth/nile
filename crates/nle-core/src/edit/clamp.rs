@@ -266,6 +266,9 @@ pub fn clamp_project(project: &mut Project) -> Vec<String> {
 /// Clamp every sequence, not only the active one, and restore the cursor.
 /// `Document::save` uses this so a switch cannot leave another timeline with
 /// a clip reading past EOF (its stored state is still written to the file).
+/// Each sequence's stored playhead is clamped to its own `last_frame` too:
+/// the cursor is session state, so that repair adds no note and never bumps
+/// the revision on its own.
 pub fn clamp_project_all(project: &mut Project) -> Vec<String> {
     let active = project.active_id();
     let ids: Vec<u32> = project.sequences.iter().map(|s| s.id).collect();
@@ -275,6 +278,10 @@ pub fn clamp_project_all(project: &mut Project) -> Vec<String> {
             .select_sequence(id)
             .expect("id came from the sequence list");
         notes.extend(clamp_project(project));
+        let last = project.last_frame();
+        if project.playhead > last {
+            project.playhead = last;
+        }
     }
     project
         .select_sequence(active)
