@@ -109,7 +109,7 @@ pub struct VideoSettings {
 /// Normalization targets EBU R128 speech-first delivery: -16 LUFS integrated,
 /// -1.5 dBTP true peak, LRA 11. Fades are clamped to the programme length at
 /// export, so a fade longer than the timeline is harmless.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioSettings {
     /// One-pass `loudnorm` on the final mix.

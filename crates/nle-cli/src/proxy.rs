@@ -243,8 +243,9 @@ pub fn tmp_file(base: &str) -> String {
 }
 
 /// Everything the render depends on: the segment (effects, transition,
-/// source spans, speed), the output geometry and frame rate, and the media it
-/// reads (path + mtime, so replacing a file invalidates).
+/// source spans, speed), the output geometry and frame rate, the sequence's
+/// audio post, and the media it reads (path + mtime, so replacing a file
+/// invalidates).
 fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
     RENDER_VERSION.hash(&mut hasher);
@@ -258,6 +259,9 @@ fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     // key too: the same segment in a 24 fps and a 30 fps project must not
     // share an entry.
     project.fps.hash(&mut hasher);
+    // …and so does the sequence's audio post (`loudnorm`, `afade`), which the
+    // export chain applies to this render after the mix.
+    project.audio.hash(&mut hasher);
     let mut assets: Vec<u32> = Vec::new();
     match seg {
         Segment::Clip(c) => assets.push(c.asset),
@@ -495,11 +499,18 @@ fn slice_tracks(project: &Project, start: Seconds, end: Seconds) -> Vec<Track> {
 fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
     match seg {
         Segment::Gap(_) => Segment::Gap(Gap { duration: len }),
-        Segment::Clip(c) => Segment::Clip(Clip {
-            asset_in: c.source_at(offset),
-            asset_out: c.source_at(offset + len),
-            ..c.clone()
-        }),
+        Segment::Clip(c) => {
+            let mut piece = Clip {
+                asset_in: c.source_at(offset),
+                asset_out: c.source_at(offset + len),
+                ..c.clone()
+            };
+            // The slice's head is clip-relative timeline `offset`, so re-base
+            // crop keys onto it exactly like a trim-in; otherwise the proxy
+            // animates from the old head.
+            piece.rebase_crop_keys(offset);
+            Segment::Clip(piece)
+        }
         Segment::Transition(t) => {
             // `composite_spans` widens a span to contain any transition whole,
             // so it arrives uncut (`offset == 0`, `len == dur`); keep it as-is
@@ -512,8 +523,9 @@ fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
 }
 
 /// The cache key for a composite span: every sliced track (kinds, effects,
-/// transitions, speeds), the output geometry and rate, and each asset the
-/// slice reads (path + mtime, so replacing a file invalidates).
+/// transitions, speeds), the output geometry and rate, the sequence's audio
+/// post, and each asset the slice reads (path + mtime, so replacing a file
+/// invalidates).
 fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
     RENDER_VERSION.hash(&mut hasher);
@@ -525,6 +537,8 @@ fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
     w.hash(&mut hasher);
     h.hash(&mut hasher);
     project.fps.hash(&mut hasher);
+    // The composite is the export graph too, audio post included.
+    project.audio.hash(&mut hasher);
     for track in tracks {
         for seg in &track.segments {
             hash_lut_files(seg, &mut hasher);
@@ -556,7 +570,9 @@ fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nle_core::timeline::{Clip, Effect, Gap, Transition, TransitionKind, TransitionSource};
+    use nle_core::timeline::{
+        Clip, CropKey, Effect, Gap, TrackKind, Transition, TransitionKind, TransitionSource,
+    };
 
     fn clip() -> Segment {
         Segment::Clip(Clip::new(
@@ -704,6 +720,111 @@ mod tests {
         assert_eq!(slice_tracks(&p, secs(1), secs(3)).len(), 1);
     }
 
+    /// A span boundary can cut a keyed-crop clip from one track. The slice's
+    /// head is the window that was playing at the cut, so its keys must be
+    /// re-based onto that head (the same rule trim/split follow) — otherwise
+    /// the proxy plays the animation from the old start.
+    #[test]
+    fn slice_tracks_rebases_crop_keys() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let key = |at: Seconds, x: f64| CropKey {
+            at,
+            x,
+            y: 0.0,
+            w: 50.0,
+            h: 50.0,
+        };
+        let mut c = Clip::new(1, a, secs(0), secs(3));
+        c.effects = vec![Effect::Crop {
+            x: 10.0,
+            y: 0.0,
+            w: 50.0,
+            h: 50.0,
+            keys: vec![key(secs(0), 10.0), key(secs(2), 30.0)],
+        }];
+        p.timeline.tracks[0].segments = vec![Segment::Clip(c)];
+
+        let slice = slice_tracks(&p, secs(1), secs(3));
+        let Some(Segment::Clip(clipped)) = slice[0]
+            .segments
+            .iter()
+            .find(|s| matches!(s, Segment::Clip(_)))
+        else {
+            panic!("the clip is in the slice: {:?}", slice[0].segments);
+        };
+        let Effect::Crop { keys, .. } = &clipped.effects[0] else {
+            panic!("the slice keeps the keyed crop");
+        };
+        assert_eq!(keys[0].at, secs(0), "the new head is the origin");
+        assert_eq!(
+            keys[0].x, 20.0,
+            "the window at the trim offset becomes the head key"
+        );
+        assert_eq!(keys[1].at, secs(1), "later keys shift with the head");
+    }
+
+    /// A static crop in a sliced span must stay static. Re-basing used to push
+    /// the base window as a key at 0, silently turning the crop keyed — and a
+    /// keyed crop refuses a second effect (here `eq`), so the composite graph
+    /// stopped compiling.
+    #[test]
+    fn slice_tracks_keeps_a_static_crop_static() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let mut c = Clip::new(1, a, secs(0), secs(3));
+        c.effects = vec![
+            Effect::Crop {
+                x: 10.0,
+                y: 0.0,
+                w: 50.0,
+                h: 50.0,
+                keys: Vec::new(),
+            },
+            Effect::Eq {
+                brightness: 0.1,
+                contrast: 1.0,
+                saturation: 1.0,
+            },
+        ];
+        p.timeline.tracks[0].segments = vec![Segment::Clip(c)];
+
+        let slice = slice_tracks(&p, secs(1), secs(3));
+        let Some(Segment::Clip(clipped)) = slice[0]
+            .segments
+            .iter()
+            .find(|s| matches!(s, Segment::Clip(_)))
+        else {
+            panic!("the clip is in the slice: {:?}", slice[0].segments);
+        };
+        let Effect::Crop { keys, .. } = &clipped.effects[0] else {
+            panic!("the slice keeps the crop");
+        };
+        assert!(keys.is_empty(), "a static crop stays static: {keys:?}");
+        assert!(!clipped.effects.iter().any(Effect::is_keyed_crop));
+
+        // It compiles alone (single-track proxy)…
+        p.timeline.tracks = slice;
+        nle_ffmpeg::compile_export(&p).expect("static crop + eq compiles");
+        // …and as a composite span beside an audible track, which takes the
+        // multi-track export path (the other keyed-crop guard).
+        p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks = slice_tracks(&p, secs(1), secs(3));
+        nle_ffmpeg::compile_export(&p).expect("the composite span compiles");
+    }
+
     /// A span is widened to contain a transition whole, so the slice must keep
     /// it as-is — not try to cut a crossfade (the monitor used to panic here).
     #[test]
@@ -806,6 +927,69 @@ mod tests {
             proxy_hash(&p30, &a, 320, 240),
             "frame rate is part of the key"
         );
+    }
+
+    /// The export bakes the sequence's audio post into the render, so the key
+    /// must move when each setting changes — otherwise the monitor plays a
+    /// programme shaped by the old settings.
+    #[test]
+    fn proxy_hash_includes_audio_post_settings() {
+        let seg = clip();
+        let plain = proxy_hash(&Project::new(), &seg, 320, 240);
+        let audio = |normalize: bool, fade_in: Seconds, fade_out: Seconds| {
+            let mut p = Project::new();
+            p.audio = nle_core::AudioSettings {
+                normalize,
+                fade_in,
+                fade_out,
+            };
+            proxy_hash(&p, &seg, 320, 240)
+        };
+        assert_ne!(
+            audio(true, Seconds::from_integer(0), Seconds::from_integer(0)),
+            plain,
+            "normalize is part of the key"
+        );
+        assert_ne!(
+            audio(false, Seconds::new(1, 2), Seconds::from_integer(0)),
+            plain,
+            "fade-in is part of the key"
+        );
+        assert_ne!(
+            audio(false, Seconds::from_integer(0), Seconds::new(1, 4)),
+            plain,
+            "fade-out is part of the key"
+        );
+    }
+
+    /// A composite span is rendered by the export too, so its key carries the
+    /// same audio-post settings as a segment's.
+    #[test]
+    fn span_hash_includes_audio_post_settings() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        p.timeline.tracks[0].segments = vec![Segment::Clip(Clip::new(1, a, secs(0), secs(2)))];
+        let tracks = slice_tracks(&p, secs(0), secs(2));
+        let span = |p: &Project| span_hash(p, &tracks, 320, 240);
+        let plain = span(&p);
+
+        let mut normalize = p.clone();
+        normalize.audio.normalize = true;
+        assert_ne!(span(&normalize), plain, "normalize is part of the key");
+
+        let mut fade_in = p.clone();
+        fade_in.audio.fade_in = Seconds::new(1, 2);
+        assert_ne!(span(&fade_in), plain, "fade-in is part of the key");
+
+        let mut fade_out = p.clone();
+        fade_out.audio.fade_out = Seconds::new(1, 4);
+        assert_ne!(span(&fade_out), plain, "fade-out is part of the key");
     }
 
     /// Write a cache entry of `len` bytes and stamp it `age` before `now`.

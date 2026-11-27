@@ -583,11 +583,17 @@ impl Clip {
     /// Re-base crop keys after `removed` timeline seconds disappear from the
     /// head (negative grows it). The value at the new head becomes the key at
     /// 0, so a split or trim does not restart the animation from the old base.
+    /// A static crop (no keys) stays static: turning its base window into a
+    /// key would make it keyed, and a keyed crop cannot share a clip with
+    /// another effect.
     pub fn rebase_crop_keys(&mut self, removed: Seconds) {
         if removed == Seconds::from_integer(0) {
             return;
         }
         for effect in &mut self.effects {
+            if matches!(effect, Effect::Crop { keys, .. } if keys.is_empty()) {
+                continue;
+            }
             let Some(value) = effect.crop_window_at(removed) else {
                 continue;
             };
