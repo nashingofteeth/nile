@@ -947,6 +947,65 @@ fn purge_stumps_noop_records_nothing() {
     assert_eq!(p.revision, revision, "no model write");
 }
 
+// Same backstop as `History::apply`'s empty batch: a no-op must still refuse
+// a project that does not validate, not report a clean bill of health.
+#[test]
+fn purge_stumps_noop_still_validates() {
+    let mut p = fixture();
+    p.timeline.tracks.clear(); // no video track — `validate` must say so
+    let mut reg = None;
+    let mut h = History::default();
+    let err = run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::PurgeStumps { track: None },
+        0.0,
+    )
+    .unwrap_err();
+    assert!(matches!(err, EditError::Project(_)), "{err}");
+    assert!(!h.can_undo(), "a refused no-op records nothing");
+}
+
+// Changing only a gap's off-grid boundary moves no clip, so `adjusted` and
+// `dropped` both stay 0 — the repaired segment list is what tells this apart
+// from a clean project. It must still record one `Change::Tracks`.
+#[test]
+fn purge_stumps_records_a_bare_grid_snap() {
+    use crate::edit::Change;
+
+    let mut p = fixture();
+    // The leading gap is 30.5 frames at 30 fps; purge snaps it to 31.
+    p.timeline.tracks[0].segments[0] = Segment::Gap(Gap {
+        duration: Seconds::new(61, 60),
+    });
+    let mut reg = None;
+    let mut h = History::default();
+    let revision = p.revision;
+    let out = run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::PurgeStumps { track: None },
+        0.0,
+    )
+    .unwrap();
+    assert!(out.changed, "{}", out.desc);
+    assert!(out.desc.contains("purged 0"), "{}", out.desc);
+    assert!(out.desc.contains("adjusted 0"), "{}", out.desc);
+    assert_eq!(
+        p.timeline.tracks[0].segments[0].duration(),
+        Seconds::new(31, 30),
+        "the gap landed on the grid"
+    );
+    assert_ne!(p.revision, revision, "the snap is a model write");
+    assert_eq!(h.depth(), 1, "one track-list change");
+    assert!(
+        matches!(h.state().done.as_slice(), [Change::Tracks(_)]),
+        "the bare snap is undoable, not re-baselined"
+    );
+}
+
 /// Clip ids are unique across tracks: a clip-addressed action finds its
 /// own track, so `nile speed ID` needs no `--track` (same as
 /// delete/yank/extend).
@@ -1024,6 +1083,54 @@ fn setting_the_current_speed_reports_no_change() {
     assert!(!out.changed, "{}", out.desc);
     assert!(out.desc.contains("unchanged"), "{}", out.desc);
     assert!(!h.can_undo(), "no dead history entry");
+}
+
+// `set_speed_on` compares the ops it built, not the rate it was asked for:
+// 0.7× of clip #1's 3 s span lands the grid on 129 frames and the rate on
+// 30/43. Asking for 7/10 again must not see "requested != c.speed" and
+// record a dead step.
+#[test]
+fn setting_a_grid_rounded_rate_again_reports_no_change() {
+    let mut p = fixture();
+    let mut reg = None;
+    let mut h = History::default();
+    let rate = Seconds::new(7, 10);
+    let out = run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::SetSpeed {
+            track: 0,
+            clip: 1,
+            rate,
+        },
+        0.0,
+    )
+    .unwrap();
+    assert!(out.changed, "{}", out.desc);
+    let Segment::Clip(c) = &p.timeline.tracks[0].segments[1] else {
+        panic!("expected clip #1")
+    };
+    assert_eq!(c.speed, Seconds::new(30, 43), "the grid rounded the rate");
+    let depth = h.depth();
+    let revision = p.revision;
+
+    let out = run_action(
+        &mut p,
+        &mut h,
+        &mut reg,
+        &Action::SetSpeed {
+            track: 0,
+            clip: 1,
+            rate,
+        },
+        0.0,
+    )
+    .unwrap();
+    assert!(!out.changed, "{}", out.desc);
+    assert!(out.desc.contains("unchanged"), "{}", out.desc);
+    assert_eq!(h.depth(), depth, "the built ops are identical");
+    assert_eq!(p.revision, revision, "no model write");
 }
 
 #[test]
