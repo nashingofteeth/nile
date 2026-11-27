@@ -1770,6 +1770,91 @@ mod tests {
         );
     }
 
+    /// The same argv must mean the same action whether clap parsed it
+    /// (through [`to_action`]) or the shared `:cmd` grammar did. The
+    /// reachability test builds `Cmd` values directly, so a long flag wired
+    /// to the wrong field (`--track` feeding `clip`, say) can still pass it;
+    /// this sweep parses one argv per catalog slot both ways with
+    /// CLI-equivalent defaults (`--track 1` → 0, `--at` explicit). For every
+    /// case but `speed` the `:cmd` line is the argv itself, so the flags
+    /// cannot drift between the two lists.
+    #[test]
+    fn same_flags_parse_identically_in_cli_and_catalog() {
+        let cases: &[&[&str]] = &[
+            &["trim-in", "--at", "2", "--track", "2", "--ripple"],
+            &["trim-out", "--at", "1"],
+            &["split", "--at", "1.5"],
+            &["gap", "--at", "1", "--frames", "3"],
+            &["delete", "--at", "2"],
+            &["yank", "--clip", "7"],
+            &["paste", "--at", "1", "--ripple"],
+            &[
+                "extend", "--seg", "1", "--edge", "out", "--to", "3", "--track", "2",
+            ],
+            &["purge-stumps", "--track", "2"],
+            &["track", "add", "audio"],
+            &["track", "mute", "2"],
+            &["track", "rm", "2"],
+            &["media", "rm", "3"],
+            &["undo"],
+            &["redo"],
+            &["transition", "fade", "--at", "3", "--frames", "15"],
+            &[
+                "effect",
+                "eq",
+                "--clip",
+                "1",
+                "--brightness",
+                "0.5",
+                "--saturation",
+                "0.8",
+            ],
+            &["effect", "rm", "--clip", "1", "--index", "0"],
+            &["effect", "clear", "--clip", "1"],
+            &["delete", "--from-seg", "1", "--to-seg", "2"],
+            &["yank", "--from-seg", "1", "--to-seg", "2"],
+            &["paste", "--range", "--at", "3"],
+            &["annotation", "add", "hi", "--asset", "1", "--time", "0"],
+            &["annotation", "rm", "1"],
+            &["annotation", "resolve", "1"],
+            &["annotation", "add", "hi", "--timeline", "--at", "1"],
+            &[
+                "effect", "crop", "--clip", "1", "--at", "1", "--x", "10", "--w", "90",
+            ],
+        ];
+        let defaults = nle_core::ParseDefaults::default();
+        let mut seen = vec![false; nle_core::action::SLOTS];
+        let mut check = |argv: &[&str], colon: &str| {
+            let cli = clap_action(argv);
+            let catalog = nle_core::action::parse(colon, &defaults)
+                .unwrap_or_else(|e| panic!("{colon:?}: {e}"));
+            assert_eq!(cli, catalog, "{argv:?} and {colon:?} disagree");
+            let slot = cli.slot();
+            assert!(!seen[slot], "{argv:?} duplicates slot {slot}");
+            seen[slot] = true;
+        };
+        for argv in cases {
+            check(argv, &argv.join(" "));
+        }
+        // `speed` is the one slot whose CLI takes the clip id positionally
+        // and the percentage as a second positional; `:cmd` spells the id
+        // `--clip`.
+        check(&["speed", "1", "200"], "speed 200 --clip 1");
+        assert!(seen.iter().all(|&s| s), "uncovered slots: {seen:?}");
+
+        // `nile remove` is the other verb whose CLI spelling differs: its
+        // clip id is positional, and it lands on `Delete`.
+        assert_eq!(
+            clap_action(&["remove", "1", "--ripple"]),
+            nle_core::action::parse("delete --clip 1 --ripple", &defaults).unwrap()
+        );
+        // An omitted `--track` is track 1 on both sides (0 in the model).
+        assert_eq!(
+            clap_action(&["split", "--at", "1"]),
+            nle_core::action::parse("split --at 1", &defaults).unwrap()
+        );
+    }
+
     /// Parsing and wire round-tripping are not enough: a flag can survive both
     /// while mapping to the wrong unit or a default. Pin the ambiguous
     /// spellings by value.
