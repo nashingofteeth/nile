@@ -1040,6 +1040,21 @@ enum SequenceCmd {
         #[arg(long, value_name = "RATE")]
         fps: Option<String>,
     },
+    /// Copy a sequence's timeline into a new sequence (not active)
+    Derive {
+        /// Source sequence id (from `nile sequence ls`)
+        #[arg(long)]
+        from: u32,
+        /// Display name for the copy
+        #[arg(long)]
+        name: String,
+        /// Output size WxH (default: copy the source)
+        #[arg(long, value_name = "WxH")]
+        size: Option<String>,
+        /// Output frame rate (default: copy the source)
+        #[arg(long, value_name = "RATE")]
+        fps: Option<String>,
+    },
     /// Make a sequence active (edits and undo follow it)
     Use {
         /// Sequence id (from `nile sequence ls`)
