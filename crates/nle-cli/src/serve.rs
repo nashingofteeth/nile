@@ -13,8 +13,7 @@
 //! leave through the JSON-RPC response, and `main` sends command failures to
 //! stderr.
 
-use std::io;
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
@@ -56,7 +55,7 @@ pub(crate) fn cmd_serve(project_path: &Path, stdio: bool) -> Result<()> {
         // Same partial-frame policy as a socket connection: the pump makes
         // stdin pollable, so a frame with no newline cannot wedge the process.
         let reader = BufReader::new(FrameDeadline::new(
-            StdinPump::spawn(),
+            StdinPump::spawn()?,
             PARTIAL_FRAME_DEADLINE,
             FRAME_POLL,
         ));
@@ -307,33 +306,36 @@ struct StdinPump {
 }
 
 impl StdinPump {
-    fn spawn() -> Self {
+    fn spawn() -> Result<Self> {
         let (tx, chunks) = std::sync::mpsc::sync_channel(1);
-        thread::spawn(move || {
-            let stdin = io::stdin();
-            let mut stdin = stdin.lock();
-            let mut buf = [0u8; 8192];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if tx.send(Ok(buf[..read].to_vec())).is_err() {
+        thread::Builder::new()
+            .name("nile-stdin".into())
+            .spawn(move || {
+                let stdin = io::stdin();
+                let mut stdin = stdin.lock();
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            if tx.send(Ok(buf[..read].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
                             break;
                         }
                     }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                        break;
-                    }
                 }
-            }
-        });
-        Self {
+            })
+            .context("spawn the stdin pump")?;
+        Ok(Self {
             chunks,
             pending: Vec::new(),
             eof: false,
-        }
+        })
     }
 }
 
