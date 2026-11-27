@@ -618,7 +618,11 @@ fn extend_commit_undo_returns_to_entry() {
 
 // After committing a tail extend the playhead lands on the new clip end
 // (the edge we extended to), for both ripple and absorb. Commit through the
-// production path: `commit_extend` → `run_action` → `playhead::land`.
+// production path: `commit_extend` → `run_action` → `playhead::land` →
+// `persist_playhead`. The clip end is derived from the timeline, and the
+// persisted project cursor is checked independently: asserting only
+// `app.playhead == target` would merely echo the seek that aimed the commit.
+// `extend_commit_undo_returns_to_entry` covers the undo side.
 #[test]
 fn tail_extend_commit_lands_on_the_new_end() {
     let fake = FakeMpv::new();
@@ -655,6 +659,11 @@ fn tail_extend_commit_lands_on_the_new_end() {
         assert_eq!(
             app.playhead, end,
             "the cursor lands on the committed edge (ripple={ripple})"
+        );
+        assert_eq!(
+            secs(&app.project.playhead),
+            end,
+            "the persisted cursor is the committed edge (ripple={ripple})"
         );
     }
 }

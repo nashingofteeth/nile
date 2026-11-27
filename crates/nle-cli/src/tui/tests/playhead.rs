@@ -544,16 +544,18 @@ fn tui_undo_restores_the_pre_edit_position_through_run_action() {
     assert_eq!(app.playhead, 4.0, "undo restores the pre-edit position");
 }
 
-// Redo carries the same recorded pre-edit frame as undo, clamped into the
-// timeline it brings back. An edit made near the old end is recorded past
-// the shorter timeline's final frame, so the redo must land on `last_frame`
-// — not park the cursor at `end`.
+// Redo's recorded pre-edit frame is clamped into the timeline it brings
+// back. This drives the session end to end (`run_action` → `land` →
+// `persist_playhead`), so it proves the user-visible cursor, not just the
+// policy: `persist_playhead`'s `set_playhead` clamps too. The policy itself
+// is `session::playhead::tests::a_restored_frame_past_the_end_clamps_to_last_frame`.
 #[test]
 fn redo_restores_the_clamped_pre_edit_position() {
     let fake = FakeMpv::new();
     let redo = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
 
-    // A redo into the longer timeline restores the exact frame.
+    // The first redo reapplies the delete onto the shorter timeline; the
+    // recorded 4.0 still fits, so it is restored exactly.
     let mut app = App::new(asset_project(), temp_project_path("redo-land"));
     app.loaded = true;
     app.playhead = 4.0; // in the gap; `D` lands on the seam at 3.0
@@ -579,10 +581,13 @@ fn redo_restores_the_clamped_pre_edit_position() {
     assert!(app.playhead < 6.0, "the recorded frame was clamped");
 }
 
-// Every action excluded from `reanchors` (track changes, pool edits,
-// annotations, crop keys) leaves the active track's media put. One row per
-// excluded variant; each must actually apply, or `land` would skip the
-// policy on `changed == false` and the row would prove nothing.
+// One row per non-media action `reanchors` excludes (track add/mute, pool
+// edits, annotations, crop keys) leaves the active track's media put. The
+// re-index case (`TrackRm`) is the separate guard
+// `a_track_removal_leaves_the_playhead_put`; the direct classification is
+// `session::playhead::tests::non_media_actions_do_not_reanchor`. Each row
+// must actually apply — one history entry — or `land` would skip the policy
+// on `changed == false` and the row would prove nothing.
 #[test]
 fn non_reanchoring_actions_leave_the_playhead_put() {
     fn spare_asset(app: &mut App) -> Action {
@@ -677,9 +682,25 @@ fn non_reanchoring_actions_leave_the_playhead_put() {
         app.loaded = true;
         app.playhead = 4.0; // in the gap, clear of every target
         let action = make(&mut app);
+        // `run_action` returns true for any `Ok`, even an outcome with
+        // `changed == false` — and `land` skips the policy then. So prove a
+        // real edit: exactly one recorded history entry.
+        let before = app
+            .project
+            .document_mut()
+            .expect("direct test session")
+            .depth();
         assert!(
             run_action(&mut app, &FakeMpv::new(), &action),
             "{name}: the action applied"
+        );
+        assert_eq!(
+            app.project
+                .document_mut()
+                .expect("direct test session")
+                .depth(),
+            before + 1,
+            "{name}: one history entry, so `land` ran its policy"
         );
         assert_eq!(app.playhead, 4.0, "{name}: the playhead stays put");
     }
