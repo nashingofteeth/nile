@@ -1,17 +1,20 @@
 use super::super::actions::{
     Anchor, GapAnchor, MediaAnchor, clip_anchor, edit_anchor, edit_yank, reanchor_playhead,
-    trim_key,
+    run_action, trim_key,
 };
 use super::super::keys::handle_key;
 use super::*;
+use nle_core::action::Action;
+use nle_core::annotation::{AnnotationKind, SourceRef};
 use nle_core::edit;
 use nle_core::frame_of;
 use nle_core::time::Seconds;
 use nle_core::time::frame_to_secs;
+use nle_core::timeline::Effect;
 
-// Post-action playhead placement, one row per settled rule. Each case
-// starts fresh, seeks with `l`, presses the keys, and asserts where the
-// playhead lands.
+// Post-action playhead placement, one row per rule a fresh app can exercise.
+// Each case starts fresh, seeks with `l`, presses the keys, and asserts where
+// the playhead lands. Undo needs real history, so it has its own guard below.
 #[test]
 fn playhead_placement_after_each_action() {
     let cases: &[(&str, &str, f64, &str)] = &[
@@ -43,7 +46,6 @@ fn playhead_placement_after_each_action() {
             "a transition lands in the middle of the blend",
         ),
         ("lll", "dd", 3.0, "deleting the gap lands on the seam"),
-        ("ll", "u", 2.0, "undo restores the pre-edit position"),
     ];
     for (seek, keys, want, why) in cases {
         let mut app = App::new(asset_project(), temp_project_path("place"));
@@ -524,6 +526,184 @@ fn undo_restores_the_playhead() {
     let outcome = app.project.undo().unwrap();
     app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
     assert_eq!(app.playhead, 1.0, "playhead returns to where the edit was");
+}
+
+// The audit table starts every row on an empty `History`, so `u` there is a
+// no-op refusal — not the landing policy. This drives the edit and the undo
+// through `run_action` (and so `playhead::land`), where the history's
+// recorded frame becomes the cursor.
+#[test]
+fn tui_undo_restores_the_pre_edit_position_through_run_action() {
+    let mut app = App::new(asset_project(), temp_project_path("undo-land"));
+    app.loaded = true;
+    let fake = FakeMpv::new();
+    app.playhead = 4.0; // in the [3..5) gap — `D` ripples it shut
+    handle_key(&mut app, &fake, key('D'));
+    assert_eq!(app.playhead, 3.0, "the ripple delete landed on the seam");
+    handle_key(&mut app, &fake, key('u'));
+    assert_eq!(app.playhead, 4.0, "undo restores the pre-edit position");
+}
+
+// Redo's recorded pre-edit frame is clamped into the timeline it brings
+// back. This drives the session end to end (`run_action` → `land` →
+// `persist_playhead`), so it proves the user-visible cursor, not just the
+// policy: `persist_playhead`'s `set_playhead` clamps too. The policy itself
+// is `session::playhead::tests::a_restored_frame_past_the_end_clamps_to_last_frame`.
+#[test]
+fn redo_restores_the_clamped_pre_edit_position() {
+    let fake = FakeMpv::new();
+    let redo = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+    // The first redo reapplies the delete onto the shorter timeline; the
+    // recorded 4.0 still fits, so it is restored exactly.
+    let mut app = App::new(asset_project(), temp_project_path("redo-land"));
+    app.loaded = true;
+    app.playhead = 4.0; // in the gap; `D` lands on the seam at 3.0
+    handle_key(&mut app, &fake, key('D'));
+    assert_eq!(app.playhead, 3.0);
+    handle_key(&mut app, &fake, key('u'));
+    assert_eq!(app.playhead, 4.0);
+    app.playhead = 1.0; // move away, as the user would
+    handle_key(&mut app, &fake, redo);
+    assert_eq!(app.playhead, 4.0, "redo restores the pre-edit position");
+
+    // A redo into a shorter timeline clamps the recorded frame.
+    let mut app = App::new(asset_project(), temp_project_path("redo-clamp"));
+    app.loaded = true;
+    app.playhead = 6.0; // inside clip #2 [5..7) — `D` removes it
+    handle_key(&mut app, &fake, key('D'));
+    assert!(app.playhead < 6.0, "the timeline shrank under the cursor");
+    handle_key(&mut app, &fake, key('u'));
+    assert_eq!(app.playhead, 6.0, "undo restores the pre-edit position");
+    app.playhead = 1.0;
+    handle_key(&mut app, &fake, redo);
+    assert_eq!(app.playhead, app.last_frame(), "clamped to the final frame");
+    assert!(app.playhead < 6.0, "the recorded frame was clamped");
+}
+
+// One row per non-media action `reanchors` excludes (track add/mute, pool
+// edits, annotations, crop keys) leaves the active track's media put. The
+// re-index case (`TrackRm`) is the separate guard
+// `a_track_removal_leaves_the_playhead_put`; the direct classification is
+// `session::playhead::tests::non_media_actions_do_not_reanchor`. Each row
+// must actually apply — one history entry — or `land` would skip the policy
+// on `changed == false` and the row would prove nothing.
+#[test]
+fn non_reanchoring_actions_leave_the_playhead_put() {
+    fn spare_asset(app: &mut App) -> Action {
+        let probe = app.project.media[0].probe.clone();
+        let (id, _) = app
+            .project
+            .document_mut()
+            .expect("direct test session")
+            .add_asset("/media/spare.mp4".into(), probe, 0);
+        Action::AssetRm { id }
+    }
+    fn seeded_annotation(app: &mut App) -> u32 {
+        let added = Action::AnnotationAdd {
+            anchor: nle_core::annotation::Anchor::Source {
+                source: SourceRef::Asset { id: 1 },
+                time: Seconds::from_integer(0),
+            },
+            kind: AnnotationKind::Marker,
+        };
+        assert!(
+            run_action(app, &FakeMpv::new(), &added),
+            "the setup annotation applied"
+        );
+        app.project
+            .annotations_for(app.project.active_id())
+            .next()
+            .expect("the setup annotation")
+            .id
+    }
+    fn remove_annotation(app: &mut App) -> Action {
+        Action::AnnotationRemove {
+            id: seeded_annotation(app),
+        }
+    }
+    fn resolve_annotation(app: &mut App) -> Action {
+        Action::AnnotationResolve {
+            id: seeded_annotation(app),
+        }
+    }
+    fn add_crop_key(app: &mut App) -> Action {
+        // The action edits an existing crop effect's key list.
+        set_effects(
+            app,
+            1,
+            vec![Effect::Crop {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+                keys: Vec::new(),
+            }],
+        );
+        Action::CropKey {
+            track: 0,
+            clip: 1,
+            at: 1.0,
+            x: 0.0,
+            y: 0.0,
+            w: 50.0,
+            h: 50.0,
+        }
+    }
+
+    // Name the row type: clippy refuses a two-level type inline
+    // (`type_complexity`), and the alias reads better than an `allow`.
+    type ActionCase = (&'static str, fn(&mut App) -> Action);
+    let cases: &[ActionCase] = &[
+        ("track add", |_| Action::TrackAdd {
+            kind: TrackKind::Video,
+        }),
+        ("track mute", |_| Action::TrackMute { track: 0 }),
+        ("asset rm", spare_asset),
+        ("annotation add", |_| Action::AnnotationAdd {
+            anchor: nle_core::annotation::Anchor::Source {
+                source: SourceRef::Asset { id: 1 },
+                time: Seconds::from_integer(0),
+            },
+            kind: AnnotationKind::Marker,
+        }),
+        ("annotation add at", |_| Action::AnnotationAddAt {
+            track: 0,
+            at: 1.0,
+            to: None,
+            kind: AnnotationKind::Marker,
+        }),
+        ("annotation remove", remove_annotation),
+        ("annotation resolve", resolve_annotation),
+        ("crop key", add_crop_key),
+    ];
+    for &(name, make) in cases {
+        let mut app = App::new(asset_project(), temp_project_path(name));
+        app.loaded = true;
+        app.playhead = 4.0; // in the gap, clear of every target
+        let action = make(&mut app);
+        // `run_action` returns true for any `Ok`, even an outcome with
+        // `changed == false` — and `land` skips the policy then. So prove a
+        // real edit: exactly one recorded history entry.
+        let before = app
+            .project
+            .document_mut()
+            .expect("direct test session")
+            .depth();
+        assert!(
+            run_action(&mut app, &FakeMpv::new(), &action),
+            "{name}: the action applied"
+        );
+        assert_eq!(
+            app.project
+                .document_mut()
+                .expect("direct test session")
+                .depth(),
+            before + 1,
+            "{name}: one history entry, so `land` ran its policy"
+        );
+        assert_eq!(app.playhead, 4.0, "{name}: the playhead stays put");
+    }
 }
 
 // `_` inserts a gap of `count` frames at the playhead.
