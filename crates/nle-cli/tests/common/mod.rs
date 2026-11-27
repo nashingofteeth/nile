@@ -122,10 +122,18 @@ impl Sandbox {
     /// filesystem (or clap's own UTF-8 check for a string flag), never from a
     /// lossy `to_str()` here.
     pub fn run_os(&self, args: &[&std::ffi::OsStr]) -> Output {
+        self.run_os_on(std::ffi::OsStr::new(P), args)
+    }
+
+    /// [`Sandbox::run_os`] against an explicit project path, which may itself
+    /// be raw bytes (a symlink to [`P`] with a non-UTF-8 name). Keeping the
+    /// project as an `OsStr` all the way to `Command` is what lets the state
+    /// directory resolve through `canonicalize` instead of a lossy string.
+    pub fn run_os_on(&self, project: &std::ffi::OsStr, args: &[&std::ffi::OsStr]) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nile"));
         cmd.current_dir(self.path())
             .arg("--project")
-            .arg(P)
+            .arg(project)
             .args(args);
         cmd.output().expect("spawn nile")
     }
@@ -720,6 +728,7 @@ const MEDIA: &[&str] = &[
     "video_only.mp4",
     "silent.mp4",
     "audio_only.m4a",
+    "subframe.m4a",
     "tiny.mp4",
     "empty.mp4",
     "notmedia.txt",
@@ -741,6 +750,10 @@ fn media_dir() -> &'static Path {
         gen_v(d, "video_only.mp4", "orange", "2");
         gen_av_silent(d, "silent.mp4", "purple", "2");
         gen_a(d, "audio_only.m4a", "2");
+        // Below one frame at every fixture rate (0.005 s is 0.15 frames at
+        // 30 fps): the clamp's whole-frame test must drop it, not keep a
+        // sliver that no export can render.
+        gen_a(d, "subframe.m4a", "0.005");
         gen_v(d, "tiny.mp4", "gray", "0.1");
         fs::write(d.join("empty.mp4"), b"").expect("empty.mp4");
         fs::write(d.join("notmedia.txt"), b"not media").expect("notmedia.txt");
