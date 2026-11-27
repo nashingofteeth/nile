@@ -403,6 +403,41 @@ impl Project {
         id
     }
 
+    /// Copy a sequence's editable snapshot into a new sequence.
+    ///
+    /// This is deliberately a **snapshot**, not a live derivation: the source
+    /// and the copy share the media pool but not their timelines or histories.
+    /// `origin` records where it came from, and `manual_edits` starts at zero
+    /// so a later regeneration command can tell whether the copy diverged.
+    /// Annotations are sequence-scoped and are not copied; settings and audio
+    /// post are. The new sequence is not made active.
+    pub fn derive_sequence(
+        &mut self,
+        from: u32,
+        name: impl Into<String>,
+        fps: Option<Seconds>,
+        video: Option<VideoSettings>,
+    ) -> Result<u32, ProjectError> {
+        let source = self
+            .sequence(from)
+            .cloned()
+            .ok_or(ProjectError::SequenceNotFound(from))?;
+        let id = self.next_sequence_id();
+        let mut sequence = Sequence::new(id, name);
+        sequence.origin = SequenceOrigin::Derived {
+            from,
+            spec: serde_json::json!({ "kind": "copy" }),
+        };
+        sequence.fps = fps.or(source.fps);
+        sequence.video = video.or(source.video);
+        sequence.timeline = source.timeline;
+        sequence.audio = source.audio;
+        // Sequence::new already has manual_edits = 0 and playhead = 0: a
+        // derived sequence starts at its own head, not the source's cursor.
+        self.sequences.push(sequence);
+        Ok(id)
+    }
+
     pub(crate) fn next_sequence_id(&self) -> u32 {
         self.sequences
             .iter()
@@ -701,6 +736,11 @@ impl Project {
             self.validate_annotation(annotation)?;
         }
         for sequence in &self.sequences {
+            if let SequenceOrigin::Derived { from, .. } = sequence.origin
+                && self.sequence(from).is_none()
+            {
+                return Err(ProjectError::SequenceNotFound(from));
+            }
             if sequence
                 .fps
                 .is_some_and(|fps| fps <= Seconds::from_integer(0))
@@ -1692,6 +1732,85 @@ mod tests {
         assert!(p.validate().is_ok(), "{:?}", p.validate());
         assert!(p.audio.is_active());
         assert!(p.audio.summary().contains("normalize on"));
+    }
+
+    #[test]
+    fn a_derived_sequence_copies_the_timeline_but_starts_its_own_session() {
+        let mut p = sample_project();
+        p.fps = Some(Seconds::from_integer(30));
+        p.video = Some(VideoSettings {
+            width: 1920,
+            height: 1080,
+        });
+        p.audio.normalize = true;
+        p.playhead = Seconds::from_integer(2);
+        let source_timeline = p.timeline.clone();
+        let source = p.active_id();
+        let id = p
+            .derive_sequence(
+                source,
+                "Vertical",
+                Some(Seconds::from_integer(24)),
+                Some(VideoSettings {
+                    width: 1080,
+                    height: 1920,
+                }),
+            )
+            .unwrap();
+        assert_eq!(id, 2);
+        assert_eq!(p.active_id(), source, "derive does not switch the session");
+        let derived = p.sequence(id).unwrap();
+        assert_eq!(
+            derived.origin,
+            SequenceOrigin::Derived {
+                from: source,
+                spec: serde_json::json!({ "kind": "copy" }),
+            }
+        );
+        assert_eq!(derived.timeline, source_timeline);
+        assert_eq!(derived.fps, Some(Seconds::from_integer(24)));
+        assert_eq!(
+            derived.video,
+            Some(VideoSettings {
+                width: 1080,
+                height: 1920
+            })
+        );
+        assert_eq!(derived.audio, p.sequence(source).unwrap().audio);
+        assert_eq!(derived.manual_edits, 0);
+        assert_eq!(derived.playhead, Seconds::from_integer(0));
+
+        // Editing one timeline does not touch the other.
+        let mut derived = p.sequence(id).unwrap().clone();
+        derived.timeline.video_track_mut().unwrap().segments.clear();
+        p.sequence_mut(id).unwrap().timeline = derived.timeline;
+        assert!(
+            p.sequence(id)
+                .unwrap()
+                .timeline
+                .video_track()
+                .unwrap()
+                .segments
+                .is_empty()
+        );
+        assert_eq!(
+            p.sequence(source).unwrap().timeline,
+            source_timeline,
+            "the source is untouched"
+        );
+    }
+
+    #[test]
+    fn a_derived_sequence_must_name_an_existing_source() {
+        let mut p = Project::new();
+        p.sequence_mut(1).unwrap().origin = SequenceOrigin::Derived {
+            from: 99,
+            spec: serde_json::json!({ "kind": "copy" }),
+        };
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::SequenceNotFound(99))
+        ));
     }
 
     #[test]

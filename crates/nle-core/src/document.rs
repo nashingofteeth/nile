@@ -155,6 +155,29 @@ impl Document {
         Ok(id)
     }
 
+    /// Copy a sequence snapshot into a new sequence (not active).
+    ///
+    /// The source and copy share the media pool but not timelines or undo
+    /// stacks; the copy is not undoable, like `add_sequence`. `fps`/`video`
+    /// override the source settings when present.
+    pub fn derive_sequence(
+        &mut self,
+        from: u32,
+        name: impl Into<String>,
+        fps: Option<Seconds>,
+        video: Option<VideoSettings>,
+    ) -> Result<u32, ProjectError> {
+        if fps.is_some_and(|fps| fps <= Seconds::from_integer(0)) {
+            return Err(ProjectError::NonPositiveFps(
+                self.project.next_sequence_id(),
+            ));
+        }
+        let id = self.project.derive_sequence(from, name, fps, video)?;
+        self.histories.ensure(id);
+        self.project.bump_revision();
+        Ok(id)
+    }
+
     pub fn into_parts(self) -> (Project, Histories) {
         (self.project, self.histories)
     }
@@ -1191,6 +1214,28 @@ mod tests {
         ));
         assert_eq!(doc.project.sequences.len(), before);
         assert_eq!(doc.revision(), 0, "a refused add is not a model write");
+    }
+
+    #[test]
+    fn deriving_a_sequence_starts_a_fresh_history_and_bumps_revision() {
+        let mut doc = document();
+        let source = doc.project().active_id();
+        let revision = doc.revision();
+        let id = doc
+            .derive_sequence(source, "Copy", None, None)
+            .expect("derive");
+        assert_eq!(doc.revision(), revision + 1);
+        assert_eq!(doc.project().active_id(), source);
+        doc.select_sequence(id).unwrap();
+        assert_eq!(doc.depth(), 0, "the copy starts with no undo steps");
+        let mut register = None;
+        doc.edit(&Action::Split { track: 0, at: 1.0 }, 0.0, &mut register)
+            .unwrap();
+        assert_eq!(doc.depth(), 1);
+        doc.select_sequence(source).unwrap();
+        assert_eq!(doc.depth(), 0, "the source history is untouched");
+        assert_eq!(doc.project().sequence(id).unwrap().manual_edits, 1);
+        assert_eq!(doc.project().sequence(source).unwrap().manual_edits, 0);
     }
 
     #[test]
