@@ -1091,6 +1091,44 @@ fn deleting_the_right_clip_beside_a_transition_restores_the_left_tail() {
     assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
 }
 
+#[test]
+fn deleting_the_right_clip_beside_a_transition_with_ripple_restores_the_left_tail() {
+    let mut p = transitioned_pair(); // [C1 0..2][T][C2 3..5]
+    let mut h = History::default();
+    let batch = delete_ripple_on(&p, 0, 4.0).unwrap();
+    assert!(batch.desc.contains("through transitions"), "{}", batch.desc);
+    h.apply(&mut p, batch, 0).unwrap();
+    let segs = &p.timeline.video_track().unwrap().segments;
+    assert_eq!(segs.len(), 1, "{segs:?}");
+    assert!(matches!(
+        &segs[0],
+        Segment::Clip(c) if c.asset_in == Seconds::from_integer(0)
+            && c.asset_out == Seconds::from_integer(3)
+    ));
+    assert_eq!(p.timeline.end(), Seconds::from_integer(3));
+}
+
+#[test]
+fn deleting_both_sides_of_a_transition_removes_the_blend() {
+    let mut p = transitioned_pair(); // [C1 0..2][T][C2 3..5]
+    let before = p.timeline.video_track().unwrap().segments.clone();
+    let mut h = History::default();
+    // The range covers both sides and the blend between them.
+    let batch = delete_range_on(&p, 0, 0, 2).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    assert!(
+        p.timeline.video_track().unwrap().segments.is_empty(),
+        "both clips and the blend are gone"
+    );
+    assert_eq!(p.timeline.end(), Seconds::from_integer(0));
+    h.undo(&mut p).unwrap();
+    assert_eq!(
+        p.timeline.video_track().unwrap().segments,
+        before,
+        "one undo restores the whole track"
+    );
+}
+
 // The sync-ripple half: cut a time span out of another track, keep the
 // outside material, and give the split-off right piece a fresh id.
 #[test]
