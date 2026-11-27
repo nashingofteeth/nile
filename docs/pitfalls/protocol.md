@@ -186,9 +186,12 @@ no-op. The render writes to a hidden temp beside `output` and renames only on
 success; a cancelled job leaves no half-written deliverable.
 
 `job.submit` is compare-and-swap: a stale `base_revision` is `-32001`. It is
-not a model write — the project revision, history and playhead do not move.
-`job.list` returns `{revision: <live>, jobs}` (the revision is context, not a
-CAS token); `job.get`/`job.cancel` return the same record shape as submit.
+not a model write — the project revision, history and playhead do not move —
+but its snapshot is project data, so the read-only latch gates it like a
+model write: after a save failure or a handler panic the submit is refused
+rather than rendering a half-applied state. `job.list` returns `{revision:
+<live>, jobs}` (the revision is context, not a CAS token); `job.get`/
+`job.cancel` return the same record shape as submit.
 `job.remove {id}` deletes a **terminal** job's `job.json` and snapshot and
 returns the removed record; a queued or running job is invalid params (cancel
 it first), as is an unknown id.
@@ -308,16 +311,17 @@ A killed owner leaves both files behind; the next start checks the lock PID
 and clears a dead owner's state. One-shot CLI edits are still file-based; do
 not run them alongside the server; `nile edit` attaches to the socket when it
 is live. Foreign-change adoption is not implemented for file writers. The
-socket path is `sun_path`-limited (about 108 bytes on
-Linux), so very deep project trees fail at bind. Action mutations go through one `apply`, which owns CAS, the
-edit, playhead conversion, saving, and events. `sequence.use`/`sequence.add`
-and `media.add` are separate model paths, but they use the same writeability,
-revision and save/poison helpers. A failed save, or a handler that panicked
-while it held the shared lock, poisons every later write; reads reflect the
+socket path is `sun_path`-limited (about 108 bytes on Linux), so very deep
+project trees fail at bind. Action mutations go through one `apply`, which
+owns CAS, the edit, playhead conversion, saving, and events.
+`sequence.use`/`sequence.add`, `media.add` and `job.submit` are separate
+paths, but they use the same writeability, revision and save/poison helpers.
+A failed save, or a handler that panicked while it held the shared lock,
+poisons every later project mutation (and `job.submit`); reads reflect the
 in-memory model. On a poisoned mutex `ConnectionHandler::handle` recovers the
-value, latches the handler read-only **before** `clear_poison`, then dispatches
-the call: the mutex is usable again, but `ensure_writable` still refuses the
-write.
+value, latches the handler read-only **before** `clear_poison`, and drops the
+panicked call's queued events before dispatching the new call: the mutex is
+usable again, but `ensure_writable` still refuses the write.
 
 The server shares the TUI's media-frame playhead anchor on the base video
 track: a media edit keeps the same source frame, falls back to the seam when
@@ -326,12 +330,14 @@ the clip disappears, and clamps into the new timeline. `Outcome.playhead` and
 their restored position, and track/pool changes leave it clamped. Recorded
 history uses `Actor::Agent("nile-serve")`.
 
-A save failure or a handler panic poisons mutations (the response is
-`internal`, and later writes say to restart); reads continue. `timeline.edl`
-returns the `edl://` URL that
-`nile edl` prints, and its `track` is 0-based while the CLI flag is 1-based.
-`stdout` is protocol-only: no `say!`/`println!`; logs go to stderr or
-`NLE_LOG`.
+A save failure poisons mutations: the failing call gets `internal`
+(`save failed: …`) and every later mutation is refused with
+`internal error: server is read-only after a failure: {reason}`; reads
+continue. A handler panic gets no reply at all — the connection drops with the
+panic — but it latches the same refusal for the next connection.
+`timeline.edl` returns the `edl://` URL that `nile edl` prints, and its
+`track` is 0-based while the CLI flag is 1-based. `stdout` is protocol-only:
+no `say!`/`println!`; logs go to stderr or `NLE_LOG`.
 
 ## Tests
 
