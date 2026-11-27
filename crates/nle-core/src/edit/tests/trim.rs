@@ -350,3 +350,122 @@ fn trim_consume_target_and_delete_segment() {
         Segment::Gap(_)
     ));
 }
+
+/// The track as `(label, start, duration)` rows, so an assertion pins every
+/// seam instead of a segment count.
+fn shape(p: &Project) -> Vec<(String, Seconds, Seconds)> {
+    let track = p.timeline.video_track().unwrap();
+    let mut start = Seconds::from_integer(0);
+    track
+        .segments
+        .iter()
+        .map(|seg| {
+            let label = match seg {
+                Segment::Gap(_) => "gap".to_string(),
+                Segment::Clip(c) => format!("clip #{}", c.id),
+                Segment::Transition(t) => format!("blend #{}", t.id),
+            };
+            let (at, dur) = (start, seg.duration());
+            start += dur;
+            (label, at, dur)
+        })
+        .collect()
+}
+
+#[test]
+fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
+    // [Gap 1 @0..1] [Clip #1 1..3] [Gap 1 @3..4] [Clip #2 4..6]
+    // At t = 3 clip #1 ends and the gap starts: `i`/`I` consume the clip,
+    // `o`/`O` the gap — two different neighbours at one cut.
+    let shared_cut = || {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+            Segment::Clip(Clip {
+                id: 1,
+                asset: a,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            }),
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+            Segment::Clip(Clip {
+                id: 2,
+                asset: a,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            }),
+        ];
+        p
+    };
+    let run = |out: bool, ripple: bool| {
+        let mut p = shared_cut();
+        let batch = trim_at_on(&p, 0, 3.0, out, ripple).expect("edge trim at a shared cut");
+        let mut h = History::default();
+        h.apply(&mut p, batch, 0).unwrap();
+        p
+    };
+    let gap = |start: i64, dur: i64| {
+        (
+            "gap".to_string(),
+            Seconds::from_integer(start),
+            Seconds::from_integer(dur),
+        )
+    };
+    let clip = |id: u32, start: i64, dur: i64| {
+        (
+            format!("clip #{id}"),
+            Seconds::from_integer(start),
+            Seconds::from_integer(dur),
+        )
+    };
+
+    // `i`: clip #1 goes and its span fuses the leading gap with the
+    // following one — a gap at the seam, followers unmoved.
+    let i = run(false, false);
+    assert_eq!(
+        shape(&i),
+        vec![gap(0, 4), clip(2, 4, 2)],
+        "`i` consumes clip #1 and leaves one merged gap"
+    );
+    assert_eq!(i.timeline.end(), Seconds::from_integer(6), "length held");
+
+    // `I`: the same clip goes and the followers slide left by its 2 s.
+    let capital_i = run(false, true);
+    assert_eq!(
+        shape(&capital_i),
+        vec![gap(0, 2), clip(2, 2, 2)],
+        "`I` ripples clip #1 away and slides clip #2"
+    );
+    assert_eq!(
+        capital_i.timeline.end(),
+        Seconds::from_integer(4),
+        "shrunk by 2"
+    );
+
+    // `o`: the gap is the consumed segment; clip #2 slides onto the cut.
+    let o = run(true, false);
+    assert_eq!(
+        shape(&o),
+        vec![gap(0, 1), clip(1, 1, 2), clip(2, 3, 2)],
+        "`o` consumes the gap, not clip #1"
+    );
+    assert_eq!(o.timeline.end(), Seconds::from_integer(5), "shrunk by 1");
+
+    // `O`: a gap delete is inherently a ripple, so the flag changes nothing.
+    let capital_o = run(true, true);
+    assert_eq!(
+        shape(&capital_o),
+        shape(&o),
+        "a gap delete ripples under either case"
+    );
+}
