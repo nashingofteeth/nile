@@ -4,7 +4,9 @@
 
 use crate::project::Project;
 use crate::time::{Seconds, checked_frames_to_seconds, format_seconds, product_at_least_one};
-use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind};
+use crate::timeline::{
+    Clip, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind, source_time,
+};
 
 use super::{EditError, EditOp};
 
@@ -140,9 +142,10 @@ pub(super) fn gap_region_at(
 /// A timeline-space span expressed in a clip's source space
 /// (`source = timeline × speed`). Edits are made in timeline time; a clip's
 /// `asset_in/out` are source time, so every delta crossing that boundary
-/// scales by the clip's speed.
+/// scales by the clip's speed — the delta form of [`source_time`], which
+/// [`Clip::source_at`] uses for an absolute source position.
 pub(super) fn source_span(c: &Clip, timeline: Seconds) -> Seconds {
-    timeline * c.speed
+    source_time(Seconds::from_integer(0), c.speed, timeline)
 }
 
 /// Merge two newly-adjacent segments into a seamless whole, if they

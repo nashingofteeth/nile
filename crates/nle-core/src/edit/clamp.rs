@@ -4,7 +4,7 @@
 
 use crate::project::Project;
 use crate::time::{Seconds, checked_frames_to_seconds, format_seconds};
-use crate::timeline::{Clip, Gap, Segment, Track, TransitionSource};
+use crate::timeline::{Clip, Gap, Segment, Track, TransitionSource, offset_of_source, source_time};
 
 /// Whole frames in `span` at `fps`, rounded, or `None` when that count does
 /// not fit `i64`. The i128 product keeps `span * fps` exact instead of letting
@@ -64,15 +64,15 @@ pub fn clamp_to_media(
             // EDL source TC before its offset, say) reads before the file start.
             let in_ = c.asset_in.max(zero);
             let out = c.asset_out.min(d);
-            let mut frames = whole_frames((out - in_) / c.speed, fps);
+            let mut frames = whole_frames(offset_of_source(in_, c.speed, out), fps);
             let new_out = match frames {
                 Some(n) => match frame_secs(n) {
                     Some(step) => {
-                        let new_out = in_ + step * c.speed;
+                        let new_out = source_time(in_, c.speed, step);
                         if new_out > d {
                             frames = Some(n - 1);
                             frame_secs(n - 1)
-                                .map(|step| in_ + step * c.speed)
+                                .map(|step| source_time(in_, c.speed, step))
                                 .unwrap_or(out)
                         } else {
                             new_out
@@ -215,7 +215,7 @@ pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
                 id: c.id,
                 asset: c.asset,
                 asset_in: c.asset_in,
-                asset_out: c.asset_in + dur * c.speed,
+                asset_out: source_time(c.asset_in, c.speed, dur),
                 speed: c.speed,
                 effects: c.effects.clone(),
             }),

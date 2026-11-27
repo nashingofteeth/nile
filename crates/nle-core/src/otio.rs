@@ -22,7 +22,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::time::Seconds;
-use crate::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
+use crate::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind, source_time};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum OtioError {
@@ -280,8 +280,8 @@ fn parse_clip(ch: &Value) -> Result<OtioClip, OtioError> {
         path: url_to_path(&url),
         name,
         // The range is in project frames; scale into media seconds.
-        asset_in: start * speed,
-        asset_out: (start + dur) * speed,
+        asset_in: source_time(Seconds::from_integer(0), speed, start),
+        asset_out: source_time(Seconds::from_integer(0), speed, start + dur),
         speed,
     })
 }

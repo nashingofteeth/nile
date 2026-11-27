@@ -61,6 +61,34 @@ fn purge_stumps_snaps_the_grid_and_drops_sub_frame_segments() {
 }
 
 #[test]
+fn purge_stumps_rescales_the_out_point_by_speed() {
+    // A 2× clip spans half a second of timeline, which snaps to 15 frames.
+    // `purge_stumps` rewrites `asset_out` from that timeline duration, so an
+    // absolute assignment (6 → 1/2) or a dropped `c.speed` (6 → 11/2) would
+    // both pass a 1× test and fail here.
+    let fps = Seconds::from_integer(30);
+    let t = Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: vec![Segment::Clip(Clip {
+            id: 1,
+            asset: 1,
+            asset_in: Seconds::from_integer(5),
+            asset_out: Seconds::from_integer(6),
+            speed: Seconds::from_integer(2),
+            effects: Vec::new(),
+        })],
+    };
+    let (cleaned, dropped) = purge_stumps(&t, fps);
+    assert_eq!(dropped, 0);
+    let Segment::Clip(c) = &cleaned[0] else {
+        panic!("expected clip")
+    };
+    assert_eq!(c.duration(), Seconds::new(1, 2), "15 frames of timeline");
+    assert_eq!(c.asset_out, Seconds::from_integer(6), "5 + (1/2 × 2)");
+}
+
+#[test]
 fn clamp_to_media_trims_or_drops_past_the_end() {
     let fps = Seconds::from_integer(30);
     let mut t = Track {

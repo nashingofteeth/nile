@@ -4,7 +4,7 @@
 
 use crate::project::Project;
 use crate::time::{Seconds, checked_add, checked_div, checked_mul, checked_sub, format_seconds};
-use crate::timeline::{MAX_TIMELINE_SECONDS, Segment, TransitionSource};
+use crate::timeline::{MAX_TIMELINE_SECONDS, Segment, TransitionSource, source_time};
 
 use super::effects::adjacent_transitions;
 use super::util::{at_least_a_frame, track_at, video_track_index};
@@ -90,10 +90,10 @@ pub fn set_speed_on(
     let mut after = c.clone();
     after.speed = speed;
     if let Some(a) = adjacent.iter().find(|a| !a.outgoing) {
-        after.asset_in = a.outer + a.dur * speed;
+        after.asset_in = source_time(a.outer, speed, a.dur);
     }
     if let Some(a) = adjacent.iter().find(|a| a.outgoing) {
-        after.asset_out = a.outer - a.dur * speed;
+        after.asset_out = source_time(a.outer, speed, -a.dur);
     }
     if let Some(ratio) = checked_div(&c.duration(), &after.duration()) {
         after.scale_crop_keys(ratio);

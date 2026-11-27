@@ -157,10 +157,11 @@ plainly; never claim a pass you did not observe.
   asset duration to whole frames (6.006 → 6.0) so later splits can't strand a
   sub-frame stump; the renderer skips zero-width segments.
 - **Speed.** `Clip.speed` is a rational rate; timeline duration = source /
-  speed. Cross the boundary only via `source_span` (edits) or `Clip::source_at`
-  / `timeline_offset_of` (everything else). A speed change always ripples and
-  the monitor proxies any non-1× clip (an EDL entry can't retime). The CLI/TUI
-  take a **percentage** (100 = normal); the model keeps the rate (`@2×`).
+  speed. Cross the boundary only via `source_time`/`offset_of_source` (a `Clip`
+  wraps them as `source_at`/`timeline_offset_of`; edits take the `source_span`
+  delta). A speed change always ripples and the monitor proxies any non-1× clip
+  (an EDL entry can't retime). The CLI/TUI take a **percentage** (100 = normal);
+  the model keeps the rate (`@2×`).
 - **Transitions.** Trimming beside or through a blend moves the blend, never a
   gap; a retime scales each side's span, not its rate. A blend is opaque,
   video-only and keeps its sides contiguous at the neighbour's rate. Full
