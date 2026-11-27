@@ -26,6 +26,13 @@ A branch can only be checked out in one worktree; do not try to `switch` it in
 `main` while the worktree holds it. Move the session there when it becomes the
 working directory (`session_move`), or pass absolute paths.
 
+## Slice flow
+
+Plan one slice, branch it in a worktree, commit reviewable steps, run the
+worktree gate, then a `/review` pass (`nile-review` subagent) before merging.
+Fix findings on the same branch. Independent slices may run as parallel
+subagents, one worktree per agent; merge only with explicit approval.
+
 ## Builds and gates
 
 - Each worktree uses its own `target/` (Cargo's default). **Never share
