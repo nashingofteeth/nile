@@ -49,7 +49,7 @@ nile (process)                       mpv window (child)
 | Project file | `nile.json` (v19, or `.nile/config.json` default) — media pool (embedded ffprobe reports), **media groups**, **annotations**, and **one or more sequences**, each with segment tracks. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
-| Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS) |
+| Encoders | `cpu` (libx264), `vaapi` (Linux/UHD 630), `qsv` (Quick Sync), `videotoolbox` (macOS), `x265` (HEVC, `max` tier), `svt-av1` |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
 | Undo | per-sequence frame-topology history (segment before/after), provenance, sidecar v25 (grouped batches, media groups, annotations, timeline anchors, crop windows, crop keyframes, sequence audio post, subject checks) |
 

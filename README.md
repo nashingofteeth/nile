@@ -538,7 +538,8 @@ line, on the project's Unix socket (or stdin/stdout with `--stdio`). One
 server per project owns the socket; a second `nile serve` refuses. Multiple
 connections serialize their calls through one handler. Call `hello` first,
 then `project.show`, `timeline.edl`,
-`sequence.list|use|add|audio`, `media.list|add`, `action.preview`,
+`sequence.list|use|add|audio`, `media.list|add`, `playhead.set`,
+`annotation.list|check`, `analysis.add`, `action.preview`,
 `action.apply`, `undo`, `redo`, or the durable
 `job.submit|list|get|cancel|remove|prune`.
 Actions apply to the active sequence; add media and a second sequence first,

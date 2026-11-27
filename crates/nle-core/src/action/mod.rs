@@ -229,8 +229,8 @@ pub enum Action {
     TrackMute {
         track: usize,
     },
-    /// Remove a track and its clips (`:track rm N`); re-baselines the
-    /// undo stack because track indices shift.
+    /// Remove a track and its clips (`:track rm N`).
+    /// Recorded as an undoable track-list change; a no-op records nothing.
     TrackRm {
         track: usize,
     },

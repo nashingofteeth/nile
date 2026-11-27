@@ -132,6 +132,8 @@ plainly; never claim a pass you did not observe.
   the ffmpeg/IPC boundary.
 - **Frames are 0-based everywhere** (`f0` = first frame). A timeline of `dur`
   spans `[0, dur)`; the last representable position is `dur - 1/fps`.
+  Frame→seconds conversions use `checked_frames_to_seconds`; an unrepresentable
+  grid is a typed refusal, never a panic.
 - **Every write path clamps clips to their media.** `Document::save` clamps
   before writing, `History::apply` after every batch; new saves go through
   `Document`, or the model reads past EOF and the export silently truncates.
@@ -181,7 +183,7 @@ plainly; never claim a pass you did not observe.
   sets a directory default (`.nile/config.json`), `--project` overrides. Legacy
   adjacent sidecars are copied in once — don't add scattered state files. The
   playhead stays in `Project.playhead`. The TUI adopts foreign changes and
-  refuses to clobber (`persist_playhead` → `Ok(false)`).
+  refuses to clobber (`persist_playhead`/`persist_register` → `Ok(false)`).
 - **Gaps and the pool.** `Mode::Pool(PoolState)` keeps "pool open" and its
   selection together; tracks are 1-based (0 refused); a shorter track pads
   with a trailing gap. Source marks are keyed by asset id (`view.json`);
@@ -229,8 +231,9 @@ plainly; never claim a pass you did not observe.
   the CLI and the protocol server all use it, and the `:cmd` grammar *is* the
   CLI grammar (same flags; `--at`/`--track`/`--clip` default to the
   playhead/active track/clip-under in the TUI). A new action = an `Action`
-  variant + a slot in `Action::slot` (exhaustive) + both parity tests + a wire
-  sample in `action/tests/wire.rs` (the `SLOTS` guard). Session state
+  variant + a slot in `Action::slot` (exhaustive) + both parity tests + an
+  entry in `action/mod.rs::sample_actions()` (shared with
+  `nle-protocol/tests/wire.rs`; the `SLOTS` guard). Session state
   (playhead, register contents) is not an action. The catalog is also the
   wire DTO (`Action` serde): `nle-protocol` sends it, so don't add a parallel
   action request type.
@@ -255,7 +258,8 @@ plainly; never claim a pass you did not observe.
   (`{notice} — preview rebuild failed: …`) instead of replacing it.
 - **Case encodes ripple** (`e`/`E`, `i`/`I`, `o`/`O`) everywhere.
   **`hints_for` is the single source of mode hints**; the message panel shows
-  the latest notice only — don't put hint text in the message.
+  the latest notice only — don't put hint text in the message. `:help`/`?` is
+  an explicit query result, not a mode hint, so it may print the command list.
 - A key-capturing panel forwards valid actions; `m` toggles the pool. Opening
   it notices "media", closing "timeline". Track changes work while it is open:
   they retarget `enter` but keep the asset preview (`select_active_track`).

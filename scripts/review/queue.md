@@ -15,7 +15,7 @@ lives in `.opencode/agents/nile-review.md`.
 ### S00 baseline
 
 Record `git rev-parse --short HEAD`, run the fast loop (`cargo test -p
-nile-core`) and the full gate (`scripts/check.sh`) once, and note the wall time,
+nle-core`) and the full gate (`scripts/check.sh`) once, and note the wall time,
 any failure, and the per-battery test counts. A red baseline means later
 findings are measured against a known-bad tree.
 Before touching: —
