@@ -523,8 +523,9 @@ fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
 }
 
 /// The cache key for a composite span: every sliced track (kinds, effects,
-/// transitions, speeds), the output geometry and rate, and each asset the
-/// slice reads (path + mtime, so replacing a file invalidates).
+/// transitions, speeds), the output geometry and rate, the sequence's audio
+/// post, and each asset the slice reads (path + mtime, so replacing a file
+/// invalidates).
 fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
     RENDER_VERSION.hash(&mut hasher);
@@ -570,7 +571,7 @@ fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
 mod tests {
     use super::*;
     use nle_core::timeline::{
-        Clip, CropKey, Effect, Gap, Transition, TransitionKind, TransitionSource,
+        Clip, CropKey, Effect, Gap, TrackKind, Transition, TransitionKind, TransitionSource,
     };
 
     fn clip() -> Segment {
@@ -767,6 +768,61 @@ mod tests {
             "the window at the trim offset becomes the head key"
         );
         assert_eq!(keys[1].at, secs(1), "later keys shift with the head");
+    }
+
+    /// A static crop in a sliced span must stay static. Re-basing used to push
+    /// the base window as a key at 0, silently turning the crop keyed — and a
+    /// keyed crop refuses a second effect (here `eq`), so the composite graph
+    /// stopped compiling.
+    #[test]
+    fn slice_tracks_keeps_a_static_crop_static() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let mut c = Clip::new(1, a, secs(0), secs(3));
+        c.effects = vec![
+            Effect::Crop {
+                x: 10.0,
+                y: 0.0,
+                w: 50.0,
+                h: 50.0,
+                keys: Vec::new(),
+            },
+            Effect::Eq {
+                brightness: 0.1,
+                contrast: 1.0,
+                saturation: 1.0,
+            },
+        ];
+        p.timeline.tracks[0].segments = vec![Segment::Clip(c)];
+
+        let slice = slice_tracks(&p, secs(1), secs(3));
+        let Some(Segment::Clip(clipped)) = slice[0]
+            .segments
+            .iter()
+            .find(|s| matches!(s, Segment::Clip(_)))
+        else {
+            panic!("the clip is in the slice: {:?}", slice[0].segments);
+        };
+        let Effect::Crop { keys, .. } = &clipped.effects[0] else {
+            panic!("the slice keeps the crop");
+        };
+        assert!(keys.is_empty(), "a static crop stays static: {keys:?}");
+        assert!(!clipped.effects.iter().any(Effect::is_keyed_crop));
+
+        // It compiles alone (single-track proxy)…
+        p.timeline.tracks = slice;
+        nle_ffmpeg::compile_export(&p).expect("static crop + eq compiles");
+        // …and as a composite span beside an audible track, which takes the
+        // multi-track export path (the other keyed-crop guard).
+        p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks = slice_tracks(&p, secs(1), secs(3));
+        nle_ffmpeg::compile_export(&p).expect("the composite span compiles");
     }
 
     /// A span is widened to contain a transition whole, so the slice must keep
