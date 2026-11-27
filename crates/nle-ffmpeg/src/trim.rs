@@ -13,6 +13,8 @@ use std::process::Command;
 use nle_core::{Seconds, format_seconds};
 use thiserror::Error;
 
+use crate::paths::local_path_arg;
+
 /// The default VAAPI render node when `/dev/dri` cannot be read.
 const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
@@ -414,7 +416,7 @@ pub fn build_args(spec: &TrimSpec) -> Result<Vec<String>, TrimError> {
     a.push("-ss".into());
     a.push(format_seconds(&spec.start));
     a.push("-i".into());
-    a.push(spec.input.display().to_string());
+    a.push(local_path_arg(&spec.input));
     a.push("-t".into());
     a.push(format_seconds(&duration));
 
@@ -446,10 +448,11 @@ pub fn build_args(spec: &TrimSpec) -> Result<Vec<String>, TrimError> {
     }
 
     // `--` ends option parsing: a file literally named "-version.mp4" can't
-    // be misread as an option. (Inputs via `-i` are safe — option values
-    // are consumed literally — but the trailing OUTPUT is positional.)
+    // be misread as an option. `-i` consumes its value literally but the URL
+    // parser still runs, so the input needs the same guard as the trailing
+    // (positional) OUTPUT.
     a.push("--".into());
-    a.push(spec.output.display().to_string());
+    a.push(local_path_arg(&spec.output));
     Ok(a)
 }
 
@@ -545,6 +548,27 @@ mod tests {
         // `--` guards the positional output against option-injection
         assert_eq!(args.last().map(String::as_str), Some("out.mp4"));
         assert_eq!(args[args.len() - 2], "--");
+    }
+
+    #[test]
+    fn a_colon_output_stays_behind_the_option_terminator() {
+        let mut s = spec();
+        s.output = "a:b.mp4".into();
+        let args = build_args(&s).unwrap();
+        assert_eq!(args[args.len() - 2], "--");
+        assert_eq!(args.last().map(String::as_str), Some("./a:b.mp4"));
+    }
+
+    #[test]
+    fn a_colon_input_is_read_as_a_local_file() {
+        // `-i` consumes its value literally, but ffmpeg still parses it as a
+        // URL: `a:b.mp4` would name protocol `a`, so the input is guarded
+        // exactly like the output.
+        let mut s = spec();
+        s.input = "a:b.mp4".into();
+        let args = build_args(&s).unwrap();
+        let i = args.iter().position(|a| a == "-i").expect("an -i argument");
+        assert_eq!(args[i + 1], "./a:b.mp4");
     }
 
     #[test]

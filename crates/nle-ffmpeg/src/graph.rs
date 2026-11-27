@@ -24,6 +24,7 @@ use nle_core::{AudioSettings, Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+use crate::paths::local_path_arg;
 use crate::trim::{
     Encoder, FfmpegError, device_args, run_ffmpeg_opt, run_ffmpeg_progress,
     run_ffmpeg_progress_cancel, video_encode_args,
@@ -1078,7 +1079,7 @@ pub fn export_audio_quiet(project: &Project, output: &Path) -> Result<ExportPlan
     args.push("192k".into());
     args.push("-vn".into());
     args.push("--".into());
-    args.push(output.display().to_string());
+    args.push(local_path_arg(output));
     run_ffmpeg_opt(&args, false)?;
     Ok(plan)
 }
@@ -1180,9 +1181,10 @@ fn run_export(
         args.push("-movflags".into());
         args.push("+faststart".into());
     }
-    // `--` ends option parsing (protects outputs named like options).
+    // `--` ends option parsing (protects outputs named like options); the
+    // helper keeps a protocol-like relative name (`a:b.mp4`) a file too.
     args.push("--".into());
-    args.push(spec.output.display().to_string());
+    args.push(local_path_arg(&spec.output));
 
     if echo {
         eprintln!("$ ffmpeg {}", args.join(" "));

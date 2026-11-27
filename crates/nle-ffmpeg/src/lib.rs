@@ -6,6 +6,7 @@
 
 pub mod detect;
 pub mod graph;
+pub mod paths;
 pub mod probe;
 pub mod sampling;
 pub mod trim;
@@ -16,6 +17,7 @@ pub use graph::{
     compile_export, export, export_audio_quiet, export_quiet, export_quiet_progress,
     export_quiet_progress_cancel, export_range_quiet,
 };
+pub use paths::local_path_arg;
 // Media types live in core; re-exported here for callers that treat
 // this crate as the media facade.
 pub use nle_core::media::{RawFormat, RawProbe, RawStream};
