@@ -22,6 +22,8 @@ Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
   - a *span* where another track is audible (`proxy::composite_proxy`): every
     unmuted track's slice of it, hashed the same way over the slices. A slice
     trims like any trim-in, so a keyed crop's keys re-base onto its head.
+  - an audio-post change re-renders every video proxy (accepted): the proxy
+    bakes the post.
 - Each asset's **path and mtime** are in the hash, so a replaced file
   re-renders — and so is each **LUT file** an effect reads (the segment JSON
   carries only its path, so editing a `.cube` in place must re-render too).
