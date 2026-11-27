@@ -804,7 +804,7 @@ enum AnnotationCmd {
         /// label)
         #[arg(long, value_name = "ID")]
         subject_id: Option<String>,
-        /// subject-in-frame: lowest box confidence to count (0..=1, default 1)
+        /// subject-in-frame: lowest box confidence to count (0..=1, default 0)
         #[arg(long, value_name = "F")]
         min_confidence: Option<f64>,
         /// absent: also refuse black frames (and a blend's black side)
