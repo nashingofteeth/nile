@@ -376,6 +376,153 @@ fn job_prune_keeps_the_newest_and_deletes_the_rest_through_the_cli() {
     drop(server.0.take());
 }
 
+#[cfg(unix)]
+#[test]
+fn job_batch_queues_one_export_per_sequence_through_the_cli() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct Guard(Option<Child>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let socket = nle_core::state::session_socket_path(&sandbox.file(P));
+    let mut server = Guard(Some(
+        Command::new(env!("CARGO_BIN_EXE_nile"))
+            .current_dir(sandbox.path())
+            .args(["--project", P, "serve"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn nile serve"),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&socket).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "server never bound {}",
+            socket.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let connect = || {
+        let stream = UnixStream::connect(&socket).expect("connect");
+        let write = stream.try_clone().expect("clone");
+        nle_protocol::Client::new(BufReader::new(stream), write)
+    };
+
+    // A derived second sequence: both have material, so each job is a real
+    // (cancellable) render rather than an empty-timeline edge case.
+    {
+        let mut client = connect();
+        let revision = client.hello().expect("hello").revision;
+        let derived = client
+            .derive_sequence(revision, 1, "Second", None, None)
+            .expect("derive");
+        assert_eq!(derived.sequence.id, 2);
+    }
+
+    // A bad selection refuses before the output directory exists.
+    let refused = sandbox.file("batch-refused");
+    let bad = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args([
+            "--project",
+            P,
+            "job",
+            "batch",
+            "--output-dir",
+            &refused.display().to_string(),
+            "--sequence",
+            "99",
+        ])
+        .output()
+        .expect("job batch with an unknown sequence");
+    assert!(!bad.status.success(), "{bad:?}");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("no sequence #99"),
+        "{bad:?}"
+    );
+    assert!(
+        !refused.exists(),
+        "a selection refusal creates no directory"
+    );
+
+    // No `--sequence`: every sequence, in listing order, into sequence-<id>.mp4.
+    let dir = sandbox.file("batch");
+    let batch = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args([
+            "--project",
+            P,
+            "job",
+            "batch",
+            "--output-dir",
+            &dir.display().to_string(),
+            "--preset",
+            "preview",
+            "--crf",
+            "30",
+        ])
+        .output()
+        .expect("job batch");
+    assert!(batch.status.success(), "{batch:?}");
+    let stdout = String::from_utf8_lossy(&batch.stdout);
+    for (id, sequence) in [(1, 1), (2, 2)] {
+        let output = dir.join(format!("sequence-{sequence}.mp4"));
+        let line = format!(
+            "queued job #{id} for sequence #{sequence} → {}",
+            output.display()
+        );
+        assert!(stdout.contains(&line), "missing {line:?} in {stdout}");
+    }
+
+    let mut client = connect();
+    let queued = client.jobs().expect("job.list");
+    assert_eq!(queued.jobs.len(), 2, "{queued:?}");
+    for (job, sequence) in queued.jobs.iter().zip([1u32, 2]) {
+        assert_eq!(job.sequence, sequence);
+        assert_eq!(job.output, dir.join(format!("sequence-{sequence}.mp4")));
+    }
+    assert!(dir.exists(), "the output directory was created");
+    let before = client.hello().expect("hello").revision;
+
+    // Stop the renders instead of waiting for two full exports.
+    for job in &queued.jobs {
+        let live = client.job(job.id).expect("job.get");
+        if !live.state.is_terminal() {
+            let _ = client.cancel_job(job.id);
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let jobs = client.jobs().expect("job.list").jobs;
+        if jobs.iter().all(|job| job.state.is_terminal()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "jobs did not stop: {jobs:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let hello = client.hello().expect("hello");
+    assert_eq!(
+        hello.revision, before,
+        "a batch submit is not a model write"
+    );
+    drop(server.0.take());
+}
+
 #[test]
 fn protocol_server_round_trip() {
     let sandbox = Sandbox::new();
