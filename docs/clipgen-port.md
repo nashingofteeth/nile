@@ -127,7 +127,7 @@ returned on the terminal event / record.
 | Transcript mining | Protocol `analysis.add {asset, words}`; `t1-…` store | Ready. Words are exact source seconds; server validates asset/duration. |
 | Subject/CV mining | CLI `nile analysis detect --asset N --label … [--analyzer]`; `a1-…` product | **No protocol method.** Run the CLI locally, then name the product in an expectation. External detectors are absolute executables; no PATH/project-file detector. |
 | Audio mining | CLI `nile analysis analyze-audio`; `audio_levels` product | **No protocol method and no consumer check yet.** CLI-only. |
-| Angle/crop planning | Sequences, `AddEffect` crop/scale/offset, keyed crop, undo | No derived-sequence operation; see gaps. |
+| Angle/crop planning | Sequences, `sequence derive` snapshot, `AddEffect` crop/scale/offset, keyed crop, undo | Snapshot derive exists; no preset/regeneration policy. |
 | Cases/expectations | Catalog actions `AnnotationAddAt` with an `AnnotationKind::Expectation`; `annotation.check` | Ready. `subject-in-frame` is source-product based; `words-complete` uses a transcript. |
 | Verification | `annotation.check` returns `CheckReport` (pass/fail/unverifiable); `nile report` | Ready. Check does not write. |
 | Review/provenance | History actors/labels, annotation status/resolve | History is available in the model; a review UI is not built. |
@@ -135,12 +135,12 @@ returned on the terminal event / record.
 
 ## 6. Gaps to decide before porting
 
-1. **Derived sequences are absent.** There is no `sequence derive` and no
-   "copy/replace project" protocol method. Angle/crop planning that produces
-   variants must either be implemented in `nile-core` (a derived-sequence
-   operation with undo) or the toolkit must create a sequence and apply the
-   edit actions itself. Decide this first; it is the main engine change the
-   port is likely to need.
+1. **Derived sequences are snapshot-only.** `sequence derive` copies the
+   timeline into a new sequence (own history, shared media, no annotations),
+   but does not apply a 9x16/crop preset or regenerate from a changed source.
+   Decide whether angle/crop planning should add effects in the toolkit or
+   whether nile needs a preset/regeneration operation. Do not build a parallel
+   timeline in the toolkit.
 2. **Analysis is CLI-only.** `analysis.add` stores transcripts but there is no
    protocol `analysis.detect`/`analyze-audio`. The earlier contract deliberately
    keeps a remote client from naming executables. Options: run the CLI on the
@@ -228,12 +228,13 @@ fixture/CLI patterns.
 1. Where does the clipgen checkout live, and is its detector available on the
    nile host? If not, the CV case is blocked on a local detector or a
    server-side allowlist decision.
-2. Does the port need derived sequences, or can it submit separate jobs per
-   planned variant? Answer this before starting the first code slice.
+2. Does the port need a crop/9x16 preset or regeneration, or is snapshot
+   `sequence derive` plus toolkit-added effects enough? Answer this before
+   starting the first code slice.
 3. Does it need batch submission/async events, or is a polling helper enough
    for the initial cases?
 4. Will the toolkit write only through `nile serve`, or also need CLI-only
    import/analysis on the same host? Keep one writer per project.
 
-If the answer to (2) is “yes, derived sequences,” make that the first nile
-slice after the audit; do not build a parallel timeline in the toolkit.
+If the answer to (2) is “preset/regeneration,” make that the next nile slice;
+do not build a parallel timeline in the toolkit.

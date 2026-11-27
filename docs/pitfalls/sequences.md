@@ -75,5 +75,23 @@ checks); older files are rejected, never migrated.
 
 `Sequence.origin` is `Root` or `Derived { from, spec }`, and every sequence
 carries a monotonic `manual_edits` counter (undo does not decrement it).
-Nothing derives a sequence yet; the fields land now so provenance is not
-retrofitted later.
+
+`nile sequence derive --from N --name NAME [--size WxH] [--fps RATE]` copies
+the source sequence's **snapshot**: tracks/segments, effects, audio post, and
+settings. This is deliberately not a live derivation:
+
+- The source and copy share the media pool, but not their timelines or undo
+  stacks. Editing either leaves the other untouched.
+- `--size`/`--fps` override the copy's canvas/grid; without them the source
+  settings are copied. No crop/scale policy is applied — a 9x16 preset belongs
+  to the toolkit, not `nle-core`.
+- The copy is not made active and starts at playhead 0 with `manual_edits = 0`.
+- Annotations are sequence-scoped and are **not** copied. A later regeneration
+  or annotation-copy policy needs an explicit decision.
+- The new sequence is a whole-project model write (revision bump), not an
+  undoable edit; its history starts empty. `spec` is `{"kind":"copy"}` today.
+- `sequence.derive` exposes the same operation over the protocol. Additive, so
+  `PROTOCOL_VERSION` stays 5.
+
+Regeneration from a changed source is not implemented: the origin records the
+snapshot, but no code reapplies it yet.

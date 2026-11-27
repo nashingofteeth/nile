@@ -128,10 +128,14 @@ A project can hold several **sequences** — separate timelines with their own
 frame rate, output size, playhead, audio post and undo stack, sharing one
 media pool. The TUI edits the active sequence; the status row names it when
 there is more than one. `:sequence ls` lists them, `:sequence N` switches, and
-`:sequence add NAME [--width W --height H --fps RATE]` creates one. Switching
-saves `active`, adopts that timeline's playhead, resets the active track and
-reloads the monitor. Undo is per sequence: an edit made on one timeline never
-replays on another.
+`:sequence add NAME [--width W --height H --fps RATE]` creates one.
+`nile sequence derive --from N --name NAME [--size WxH] [--fps RATE]` copies a
+sequence snapshot into a new sequence without switching; the copy has its own
+undo stack and starts at 0, and a later `--size`/`--fps` changes its canvas
+and grid. Presets such as 9x16 are not applied yet — add crop/scale effects
+or wait for the preset slice. Switching sequences saves `active`, adopts that
+timeline's playhead, resets the active track and reloads the monitor. Undo is
+per sequence: an edit made on one timeline never replays on another.
 
 Audio post is per sequence and off by default: `nile sequence audio
 [--normalize [BOOL]] [--fade-in S] [--fade-out S]` normalizes the mixed
@@ -345,6 +349,8 @@ nile track add audio                      # mixed on export
 nile track ls
 nile sequence ls                          # timelines, active marked with *
 nile sequence add Vertical --width 1080 --height 1920 --fps 30
+nile sequence derive --from 1 --name "Vertical" --size 1080x1920 --fps 24
+                                          # snapshot copy, own undo, not active
 nile sequence use 2                       # edits, undo and export follow it
 nile sequence audio --normalize           # -16 LUFS / -1.5 dBTP on the mix
 nile sequence audio --fade-in 0.5 --fade-out 1  # undoable programme fades

@@ -8,7 +8,7 @@ client/server, no async runtime. `nile serve` implements `Handler` on a
 
 `hello`, `project.show`, `timeline.edl`, `action.preview`, `action.apply`,
 `undo`, `redo`, `sequence.list`, `sequence.use`, `sequence.add`,
-`sequence.audio`, `media.list`, `media.add`, `playhead.set`,
+`sequence.derive`, `sequence.audio`, `media.list`, `media.add`, `playhead.set`,
 `annotation.list`, `annotation.check`, `analysis.add`, `job.submit`,
 `job.list`, `job.get`, `job.cancel`, `job.remove`, `job.prune`. The internal
 `wire_catalog!` macro
@@ -89,6 +89,12 @@ but does not bump the revision (session state, like the playhead), then emits
 `sequence.add` is a model write: it takes `base_revision`, bumps the revision,
 persists, and emits `project.changed` then `sequence.changed`. It does not
 switch.
+`sequence.derive {base_revision, from, name, fps?, video?}` is the snapshot
+copy: it shares the media pool but not the timeline/history, copies the source
+timeline (annotations are not copied), optionally overrides fps/video, does
+not switch, and returns the new `SequenceSummary`. It is the same model-write
+path as `sequence.add` (CAS, revision bump, both events). Additive, so
+`PROTOCOL_VERSION` stays 5.
 `sequence.audio {base_revision, audio}` sets the active sequence's
 loudness/fade settings. `audio` is the model's `AudioSettings` serde form
 (`{"normalize":bool,"fade_in":"1/2","fade_out":"1/1"}`; missing fields default
@@ -259,7 +265,8 @@ That is the no-parallel-DTO tradeoff. Normalizing it would change persisted
 
 `project.changed`, `playhead` and `sequence.changed` are notifications: no
 id, no response. `sequence.changed` carries the active id and the current
-revision (unchanged by a pure switch, bumped by `sequence.add`). The server
+revision (unchanged by a pure switch, bumped by
+`sequence.add`/`derive`). The server
 writes a successful response before its events; the client buffers
 events seen before a response and `next_event()` reads those after it.
 Unknown or malformed notifications are skipped and counted
