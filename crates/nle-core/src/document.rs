@@ -997,6 +997,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.json");
         doc.save(&path).unwrap();
+        // Adoption happens in memory too, not only in the reloaded file.
+        doc.select_sequence(second).unwrap();
+        assert_eq!(
+            doc.project.playhead,
+            doc.project.last_frame(),
+            "the media sequence adopted the clamp"
+        );
+        doc.select_sequence(empty).unwrap();
+        assert_eq!(
+            doc.project.playhead,
+            Seconds::from_integer(0),
+            "the empty sequence adopted 0"
+        );
+        doc.select_sequence(1).unwrap();
         let mut loaded = Project::load(&path).unwrap();
         let seg = &loaded
             .sequence(second)
@@ -1026,6 +1040,69 @@ mod tests {
             Seconds::from_integer(0),
             "an empty sequence clamps its cursor to 0"
         );
+    }
+
+    #[test]
+    fn save_clamps_a_negative_playhead_to_zero() {
+        let mut doc = document();
+        let second = second_sequence(&mut doc);
+        // A negative rational writes as "-5/1", which `parse_rate` refuses, so
+        // an unclamped save would leave a file that no longer loads.
+        doc.project.sequence_mut(second).unwrap().playhead = Seconds::from_integer(-5);
+        doc.select_sequence(1).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.json");
+        doc.save(&path).unwrap();
+        let mut loaded = Project::load(&path).unwrap();
+        loaded.select_sequence(second).unwrap();
+        assert_eq!(
+            loaded.playhead,
+            Seconds::from_integer(0),
+            "a negative cursor clamps to the first frame"
+        );
+    }
+
+    #[test]
+    fn a_refused_save_leaves_an_existing_file_unchanged() {
+        let mut doc = document();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.json");
+        doc.save(&path).unwrap();
+        let valid = std::fs::read(&path).unwrap();
+        // An unpooled asset makes the model invalid after a valid write.
+        if let Segment::Clip(c) = &mut doc.project.timeline.video_track_mut().unwrap().segments[0] {
+            c.asset = 99;
+        }
+        doc.save(&path)
+            .expect_err("an unpooled asset refuses the save");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            valid,
+            "a refusal never rewrites the previous valid file"
+        );
+    }
+
+    #[test]
+    fn a_failed_persist_keeps_the_stale_cursor_in_memory() {
+        let mut doc = document();
+        doc.project.playhead = Seconds::from_integer(99);
+        let revision = doc.revision();
+        let dir = tempfile::tempdir().unwrap();
+        // The parent is missing, so `Project::save`'s temp file cannot be
+        // created even though the clamped copy validates.
+        let path = dir.path().join("missing").join("nle.json");
+        doc.save(&path).expect_err("no directory to write into");
+        assert_eq!(
+            doc.project.playhead,
+            Seconds::from_integer(99),
+            "the repaired copy was not adopted"
+        );
+        assert_eq!(
+            doc.revision(),
+            revision,
+            "a failed persist is not a model write"
+        );
+        assert!(!path.exists());
     }
 
     #[test]
