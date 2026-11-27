@@ -3,7 +3,7 @@
 //! sub-frame leftovers a grid-snapped edit can strand.
 
 use crate::project::Project;
-use crate::time::{Seconds, format_seconds};
+use crate::time::{Seconds, checked_frames_to_seconds, format_seconds};
 use crate::timeline::{Clip, Gap, Segment, Track, TransitionSource};
 
 /// Whole frames in `span` at `fps`, rounded, or `None` when that count does
@@ -49,7 +49,9 @@ pub fn clamp_to_media(
         return notes;
     }
     let zero = Seconds::from_integer(0);
-    let frame_secs = |n: i64| Seconds::new(n, 1) / fps;
+    // None when the frame grid is finer than `Ratio<i64>` can encode; the
+    // caller keeps the media-clamped value, the closest expressible one.
+    let frame_secs = |n: i64| checked_frames_to_seconds(n, fps);
     track.segments.retain_mut(|seg| match seg {
         // A non-positive speed has no sane clamp — leave it for `validate()`
         // to reject rather than dividing by zero here.
@@ -64,14 +66,20 @@ pub fn clamp_to_media(
             let out = c.asset_out.min(d);
             let mut frames = whole_frames((out - in_) / c.speed, fps);
             let new_out = match frames {
-                Some(n) => {
-                    let mut new_out = in_ + frame_secs(n) * c.speed;
-                    if new_out > d {
-                        frames = Some(n - 1);
-                        new_out = in_ + frame_secs(n - 1) * c.speed;
+                Some(n) => match frame_secs(n) {
+                    Some(step) => {
+                        let new_out = in_ + step * c.speed;
+                        if new_out > d {
+                            frames = Some(n - 1);
+                            frame_secs(n - 1)
+                                .map(|step| in_ + step * c.speed)
+                                .unwrap_or(out)
+                        } else {
+                            new_out
+                        }
                     }
-                    new_out
-                }
+                    None => out,
+                },
                 // A frame below the `Rational64` grid this timeline can
                 // encode: keep the media-clamped out-point, the closest
                 // expressible one. An unrepresentable count from an inverted
@@ -113,15 +121,16 @@ pub fn clamp_to_media(
                     return false;
                 }
                 Some(frames) => {
-                    let dur = frame_secs(frames);
-                    if dur != t.dur {
-                        notes.push(format!(
-                            "transition #{id}: dur {} → {}",
-                            format_seconds(&t.dur),
-                            format_seconds(&dur)
-                        ));
+                    if let Some(dur) = frame_secs(frames) {
+                        if dur != t.dur {
+                            notes.push(format!(
+                                "transition #{id}: dur {} → {}",
+                                format_seconds(&t.dur),
+                                format_seconds(&dur)
+                            ));
+                        }
+                        t.dur = dur;
                     }
-                    t.dur = dur;
                 }
                 // A frame below the `Rational64` grid: `t.dur` is already the
                 // closest expressible duration.
@@ -186,7 +195,7 @@ pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
     }
     let frame = Seconds::from_integer(1) / fps;
     let snap = |t: Seconds| match whole_frames(t, fps) {
-        Some(frames) => Seconds::new(frames, 1) / fps,
+        Some(frames) => checked_frames_to_seconds(frames, fps).unwrap_or(t),
         // A frame below the `Rational64` grid: the position is already the
         // closest expressible one.
         None => t,

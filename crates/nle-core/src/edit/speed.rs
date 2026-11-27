@@ -104,7 +104,8 @@ pub fn set_speed_on(
     let grown = checked_sub(
         &tr.checked_end()
             .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?,
-        &c.duration(),
+        &c.checked_duration()
+            .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?,
     )
     .and_then(|end| checked_add(&end, &mine_dur))
     .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;

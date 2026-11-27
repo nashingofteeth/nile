@@ -7,7 +7,7 @@
 
 use crate::project::Project;
 use crate::time::{
-    Seconds, checked_add, checked_mul, checked_sub, format_seconds, frames_to_seconds,
+    Seconds, checked_add, checked_frames_to_seconds, checked_mul, checked_sub, format_seconds,
 };
 use crate::timeline::{
     Clip, Effect, MAX_TIMELINE_SECONDS, Segment, Track, TrackKind, Transition, TransitionKind,
@@ -50,7 +50,8 @@ pub fn add_transition(
     if frames < 1 {
         return Err(EditError::TooShort);
     }
-    let dur = frames_to_seconds(frames, fps);
+    let dur =
+        checked_frames_to_seconds(frames, fps).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
 
     // The seam must be a boundary: the segment starting at `t` (or the
     // timeline end) and the one ending at `t` (or the start).
@@ -232,7 +233,8 @@ pub fn retime_transition_on(
     if frames < 1 {
         return Err(EditError::TooShort);
     }
-    let new_dur = frames_to_seconds(frames, fps);
+    let new_dur =
+        checked_frames_to_seconds(frames, fps).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
     if new_dur > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
     }

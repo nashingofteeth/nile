@@ -13,7 +13,7 @@ pub use delete::{
 };
 
 use crate::project::Project;
-use crate::time::{Seconds, checked_add, checked_mul, checked_sub};
+use crate::time::{Seconds, checked_add, checked_frames_to_seconds, checked_mul, checked_sub};
 use crate::timeline::{
     Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Track, Transition, TransitionSource,
 };
@@ -393,7 +393,8 @@ pub fn insert_gap_on(
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
     }
     let gap = Segment::Gap(Gap {
-        duration: Seconds::new(frames, 1) / fps,
+        duration: checked_frames_to_seconds(frames, fps)
+            .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?,
     });
     let gap_end =
         checked_add(&t, &gap.duration()).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
