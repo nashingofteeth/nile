@@ -2,6 +2,20 @@
 
 Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
 
+## mpv isolation
+
+- mpv is spawned with `--no-config` **and** a per-PID unix socket
+  (`--input-ipc-server`). These block two different things:
+  - `--no-config` stops the user's `mpv.conf`, scripts and input bindings from
+    changing the monitor. That means user `vo`/`ao`/`hwdec` and other settings
+    no longer apply; nile sets `--hwdec=auto-safe` itself so hardware decode
+    still works where mpv deems it safe (software is the fallback).
+  - The per-PID socket keeps separate nile instances from sharing one monitor.
+    It is **not** authentication: the socket lives in a world-writable temp
+    dir, mpv's IPC is unauthenticated, so another local process could still
+    connect. `spawn_args` in `crates/nle-cli/src/mpv.rs` is the single list;
+    the guard is `spawn_args_ignore_user_config`.
+
 ## mpv states
 
 - `--keep-open=always` holds at EOF a frame or two before the probe duration;
