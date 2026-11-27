@@ -38,8 +38,9 @@ the export's `xfade` chain.
   neighbour keeps its rate and gives up or takes back the extra material. Two
   clip sides change the timeline by `-delta` (a longer blend shortens it); a
   black side leaves it. The original cut is the blend's far edge, so `--at`
-  accepts it too; insufficient handles refuse (`BlendNoHandle`); one undo
-  batch.
+  accepts it too; a trailing fade has no cut, so its far edge is the timeline
+  end, and `--at` accepts that end too; insufficient handles refuse
+  (`BlendNoHandle`); one undo batch.
 - **Speed.** A speed change retimes the sides the retimed clip owns
   (`set_speed_on`): the blend's `dur` and the cut (`a.src_out` / `b.src_in`)
   stay put and the inner edge follows (it is also the neighbour's in/out), so

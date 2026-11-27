@@ -219,7 +219,8 @@ pub fn transition_at(
 /// Resize an existing transition to `dur`, keeping each clip side's rate.
 /// A longer blend takes more material from both neighbours (and shortens a
 /// clip↔clip timeline by the added length); a shorter one gives it back.
-/// `None` when the length is unchanged. `at` is any time inside the blend.
+/// `None` when the length is unchanged. `at` is any time inside the blend or
+/// its far edge (the original cut; the timeline end for a trailing fade).
 pub fn retime_transition_on(
     project: &Project,
     track: usize,
