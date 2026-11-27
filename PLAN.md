@@ -3,10 +3,10 @@
 Project and command: **nile**. Status: **M5 shipped; post-M5 polish shipped;
 M6 shipped** (presets, bench and the opt-in chunk scheduler/cache; auto stays
 single-worker until a workload shows a win); **pre-merge engine readiness
-complete**. **Next: port `clip-generator` as a domain toolkit** over the
-protocol. Async job-event push remains deferred and does not block that port.
-This file is the design/roadmap; the README is the user-facing how-to. Keep it
-in sync as milestones land.
+complete**. **Clipgen port is tabled** for the other-device handoff; see
+`docs/clipgen-port.md`. Async job-event push remains deferred. This file is
+the design/roadmap; the README is the user-facing how-to. Keep it in sync as
+milestones land.
 
 **Post-M5 additions:** transparent crop/scale masking and the offset effect
 (lower tracks show through); a TUI effects panel with one effect per kind,
@@ -436,7 +436,9 @@ trimming of a transition's own span (retime it with `x`/`X`,
 `~/clip-generator` (live-show ingest → transcript/CV mining → angle/crop
 planning → feedback cases → verification) merges into nile as a **domain
 toolkit** on top of the engine, not as a second pipeline. The engine work
-lands first so the merge is a port, not an integration.
+lands first so the merge is a port, not an integration. The port is tabled
+for the other-device handoff; `docs/clipgen-port.md` records the surface,
+gaps and a first vertical case.
 
 **Merge-ready means:** one project with several sequences, source↔timeline
 time maps and first-class annotations; an analysis job runs through nile and
@@ -665,9 +667,9 @@ merge modular.
 Workspace/revisions/fixtures → sequences → protocol → time maps and media
 groups → annotations → render (keyframes, audio, reports, jobs) → sampling
 contract → toolkit hooks. The engine is merge-ready; async job-event push
-remains deferred and does not block the clipgen port. Port ingest, planners
-and cases against the protocol and prove parity with the existing renders in
-`fixtures/`.
+remains deferred. Resume the clipgen port from `docs/clipgen-port.md`: port
+ingest, planners and cases against the protocol and prove parity with the
+existing renders in `fixtures/`.
 
 ## Timeline filmstrips (shipped)
 
