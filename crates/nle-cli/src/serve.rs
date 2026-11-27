@@ -1,13 +1,13 @@
 //! `nile serve --stdio`: the protocol handler over a loaded project.
 //!
 //! The server state is a [`Session`] — project, history, register, and path —
-//! plus the queued events and the save-failure poison. Every action mutation
+//! plus the queued events and the read-only poison. Every action mutation
 //! goes through [`ServeHandler::apply`], so compare-and-swap, the edit,
 //! playhead conversion, persistence, and event emission cannot drift between
 //! `action.apply` and the dedicated `undo`/`redo` aliases. Sequence and media
 //! writes are separate model paths, but they use the same writeability,
-//! revision and save/poison helpers; a failed save still poisons every later
-//! write.
+//! revision and save/poison helpers; a failed save, or a handler that panicked
+//! with the shared lock held, poisons every later write while reads continue.
 //!
 //! stdout is the protocol channel. Nothing here may `say!` or print; errors
 //! leave through the JSON-RPC response, and `main` sends command failures to
@@ -479,11 +479,19 @@ impl Handler for ConnectionHandler {
         let mut handler = match self.shared.lock() {
             Ok(handler) => handler,
             Err(poisoned) => {
+                // A handler panicked while it held this lock. The value is
+                // still sound (only the mutex is marked poisoned), but the
+                // project may hold a half-applied edit, so latch the handler
+                // read-only *before* clearing the poison: `ensure_writable`
+                // then refuses every later mutation while reads keep
+                // working. Clearing the poison only stops every call from
+                // taking this branch; it cannot re-enable a write.
                 let mut handler = poisoned.into_inner();
-                handler.poisoned = Some("a connection handler panicked".into());
-                return Err(RpcError::internal(
-                    "server is read-only after a handler panic",
-                ));
+                handler
+                    .poisoned
+                    .get_or_insert_with(|| "a connection handler panicked".into());
+                self.shared.clear_poison();
+                handler
             }
         };
         let reply = handler.handle(call);
@@ -737,7 +745,7 @@ impl ServeHandler {
     fn ensure_writable(&self) -> Result<(), RpcError> {
         match &self.poisoned {
             Some(reason) => Err(RpcError::internal(format!(
-                "server is read-only after a failed save: {reason}"
+                "server is read-only after a failure: {reason}"
             ))),
             None => Ok(()),
         }
