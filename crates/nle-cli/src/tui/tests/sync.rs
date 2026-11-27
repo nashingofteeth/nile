@@ -1,10 +1,11 @@
+use super::super::actions::run_action;
 use super::super::croc::CrocAct;
 use super::super::jobs::PreviewMsg;
 use super::super::keys::{handle_key, set_active_track};
 use super::super::motion::{fmt_timecode, secs};
 use super::*;
 use nle_core::time::Seconds;
-use nle_core::{Armed, Project};
+use nle_core::{Action, Armed, Project, Target};
 
 // The transport flush: a move is detected in frames (the two float
 // paths can differ in the last ulp, which must not retrigger it), and
@@ -147,6 +148,68 @@ fn a_foreign_write_is_not_clobbered() {
         Project::load(&path).unwrap().playhead,
         Seconds::from_integer(3),
         "the shell's cursor survived"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+// The register is shared too (`nile yank`/`nile paste`): an action that
+// saves it must check for a shell's yank first, or the write re-stamps the
+// file and `persist_and_refresh` can no longer see the change it covered.
+#[test]
+fn a_foreign_register_write_is_not_clobbered() {
+    let path = temp_project_path("register-guard");
+    watchable_project().save(&path).unwrap();
+    let p = Project::load(&path).unwrap();
+    // The session opens while the file holds our yank (R1)...
+    let r1 = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(2),
+        }),
+    );
+    nle_core::save_register(&path, Some(&r1)).unwrap();
+    let mut app = App::new(watchable_project(), path.clone());
+    assert_eq!(app.project.register(), Some(&r1));
+
+    // ...then a shell yanks a different gap into the same sidecar (R2).
+    let r2 = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(4),
+        }),
+    );
+    nle_core::save_register(&path, Some(&r2)).unwrap();
+    let foreign = std::fs::read(nle_core::register_path(&path)).unwrap();
+    assert!(app.external_change(), "the shell's yank is seen");
+
+    // `run_action` saves the register, so it hits the guard and adopts the
+    // shell's yank instead of writing ours over it.
+    let applied = run_action(
+        &mut app,
+        &FakeMpv::new(),
+        &Action::Yank {
+            track: 0,
+            target: Target::At(1.0),
+        },
+    );
+    assert!(!applied, "the refused action is not reported as applied");
+    assert_eq!(
+        std::fs::read(nle_core::register_path(&path)).unwrap(),
+        foreign,
+        "the shell's yank survived"
+    );
+    assert_eq!(
+        app.project.register(),
+        Some(&r2),
+        "the session adopted the shell's yank"
+    );
+    assert!(
+        app.message
+            .contains("not saved: clipboard.json changed on disk (reloaded)"),
+        "{}",
+        app.message
     );
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
