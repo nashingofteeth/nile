@@ -548,6 +548,13 @@ impl Handler for ServeHandler {
                 fps,
                 video,
             } => self.sequence_add(*base_revision, name, *fps, video.clone()),
+            Call::SequenceDerive {
+                base_revision,
+                from,
+                name,
+                fps,
+                video,
+            } => self.sequence_derive(*base_revision, *from, name, *fps, video.clone()),
             Call::SequenceAudio {
                 base_revision,
                 audio,
@@ -911,6 +918,39 @@ impl ServeHandler {
                 .project()
                 .sequence(id)
                 .expect("the sequence was just added"),
+        );
+        self.events.push(Event::ProjectChanged { revision });
+        self.events
+            .push(Event::SequenceChanged { active, revision });
+        Ok(Reply::Sequence(SequenceReply {
+            revision,
+            active,
+            sequence,
+        }))
+    }
+
+    fn sequence_derive(
+        &mut self,
+        base_revision: u64,
+        from: u32,
+        name: &str,
+        fps: Option<Seconds>,
+        video: Option<nle_core::VideoSettings>,
+    ) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
+        self.check_revision(base_revision)?;
+        let id = self
+            .session
+            .derive_sequence(from, name, fps, video)
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        self.save_or_poison(true, false)?;
+        let revision = self.session.revision();
+        let active = self.session.project().active_id();
+        let sequence = SequenceSummary::of(
+            self.session
+                .project()
+                .sequence(id)
+                .expect("the sequence was just derived"),
         );
         self.events.push(Event::ProjectChanged { revision });
         self.events

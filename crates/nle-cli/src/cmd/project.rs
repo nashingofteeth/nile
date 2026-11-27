@@ -19,7 +19,7 @@ use nle_core::{
 use nle_ffmpeg::probe;
 
 use super::asset_summary;
-use super::import::validate_import_path;
+use super::import::{parse_size_arg, validate_import_path};
 use super::{cli_index, run_cli_action};
 #[cfg(feature = "tui")]
 use crate::mpv;
@@ -554,6 +554,27 @@ pub(crate) fn cmd_sequence(project_path: &Path, action: &SequenceCmd) -> Result<
             let id = doc.add_sequence(name.clone(), fps, video)?;
             doc.save(project_path)?;
             say!("✓ sequence #{id} {name} (not active — `nile sequence use {id}`)");
+            Ok(())
+        }
+        SequenceCmd::Derive {
+            from,
+            name,
+            size,
+            fps,
+        } => {
+            let video = size.as_deref().map(parse_size_arg).transpose()?;
+            let fps = fps.as_deref().map(parse_fps_arg).transpose()?;
+            let mut doc = Document::new(Project::load(project_path)?);
+            let id = doc.derive_sequence(
+                *from,
+                name.clone(),
+                fps,
+                video.map(|(width, height)| VideoSettings { width, height }),
+            )?;
+            doc.save(project_path)?;
+            say!(
+                "✓ sequence #{id} {name} (derived from #{from}, not active — `nile sequence use {id}`)"
+            );
             Ok(())
         }
         SequenceCmd::Use { id } => {

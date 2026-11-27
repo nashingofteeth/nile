@@ -964,6 +964,12 @@ pub(crate) fn sequence_command(
                 (None, None) => None,
                 _ => return Some("--width and --height go together".to_string()),
             };
+            if video
+                .as_ref()
+                .is_some_and(|video| video.width == 0 || video.height == 0)
+            {
+                return Some("--width and --height must be non-zero".to_string());
+            }
             let fps = match f.take("fps") {
                 Some(rate) => match crate::parse_fps_arg(&rate) {
                     Ok(rate) => Some(rate),

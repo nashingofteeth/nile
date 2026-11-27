@@ -620,6 +620,83 @@ fn sequence_list_use_and_add_round_trip() {
 }
 
 #[test]
+fn sequence_derive_round_trips_through_the_server() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let derived = call(
+        &mut serve,
+        2,
+        "sequence.derive",
+        Some(json!({
+            "base_revision": revision,
+            "from": 1,
+            "name": "Vertical copy",
+            "fps": "24/1",
+            "video": {"width": 1080, "height": 1920}
+        })),
+    );
+    assert_eq!(derived["result"]["revision"], revision + 1);
+    assert_eq!(derived["result"]["active"], 1, "derive does not switch");
+    assert_eq!(derived["result"]["sequence"]["id"], 2);
+    assert_eq!(derived["result"]["sequence"]["name"], "Vertical copy");
+    assert_eq!(
+        derived["result"]["sequence"]["clips"], 3,
+        "the copied timeline has the source clips"
+    );
+    assert_eq!(derived["result"]["sequence"]["fps"], "24/1");
+    assert_eq!(derived["result"]["sequence"]["video"]["width"], 1080);
+    assert_eq!(serve.read()["method"], "project.changed");
+    let event = serve.read();
+    assert_eq!(event["method"], "sequence.changed");
+    assert_eq!(event["params"]["active"], 1);
+
+    let list = call(&mut serve, 3, "sequence.list", None);
+    assert_eq!(list["result"]["sequences"].as_array().unwrap().len(), 2);
+    assert_eq!(list["result"]["sequences"][1]["id"], 2);
+
+    let bad = call(
+        &mut serve,
+        4,
+        "sequence.derive",
+        Some(json!({
+            "base_revision": revision + 1,
+            "from": 99,
+            "name": "Missing"
+        })),
+    );
+    assert_eq!(bad["error"]["code"], -32602);
+    let zero = call(
+        &mut serve,
+        5,
+        "sequence.derive",
+        Some(json!({
+            "base_revision": revision + 1,
+            "from": 1,
+            "name": "Zero canvas",
+            "video": {"width": 0, "height": 720}
+        })),
+    );
+    assert_eq!(zero["error"]["code"], -32602, "{zero}");
+    let stale = call(
+        &mut serve,
+        6,
+        "sequence.derive",
+        Some(json!({
+            "base_revision": revision,
+            "from": 1,
+            "name": "Stale"
+        })),
+    );
+    assert_eq!(stale["error"]["code"], -32001);
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
 fn sequence_audio_round_trips_through_the_server() {
     let sandbox = Sandbox::new();
     sandbox.base();

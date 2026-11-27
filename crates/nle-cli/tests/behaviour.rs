@@ -79,6 +79,107 @@ fn two_sequences_export_at_their_own_sizes() {
 }
 
 #[test]
+fn sequence_derive_copies_the_timeline_and_keeps_edits_separate() {
+    let s = Sandbox::new();
+    s.base();
+    let before: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project json");
+    let source_tracks = before["sequences"][0]["timeline"]["tracks"].clone();
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "1",
+        "--asset",
+        "1",
+    ]);
+
+    s.ok(&[
+        "sequence",
+        "derive",
+        "--from",
+        "1",
+        "--name",
+        "Vertical",
+        "--size",
+        "1080x1920",
+        "--fps",
+        "24/1",
+    ]);
+    let list = s.ok(&["sequence", "ls"]);
+    assert!(list.contains("* #1"), "derive does not switch: {list}");
+    assert!(list.contains("#2  Vertical"), "{list}");
+    assert!(list.contains("1080×1920"), "{list}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project json");
+    let derived = json["sequences"]
+        .as_array()
+        .expect("sequences")
+        .iter()
+        .find(|seq| seq["id"] == 2)
+        .expect("derived sequence");
+    assert_eq!(derived["origin"]["Derived"]["from"], 1);
+    assert_eq!(derived["origin"]["Derived"]["spec"]["kind"], "copy");
+    assert_eq!(derived["timeline"]["tracks"], source_tracks);
+    assert_eq!(derived["fps"], "24/1");
+    assert_eq!(derived["video"]["width"], 1080);
+    assert_eq!(derived["video"]["height"], 1920);
+    assert_eq!(derived["manual_edits"], 0);
+    assert_eq!(derived["playhead"], "0/1");
+    s.ok(&["export", "--sequence", "2", "-o", "vertical.mp4"]);
+    assert_eq!(
+        s.size("vertical.mp4"),
+        (1080, 1920),
+        "the derived canvas is the one exported"
+    );
+    let copied_checks = s.ok(&["annotation", "ls", "--sequence", "2"]);
+    assert!(copied_checks.contains("expect"), "{copied_checks}");
+    let check = s.ok(&["annotation", "check", "--report", "vertical.mp4"]);
+    assert!(
+        check.contains("1 check(s): 1 pass"),
+        "the derived render inherits the source expectation: {check}"
+    );
+
+    // A derived sequence has its own timeline: deleting one of its copied
+    // clips leaves the source untouched.
+    s.ok(&["sequence", "use", "2"]);
+    let copied = derived["timeline"]["tracks"][0]["segments"]
+        .as_array()
+        .expect("segments")
+        .len();
+    s.ok(&["delete", "--clip", "1"]);
+    let after: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("project json");
+    assert_eq!(
+        after["sequences"][0]["timeline"]["tracks"], source_tracks,
+        "the source timeline is unchanged"
+    );
+    let derived_segments = after["sequences"][1]["timeline"]["tracks"][0]["segments"]
+        .as_array()
+        .expect("derived segments")
+        .len();
+    assert_eq!(
+        derived_segments, copied,
+        "a delete leaves a gap, not a vanished row"
+    );
+    assert_ne!(
+        after["sequences"][0]["timeline"],
+        after["sequences"][1]["timeline"]
+    );
+
+    // A missing source is a fatal request, not a half-written project.
+    let guard = s.read(P);
+    let out = s.run(&["sequence", "derive", "--from", "99", "--name", "Nope"]);
+    assert_eq!(out.status.code(), Some(1), "{}", merged(&out));
+    assert!(merged(&out).contains("sequence #99"), "{}", merged(&out));
+    assert_eq!(s.read(P), guard, "the refusal did not write the project");
+}
+
+#[test]
 fn sequence_add_rejects_a_non_positive_frame_rate() {
     let s = Sandbox::new();
     s.base();

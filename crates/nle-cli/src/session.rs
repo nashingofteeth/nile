@@ -449,6 +449,31 @@ impl Session {
         }
     }
 
+    /// Copy a sequence snapshot into a new sequence (not active).
+    pub fn derive_sequence(
+        &mut self,
+        from: u32,
+        name: impl Into<String>,
+        fps: Option<nle_core::Seconds>,
+        video: Option<VideoSettings>,
+    ) -> Result<u32, SessionError> {
+        match &mut self.backend {
+            Backend::Direct { document, .. } => document
+                .derive_sequence(from, name, fps, video)
+                .map_err(Into::into),
+            Backend::Remote(remote) => {
+                let revision = remote.revision;
+                let reply = remote
+                    .call(|client| client.derive_sequence(revision, from, name, fps, video))
+                    .map_err(|e| SessionError::Remote(e.to_string()))?;
+                remote
+                    .refresh()
+                    .map_err(|e| SessionError::Remote(e.to_string()))?;
+                Ok(reply.sequence.id)
+            }
+        }
+    }
+
     /// Set the active sequence's audio-post settings. Direct sessions record
     /// the change in the document/history and save both sidecars; remote
     /// sessions send the typed call and re-fetch the server's state. The

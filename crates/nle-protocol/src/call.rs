@@ -88,6 +88,21 @@ wire_catalog! {
             #[serde(default, skip_serializing_if = "Option::is_none")]
             video: Option<VideoSettings>,
         } = "sequence.add";
+        /// Copy a sequence snapshot into a new sequence (not active). The
+        /// source and copy share the media pool but not timelines/histories.
+        SequenceDerive {
+            base_revision: u64,
+            from: u32,
+            name: String,
+            #[serde(
+                default,
+                with = "nle_core::time::rational_ser::opt",
+                skip_serializing_if = "Option::is_none"
+            )]
+            fps: Option<Seconds>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            video: Option<VideoSettings>,
+        } = "sequence.derive";
         /// Set the active sequence's audio-post settings; a model write
         /// guarded by CAS.
         SequenceAudio {
@@ -297,7 +312,10 @@ impl Reply {
                 .map_err(|e| RpcError::internal(format!("sequence list is not serializable: {e}"))),
             (
                 Reply::Sequence(sequence),
-                Call::SequenceUse { .. } | Call::SequenceAdd { .. } | Call::SequenceAudio { .. },
+                Call::SequenceUse { .. }
+                | Call::SequenceAdd { .. }
+                | Call::SequenceDerive { .. }
+                | Call::SequenceAudio { .. },
             ) => serde_json::to_value(sequence).map_err(|e| {
                 RpcError::internal(format!("sequence reply is not serializable: {e}"))
             }),
@@ -354,9 +372,10 @@ impl Reply {
             Call::Hello => serde_json::from_value(result).map(Reply::Hello),
             Call::TimelineEdl { .. } => serde_json::from_value(result).map(Reply::Edl),
             Call::SequenceList => serde_json::from_value(result).map(Reply::Sequences),
-            Call::SequenceUse { .. } | Call::SequenceAdd { .. } | Call::SequenceAudio { .. } => {
-                serde_json::from_value(result).map(Reply::Sequence)
-            }
+            Call::SequenceUse { .. }
+            | Call::SequenceAdd { .. }
+            | Call::SequenceDerive { .. }
+            | Call::SequenceAudio { .. } => serde_json::from_value(result).map(Reply::Sequence),
             Call::MediaList | Call::MediaAdd { .. } => {
                 serde_json::from_value(result).map(Reply::Media)
             }
@@ -490,8 +509,9 @@ impl SequenceList {
     }
 }
 
-/// `sequence.use` / `sequence.add` result: the affected sequence and the
-/// active id after the call (an add does not switch; a use does).
+/// `sequence.use` / `sequence.add` / `sequence.derive` result: the affected
+/// sequence and the active id after the call (add/derive do not switch; a use
+/// does).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SequenceReply {
     pub revision: u64,
