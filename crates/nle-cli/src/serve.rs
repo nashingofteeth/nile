@@ -7,7 +7,8 @@
 //! `action.apply` and the dedicated `undo`/`redo` aliases. Sequence and media
 //! writes are separate model paths, but they use the same writeability,
 //! revision and save/poison helpers; a failed save, or a handler that panicked
-//! with the shared lock held, poisons every later write while reads continue.
+//! with the shared lock held, poisons every later project mutation (including
+//! `job.submit`) while reads continue.
 //!
 //! stdout is the protocol channel. Nothing here may `say!` or print; errors
 //! leave through the JSON-RPC response, and `main` sends command failures to
@@ -490,6 +491,9 @@ impl Handler for ConnectionHandler {
                 handler
                     .poisoned
                     .get_or_insert_with(|| "a connection handler panicked".into());
+                // The panicking call never got a reply, so its queued events
+                // must not leak to this connection either.
+                handler.events.clear();
                 self.shared.clear_poison();
                 handler
             }
@@ -663,6 +667,10 @@ impl ServeHandler {
     /// Queue an export of the project **as it is now**. CAS guards that the
     /// client named the revision it saw; the snapshot is written before the
     /// record, so an edit after submit cannot change this render.
+    ///
+    /// The snapshot is project data written from memory, so a failed save or
+    /// a panicked handler must gate it like a model write: rendering a
+    /// half-applied, unsaved state would make the read-only latch a lie.
     fn job_submit(
         &mut self,
         base_revision: u64,
@@ -670,6 +678,7 @@ impl ServeHandler {
         sequence: u32,
         export: nle_core::jobs::JobExport,
     ) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
         self.check_revision(base_revision)?;
         let output = crate::cmd::import::expand_tilde(output);
         if !output.is_absolute() {
