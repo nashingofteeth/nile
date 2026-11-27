@@ -60,7 +60,12 @@ entry, and edits still take an explicit `--at`.
   gap.
 
 Implemented by capturing an anchor before `history.apply` and resolving it
-after (`run.resume` for the pool).
-`playhead_placement_after_each_action` is the audit table (one row per rule);
-`the_playhead_clamps_to_the_last_frame_after_a_trim` and
-`a_track_removal_leaves_the_playhead_put` guard the two clamps above.
+after (`run.resume` for the pool). The per-action table
+`playhead_placement_after_each_action` pins where each key lands; the rules
+one row cannot carry have their own guards:
+`tui_undo_restores_the_pre_edit_position_through_run_action` and
+`redo_restores_the_clamped_pre_edit_position` (the undo/redo restore),
+`tail_extend_commit_lands_on_the_new_end` (the committed edge),
+`non_reanchoring_actions_leave_the_playhead_put` (`reanchors`, one row per
+excluded action), `the_playhead_clamps_to_the_last_frame_after_a_trim` and
+`a_track_removal_leaves_the_playhead_put`.
