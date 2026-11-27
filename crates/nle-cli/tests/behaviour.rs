@@ -593,6 +593,45 @@ fn annotation_check_passes_a_matching_render_and_fails_a_wrong_camera() {
 }
 
 #[test]
+fn annotation_add_help_and_default_agree_on_zero_min_confidence() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2, green 2–4, blue 4–6 at 30 fps
+
+    // The doc comment is the help text, so a promised default that the
+    // mapping does not take makes the check look stricter than it is. Scope
+    // the assertion to this flag: the help also prints `(default 0)` for
+    // `--tolerance-frames`, so a bare substring would pass by coincidence.
+    let help = s.ok(&["annotation", "add", "--help"]);
+    assert!(
+        help.contains("subject-in-frame: lowest box confidence to count (0..=1, default 0)"),
+        "{help}"
+    );
+
+    // Omitted `--min-confidence` must reach the model as 0.0: every box the
+    // detector retained counts (the product's own floor belongs to analysis).
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "subject-in-frame",
+        "--timeline",
+        "--at",
+        "0.5",
+        "--asset",
+        "1",
+        "--product",
+        "a1-0000000000000000",
+        "--label",
+        "face",
+    ]);
+    let project: serde_json::Value =
+        serde_json::from_str(&s.ok(&["show", "--json"])).expect("show --json");
+    let expect = &project["annotations"][0]["kind"]["expect"];
+    assert_eq!(expect["check"], "subject_in_frame", "{expect}");
+    assert_eq!(expect["min_confidence"], 0.0, "{expect}");
+}
+
+#[test]
 fn analysis_import_stores_a_transcript_and_words_complete_uses_it() {
     let s = Sandbox::new();
     s.base(); // red 0–2, green 2–4, blue 4–6; red's asset is #1
