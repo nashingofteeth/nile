@@ -288,16 +288,19 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             );
         }
         KeyCode::Char('D') => {
-            edit_yank(app, player); // D yanks too
-            run_action(
-                app,
-                player,
-                &Action::Delete {
-                    track: app.active(),
-                    target: Target::At(app.playhead),
-                    ripple: true,
-                },
-            );
+            // D yanks too; a refused yank means the register belongs to the
+            // shell, so don't delete and overwrite its adoption notice.
+            if edit_yank(app, player) {
+                run_action(
+                    app,
+                    player,
+                    &Action::Delete {
+                        track: app.active(),
+                        target: Target::At(app.playhead),
+                        ripple: true,
+                    },
+                );
+            }
         }
         KeyCode::Char('p') => {
             run_action(

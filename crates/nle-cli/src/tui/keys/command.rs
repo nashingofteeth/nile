@@ -265,7 +265,8 @@ pub(crate) fn seek_command(
         Ok(true) => {}
         Ok(false) => {
             app.reload_pending = true;
-            return Some("not saved: nile.json changed on disk — reloading".to_string());
+            let file = app.foreign_file().unwrap_or("the project file").to_string();
+            return Some(format!("not saved: {file} changed on disk — reloading"));
         }
         Err(e) => return Some(format!("save failed: {e}")),
     }

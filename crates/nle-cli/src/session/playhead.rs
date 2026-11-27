@@ -190,3 +190,102 @@ pub fn reanchors(action: &Action) -> bool {
             | Action::CropKey { .. }
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nle_core::Target;
+    use nle_core::annotation::{Anchor as AnnotationAnchor, AnnotationKind, SourceRef};
+    use nle_core::timeline::{Gap, Timeline, TrackKind};
+
+    /// The negative list in `reanchors` is the contract, so every excluded
+    /// variant must classify as "leave it put". `TrackRm` is the
+    /// discriminating case: it re-indexes the track list, so an anchor taken
+    /// against the old active track would resolve against the wrong one.
+    /// The positive control keeps the test from passing if `reanchors` were
+    /// reduced to `false`.
+    #[test]
+    fn non_media_actions_do_not_reanchor() {
+        let excluded = [
+            Action::TrackAdd {
+                kind: TrackKind::Video,
+            },
+            Action::TrackMute { track: 0 },
+            Action::TrackRm { track: 1 },
+            Action::AssetRm { id: 1 },
+            Action::AnnotationAdd {
+                anchor: AnnotationAnchor::Source {
+                    source: SourceRef::Asset { id: 1 },
+                    time: Seconds::from_integer(0),
+                },
+                kind: AnnotationKind::Marker,
+            },
+            Action::AnnotationAddAt {
+                track: 0,
+                at: 1.0,
+                to: None,
+                kind: AnnotationKind::Marker,
+            },
+            Action::AnnotationRemove { id: 1 },
+            Action::AnnotationResolve { id: 1 },
+            Action::CropKey {
+                track: 0,
+                clip: 1,
+                at: 1.0,
+                x: 0.0,
+                y: 0.0,
+                w: 50.0,
+                h: 50.0,
+            },
+        ];
+        for action in &excluded {
+            assert!(!reanchors(action), "{action:?} leaves the playhead put");
+        }
+        // A media edit still takes the anchor branch.
+        assert!(reanchors(&Action::Delete {
+            track: 0,
+            target: Target::At(4.0),
+            ripple: true,
+        }));
+    }
+
+    fn shortened_project() -> Project {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        p.timeline = Timeline {
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                muted: false,
+                segments: vec![Segment::Gap(Gap {
+                    duration: Seconds::from_integer(2),
+                })],
+            }],
+        };
+        p
+    }
+
+    /// `land`'s own clamp: a recorded undo/redo frame past the shortened
+    /// timeline's final frame lands on `last_frame`, never `end`. The
+    /// end-to-end counterpart is
+    /// `tui::tests::playhead::redo_restores_the_clamped_pre_edit_position`,
+    /// which also sees `persist_playhead`'s `set_playhead` clamp.
+    #[test]
+    fn a_restored_frame_past_the_end_clamps_to_last_frame() {
+        let project = shortened_project(); // 2 s
+        let last = secs_f64(&project.last_frame());
+        assert!(last < 6.0, "the recorded frame is past the end");
+        let landed = land(
+            &project,
+            6.0,
+            0,
+            None,
+            &Action::Undo,
+            &Outcome {
+                desc: "undo".into(),
+                changed: true,
+                playhead: Some(180), // 6 s at 30 fps
+            },
+        );
+        assert_eq!(landed, Some(last), "clamped to the final frame");
+    }
+}

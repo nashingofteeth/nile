@@ -1,13 +1,14 @@
 //! `nile serve --stdio`: the protocol handler over a loaded project.
 //!
 //! The server state is a [`Session`] — project, history, register, and path —
-//! plus the queued events and the save-failure poison. Every action mutation
+//! plus the queued events and the read-only poison. Every action mutation
 //! goes through [`ServeHandler::apply`], so compare-and-swap, the edit,
 //! playhead conversion, persistence, and event emission cannot drift between
 //! `action.apply` and the dedicated `undo`/`redo` aliases. Sequence and media
 //! writes are separate model paths, but they use the same writeability,
-//! revision and save/poison helpers; a failed save still poisons every later
-//! write.
+//! revision and save/poison helpers; a failed save, or a handler that panicked
+//! with the shared lock held, poisons every later project mutation (including
+//! `job.submit`) while reads continue.
 //!
 //! stdout is the protocol channel. Nothing here may `say!` or print; errors
 //! leave through the JSON-RPC response, and `main` sends command failures to
@@ -479,11 +480,22 @@ impl Handler for ConnectionHandler {
         let mut handler = match self.shared.lock() {
             Ok(handler) => handler,
             Err(poisoned) => {
+                // A handler panicked while it held this lock. The value is
+                // still sound (only the mutex is marked poisoned), but the
+                // project may hold a half-applied edit, so latch the handler
+                // read-only *before* clearing the poison: `ensure_writable`
+                // then refuses every later mutation while reads keep
+                // working. Clearing the poison only stops every call from
+                // taking this branch; it cannot re-enable a write.
                 let mut handler = poisoned.into_inner();
-                handler.poisoned = Some("a connection handler panicked".into());
-                return Err(RpcError::internal(
-                    "server is read-only after a handler panic",
-                ));
+                handler
+                    .poisoned
+                    .get_or_insert_with(|| "a connection handler panicked".into());
+                // The panicking call never got a reply, so its queued events
+                // must not leak to this connection either.
+                handler.events.clear();
+                self.shared.clear_poison();
+                handler
             }
         };
         let reply = handler.handle(call);
@@ -655,6 +667,10 @@ impl ServeHandler {
     /// Queue an export of the project **as it is now**. CAS guards that the
     /// client named the revision it saw; the snapshot is written before the
     /// record, so an edit after submit cannot change this render.
+    ///
+    /// The snapshot is project data written from memory, so a failed save or
+    /// a panicked handler must gate it like a model write: rendering a
+    /// half-applied, unsaved state would make the read-only latch a lie.
     fn job_submit(
         &mut self,
         base_revision: u64,
@@ -662,6 +678,7 @@ impl ServeHandler {
         sequence: u32,
         export: nle_core::jobs::JobExport,
     ) -> Result<Reply, RpcError> {
+        self.ensure_writable()?;
         self.check_revision(base_revision)?;
         let output = crate::cmd::import::expand_tilde(output);
         if !output.is_absolute() {
@@ -737,7 +754,7 @@ impl ServeHandler {
     fn ensure_writable(&self) -> Result<(), RpcError> {
         match &self.poisoned {
             Some(reason) => Err(RpcError::internal(format!(
-                "server is read-only after a failed save: {reason}"
+                "server is read-only after a failure: {reason}"
             ))),
             None => Ok(()),
         }
@@ -1524,6 +1541,173 @@ mod tests {
             handler.handle(&Call::ProjectShow),
             Ok(Reply::Project(_))
         ));
+    }
+
+    /// A panicking handler poisons the shared mutex, but a later connection
+    /// must still read: only writes become unavailable. The test-only handler
+    /// applies a real batch through the session under the same guard
+    /// `ConnectionHandler::handle` takes, skips `save_or_poison`, and panics
+    /// while still holding it — the interrupted-batch state the latch exists
+    /// for. The applied project travels to this thread over a channel first,
+    /// so a failed mutation cannot pass on the deliberate panic alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_panicked_handler_leaves_reads_available() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(Seconds::from_integer(30));
+        project.save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start(&path).expect("queue");
+        let shared = Arc::new(Mutex::new(ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: None,
+            jobs,
+        }));
+
+        let (applied_tx, applied_rx) = std::sync::mpsc::channel();
+        let panicking = Arc::clone(&shared);
+        // The `-> ()` return type keeps `join()` a plain `Result<(), _>`: a
+        // body that only panics would infer `!`, making `Ok` uninhabited and
+        // `let Err(..) = join() else` an irrefutable pattern (clippy
+        // `irrefutable_let_patterns` under `-D warnings`).
+        let thread = thread::spawn(move || -> () {
+            let mut handler = panicking.lock().expect("unpoisoned");
+            let batch = handler
+                .session
+                .apply_actions(
+                    &[Action::TrackAdd {
+                        kind: TrackKind::Audio,
+                    }],
+                    0.0,
+                )
+                .expect("the batch applies");
+            assert!(batch.outcome.changed, "the edit mutated the model");
+            // The panicked call would have queued this before unwinding.
+            handler.events.push(Event::ProjectChanged { revision: 1 });
+            applied_tx
+                .send(handler.session.project().clone())
+                .expect("send the unsaved project");
+            panic!("test handler panicked while holding the lock");
+        });
+        let Err(payload) = thread.join() else {
+            panic!("the test handler must panic");
+        };
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"test handler panicked while holding the lock"),
+            "the deliberate panic, not a setup failure"
+        );
+        let applied = applied_rx.recv().expect("the edit was applied");
+        assert_eq!(
+            applied.revision, 1,
+            "the in-memory edit never reached the project file"
+        );
+        assert_eq!(
+            applied.active_sequence().timeline.tracks.len(),
+            2,
+            "the applied batch added an audio track"
+        );
+
+        // A later connection recovers the value and keeps reading.
+        let mut reads = ConnectionHandler {
+            shared: Arc::clone(&shared),
+            events: Vec::new(),
+        };
+        assert!(matches!(reads.handle(&Call::Hello), Ok(Reply::Hello(_))));
+        assert!(
+            reads.take_events().is_empty(),
+            "the panicked call's queued events are dropped"
+        );
+        let Reply::Project(shown) = reads.handle(&Call::ProjectShow).expect("project.show") else {
+            panic!("expected a project");
+        };
+        assert_eq!(
+            shown.revision, 1,
+            "reads reflect the interrupted, unsaved edit"
+        );
+        assert_eq!(shown.active_sequence().timeline.tracks.len(), 2);
+        assert!(shared.lock().is_ok(), "the mutex poison was cleared");
+
+        // The latched flag, not the mutex, refuses the next mutation.
+        let refused = reads
+            .handle(&Call::ActionApply {
+                base_revision: shown.revision,
+                actions: vec![Action::TrackAdd {
+                    kind: TrackKind::Audio,
+                }],
+                from: None,
+            })
+            .expect_err("a mutation after a panic is refused");
+        assert_eq!(refused.code, nle_protocol::INTERNAL_ERROR);
+        assert_eq!(
+            refused.message,
+            "internal error: server is read-only after a failure: a connection handler panicked"
+        );
+
+        // A submit snapshots project data too, so it is gated as well.
+        let refused = reads
+            .handle(&Call::JobSubmit {
+                base_revision: shown.revision,
+                output: dir.path().join("out.mp4"),
+                sequence: shown.active_id(),
+                export: nle_core::jobs::JobExport::default(),
+            })
+            .expect_err("a job submit after a panic is refused");
+        assert_eq!(refused.code, nle_protocol::INTERNAL_ERROR);
+        assert!(refused.message.contains("read-only"), "{}", refused.message);
+        assert!(
+            shared
+                .lock()
+                .expect("still usable")
+                .jobs
+                .list()
+                .expect("list jobs")
+                .is_empty(),
+            "the refused submit took no snapshot"
+        );
+        assert!(
+            shared.lock().expect("still usable").poisoned.is_some(),
+            "the read-only latch survives the cleared mutex poison"
+        );
+    }
+
+    /// `get_or_insert_with` keeps the first failure: a save error latched
+    /// before the panic still names the save, not the generic panic text.
+    #[cfg(unix)]
+    #[test]
+    fn a_handler_panic_keeps_an_earlier_save_failure_reason() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        Project::new().save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start(&path).expect("queue");
+        let shared = Arc::new(Mutex::new(ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: Some("save failed: disk full".into()),
+            jobs,
+        }));
+
+        let panicking = Arc::clone(&shared);
+        let thread = thread::spawn(move || {
+            let _guard = panicking.lock().expect("unpoisoned");
+            panic!("test handler panicked while holding the lock");
+        });
+        assert!(thread.join().is_err(), "the test handler panicked");
+
+        let mut reads = ConnectionHandler {
+            shared: Arc::clone(&shared),
+            events: Vec::new(),
+        };
+        assert!(matches!(reads.handle(&Call::Hello), Ok(Reply::Hello(_))));
+        assert_eq!(
+            shared.lock().expect("still usable").poisoned.as_deref(),
+            Some("save failed: disk full"),
+            "the earlier save failure is the reason reads report"
+        );
     }
 
     #[test]

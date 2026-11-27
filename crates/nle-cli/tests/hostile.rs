@@ -850,6 +850,46 @@ fn odd_media() {
     );
 }
 
+/// A project saved while its media was valid can be reopened after that file
+/// becomes 0 bytes (a truncated recording, a failed copy). Emptying the saved
+/// path rather than repointing `media[0]` keeps the asset's identity, cache
+/// and anchoring in play; `show` and `seek` still read the model, but `export`
+/// must refuse and leave no render — the add/import probe is not the only path
+/// to a zero-byte asset.
+#[test]
+fn a_saved_project_with_zero_byte_media_is_refused_cleanly() {
+    let s = Sandbox::new();
+    s.local_base(); // init + import red/green/blue + three clips
+    fs::write(s.file("red.mp4"), b"").expect("truncate red.mp4");
+    assert_eq!(
+        fs::metadata(s.file("red.mp4")).expect("red.mp4").len(),
+        0,
+        "the saved asset is now 0 bytes"
+    );
+
+    for argv in [&["show"][..], &["seek", "1"][..]] {
+        let out = s.run(argv);
+        let text = merged(&out);
+        assert!(!text.contains("panicked"), "{argv:?} panicked:\n{text}");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{argv:?} still reads the model:\n{text}"
+        );
+    }
+
+    let export = s.run(&["export", "-o", "z.mp4"]);
+    let text = merged(&export);
+    assert!(!text.contains("panicked"), "export panicked:\n{text}");
+    assert_eq!(
+        export.status.code(),
+        Some(1),
+        "export refuses zero-byte media:\n{text}"
+    );
+    assert!(!s.file("z.mp4").exists(), "the failed export left a file");
+    s.assert_loads("zero-byte media", &text);
+}
+
 #[test]
 fn import_append_requires_an_existing_project() {
     let s = Sandbox::new();
@@ -1196,6 +1236,83 @@ fn non_utf8_argv_is_refused_cleanly() {
         "clap's refusal should name UTF-8:\n{text}"
     );
     s.assert_loads("non-UTF-8 --at", &text);
+}
+
+/// The global `--project` is a path, so a raw-byte spelling must behave like
+/// any other symlink to the project: commands and undo land on the real
+/// `p.json`, and `state_dir`'s `canonicalize` keeps history and the register
+/// under `.nile/p/` — never a lossy directory beside it. Linux-only because
+/// APFS cannot store an invalid-UTF-8 name.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_project_path_resolves_to_the_real_state_dir() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let s = Sandbox::new();
+    s.base();
+    let bad = OsStr::from_bytes(b"bad-\xff.json");
+    std::os::unix::fs::symlink("p.json", s.path().join(bad)).expect("a raw-byte symlink");
+    let before: serde_json::Value = serde_json::from_str(&s.read(P)).expect("the base project");
+
+    let show = s.run_os_on(bad, &[OsStr::new("show")]);
+    let text = merged(&show);
+    assert!(!text.contains("panicked"), "{text}");
+    assert_eq!(
+        show.status.code(),
+        Some(0),
+        "show through the raw name:\n{text}"
+    );
+
+    let split = s.run_os_on(
+        bad,
+        &[OsStr::new("split"), OsStr::new("--at"), OsStr::new("1")],
+    );
+    let text = merged(&split);
+    assert!(!text.contains("panicked"), "{text}");
+    assert_eq!(
+        split.status.code(),
+        Some(0),
+        "split through the raw name:\n{text}"
+    );
+    let split_project: serde_json::Value =
+        serde_json::from_str(&s.read(P)).expect("the split project");
+    assert_ne!(
+        split_project["sequences"][0]["timeline"]["tracks"],
+        before["sequences"][0]["timeline"]["tracks"],
+        "the split wrote the real p.json"
+    );
+    let history = s.path().join(".nile").join("p").join("history.json");
+    assert!(
+        history.exists(),
+        "history landed under .nile/p: {history:?}"
+    );
+
+    let undo = s.run_os_on(bad, &[OsStr::new("undo")]);
+    let text = merged(&undo);
+    assert!(!text.contains("panicked"), "{text}");
+    assert_eq!(
+        undo.status.code(),
+        Some(0),
+        "undo through the raw name:\n{text}"
+    );
+    let after: serde_json::Value = serde_json::from_str(&s.read(P)).expect("the undone project");
+    assert_eq!(
+        after["sequences"][0]["timeline"]["tracks"], before["sequences"][0]["timeline"]["tracks"],
+        "undo restored the real p.json"
+    );
+
+    let mut state: Vec<OsString> = fs::read_dir(s.path().join(".nile"))
+        .expect(".nile")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    state.sort();
+    assert_eq!(
+        state,
+        vec![OsString::from("p")],
+        "state lives only under .nile/p, not a lossy copy"
+    );
+    s.assert_loads("non-UTF-8 --project", &text);
 }
 
 /// The path-flag half: `import` takes a `PathBuf`, but `nile.json` stores
