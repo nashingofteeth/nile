@@ -645,9 +645,11 @@ shared by the TUI and agents — with no clipgen code present.
 ### 7. Toolkit hooks (after the core)
 
 - Snapshot derived sequences landed (`sequence derive --from N --name NAME
-  [--size WxH] [--fps RATE]`; expectations copied, origin records overrides).
-  Presets/regeneration, per-sequence export presets and batch render jobs
-  remain.
+  [--size WxH] [--fps RATE]`; expectations copied, origin records overrides)
+  and batch render jobs landed (`nile job batch --output-dir DIR
+  [--sequence ID]...` queues one `job.submit` per sequence at one revision,
+  deterministic `sequence-<id>.mp4`, refusals before any side effect).
+  Presets/regeneration and per-sequence export presets remain.
 - Marker/chapter annotations in the TUI; transcript and text-based editing
   build on annotations + time maps later.
 - `nile mcp` as a thin protocol adapter; a review/log view that shows

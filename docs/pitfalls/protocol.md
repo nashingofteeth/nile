@@ -212,6 +212,13 @@ not the client owns the plan. A directory that cannot be deleted does not
 abort the pass: it is reported in `failed` while the rest are removed.
 Additive, so `PROTOCOL_VERSION` stays at 5.
 
+`nile job batch` adds no method: it is a client-side loop over `job.submit`.
+It reads `hello` and `sequence.list` once, refuses duplicate or unknown ids and
+an existing `sequence-<id>.mp4` before creating the directory, then submits
+every target with that one `base_revision`. A concurrent model write makes the
+remaining submits fail (the batch names the jobs already queued); it does not
+switch revisions midway.
+
 Job ids are never recycled: `.nile/<stem>/jobs/.next-id` keeps the high-water
 mark, because a pruned or removed highest id would otherwise let the next
 submit reuse it. Removal advances the marker before the directory disappears,
