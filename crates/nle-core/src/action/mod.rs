@@ -216,7 +216,7 @@ pub enum Action {
         clip: u32,
     },
     /// Drop sub-frame stumps and snap to the frame grid (`:purge`).
-    /// Re-baselines the undo stack.
+    /// Recorded as an undoable track-list change; a no-op records nothing.
     PurgeStumps {
         /// `None` = every track.
         track: Option<usize>,
@@ -752,6 +752,15 @@ pub fn run_action(
             // the default for position-addressed targets, not a constraint).
             let ti = resolve_track(project, *track, Target::Clip(*clip))?;
             let batch = edit::set_speed_on(project, ti, *clip, *rate)?;
+            // The current rate builds no ops: report it as unchanged instead
+            // of persisting and reanchoring a project that did not move.
+            if batch.ops.is_empty() {
+                return Ok(Outcome {
+                    desc: batch.desc,
+                    changed: false,
+                    playhead: None,
+                });
+            }
             apply_synced(project, history, ti, batch, from, None)
         }
         Action::Extend {
@@ -1240,19 +1249,43 @@ fn purge_stumps(
         .filter_map(|a| a.duration().map(|d| (a.id, d)))
         .collect();
     let playhead = frame_of(project.fps.as_ref(), from);
+    // Repair each target track on a copy first: a clean project must not
+    // record a `Change::Tracks` whose sides are identical. Compare the
+    // repaired segments (not just the counts) so a bare grid snap, which no
+    // counter reports, still records.
+    let media = |id: u32| durations.get(&id).copied();
+    let mut repairs: Vec<(usize, Vec<Segment>, usize, usize)> = Vec::new();
+    for ti in &indices {
+        let t = project
+            .timeline
+            .track(*ti)
+            .ok_or(EditError::TrackNotFound(*ti))?;
+        let mut clamped = t.clone();
+        let adjusted = edit::clamp_to_media(&mut clamped, &media, fps).len();
+        let (cleaned, dropped) = edit::purge_stumps(&clamped, fps);
+        if cleaned != t.segments {
+            repairs.push((*ti, cleaned, adjusted, dropped));
+        }
+    }
+    if repairs.is_empty() {
+        // Same backstop as `History::apply`'s empty batch: a no-op still
+        // refuses a project that does not validate.
+        project.validate()?;
+        return Ok(Outcome {
+            desc: "purged 0 sub-frame segment(s), adjusted 0 clip(s)".to_string(),
+            changed: false,
+            playhead: None,
+        });
+    }
+    let (mut adjusted, mut dropped) = (0usize, 0usize);
     let desc = history.edit_tracks(project, playhead, |p| {
-        let mut adjusted = 0usize;
-        let mut dropped = 0usize;
-        for ti in &indices {
-            let t = p
-                .timeline
+        for (ti, segments, a, d) in &repairs {
+            p.timeline
                 .track_mut(*ti)
-                .ok_or(EditError::TrackNotFound(*ti))?;
-            let media = |id: u32| durations.get(&id).copied();
-            adjusted += edit::clamp_to_media(t, &media, fps).len();
-            let (cleaned, n) = edit::purge_stumps(t, fps);
-            t.segments = cleaned;
-            dropped += n;
+                .ok_or(EditError::TrackNotFound(*ti))?
+                .segments = segments.clone();
+            adjusted += *a;
+            dropped += *d;
         }
         Ok(format!(
             "purged {dropped} sub-frame segment(s), adjusted {adjusted} clip(s)"

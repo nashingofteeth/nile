@@ -143,6 +143,25 @@ pub fn set_speed_on(
         after: Segment::Clip(after),
     });
 
+    // Setting the rate a clip (and the transition sides it owns) already
+    // plays builds `before == after` ops. Drop them: `History::apply` skips
+    // an empty batch, so `u` does not consume a dead step and redo survives.
+    // Compare the built ops, not the request — the frame-grid rounding is
+    // what decides the final rate.
+    ops.retain(|op| match op {
+        EditOp::Replace { before, after, .. } => before != after,
+        EditOp::Insert { .. } | EditOp::Remove { .. } => true,
+    });
+    if ops.is_empty() {
+        return Ok(Batch {
+            ops,
+            desc: format!(
+                "speed clip #{clip_id} unchanged at {}x",
+                format_seconds(&speed)
+            ),
+        });
+    }
+
     // 0.7× of a 2 s clip is 85.714 frames: the grid takes 86, and the rate
     // that fits is 30/43. The notice says both, so a typed rate that can't
     // land exactly doesn't look like a bug.
