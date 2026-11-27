@@ -13,15 +13,11 @@
 //! leave through the JSON-RPC response, and `main` sends command failures to
 //! stderr.
 
-use std::io;
-#[cfg(unix)]
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
-#[cfg(unix)]
 use std::thread;
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -55,10 +51,25 @@ use crate::session::{Session, playhead};
 pub(crate) fn cmd_serve(project_path: &Path, stdio: bool) -> Result<()> {
     if stdio {
         let handler = build_handler(project_path)?;
-        let stdin = io::stdin();
         let stdout = io::stdout();
-        let mut server = Server::new(stdin.lock(), stdout.lock(), handler);
-        server.serve().context("serve the project protocol")?;
+        // Same partial-frame policy as a socket connection: the pump makes
+        // stdin pollable, so a frame with no newline cannot wedge the process.
+        let reader = BufReader::new(FrameDeadline::new(
+            StdinPump::spawn()?,
+            PARTIAL_FRAME_DEADLINE,
+            FRAME_POLL,
+        ));
+        let mut server = Server::new(reader, stdout.lock(), handler);
+        match server.serve() {
+            Ok(()) => {}
+            Err(nle_protocol::ServerError::Io(e)) if e.kind() == io::ErrorKind::TimedOut => {
+                log::line(&format!(
+                    "stdio connection closed: partial frame exceeded \
+                     {PARTIAL_FRAME_DEADLINE:?} without a newline"
+                ));
+            }
+            Err(e) => return Err(e).context("serve the project protocol"),
+        }
         return Ok(());
     }
     #[cfg(unix)]
@@ -177,12 +188,10 @@ fn acquire_lock(project_path: &Path, socket: &Path, lock: &Path) -> Result<LockG
 }
 
 /// Default grace period between the first byte of a frame and its newline.
-#[cfg(unix)]
 const PARTIAL_FRAME_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Socket read timeout. The adapter wakes this often to poll for the partial
+/// Read timeout. The adapter wakes this often to poll for the partial
 /// deadline; it is not an idle timeout.
-#[cfg(unix)]
 const FRAME_POLL: Duration = Duration::from_millis(100);
 
 /// A `Read` adapter that leaves idle connections alone but gives up on a
@@ -196,10 +205,13 @@ const FRAME_POLL: Duration = Duration::from_millis(100);
 /// the last newline have arrived, their `deadline` starts ticking; on
 /// expiry it returns `TimedOut`, which ends only this connection's serve loop.
 ///
+/// The deadline is checked after a successful read as well as after a poll:
+/// a peer that trickles a byte just inside `poll` would otherwise keep every
+/// read in the `Ok` arm and never reach the check.
+///
 /// The inner reader is a type parameter so tests can script reads instead of
 /// waiting on a real peer. `new` takes both durations so tests use tens of
 /// milliseconds.
-#[cfg(unix)]
 struct FrameDeadline<S> {
     inner: S,
     deadline: Duration,
@@ -208,7 +220,6 @@ struct FrameDeadline<S> {
     partial_since: Option<Instant>,
 }
 
-#[cfg(unix)]
 impl<S> FrameDeadline<S> {
     fn new(inner: S, deadline: Duration, poll: Duration) -> Self {
         Self {
@@ -232,6 +243,13 @@ impl<S> FrameDeadline<S> {
         }
     }
 
+    /// Whether the pending frame has outlived its grace period. Time-based,
+    /// not read-count-based, so a byte every 50 ms cannot reset it.
+    fn expired(&self) -> bool {
+        self.partial_since
+            .is_some_and(|start| start.elapsed() >= self.deadline)
+    }
+
     fn deadline_error(&self) -> io::Error {
         io::Error::new(
             io::ErrorKind::TimedOut,
@@ -243,15 +261,21 @@ impl<S> FrameDeadline<S> {
     }
 }
 
-#[cfg(unix)]
 impl<S: Read> Read for FrameDeadline<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.inner.read(buf) {
-                Ok(read) => {
+                Ok(read) if read > 0 => {
+                    // Check the frame that was pending *before* this read: a
+                    // newline arriving after the deadline does not rescue it,
+                    // and bytes without one cannot move the start.
+                    if self.expired() {
+                        return Err(self.deadline_error());
+                    }
                     self.observe(&buf[..read], Instant::now());
                     return Ok(read);
                 }
+                Ok(_) => return Ok(0),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e)
                     if matches!(
@@ -259,15 +283,84 @@ impl<S: Read> Read for FrameDeadline<S> {
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                     ) =>
                 {
-                    if self
-                        .partial_since
-                        .is_some_and(|start| start.elapsed() >= self.deadline)
-                    {
+                    if self.expired() {
                         return Err(self.deadline_error());
                     }
                     thread::sleep(self.poll);
                 }
                 Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+/// A pollable stdin. `Stdin` has no `set_read_timeout`, so a helper thread owns
+/// the blocking read and forwards each non-empty chunk over a one-slot channel;
+/// an empty channel is `WouldBlock` and a closed one is EOF. That lets
+/// [`FrameDeadline`] apply the same partial-frame policy to `--stdio` as to a
+/// socket without ever letting an idle pipe wedge the process.
+struct StdinPump {
+    chunks: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    eof: bool,
+}
+
+impl StdinPump {
+    fn spawn() -> Result<Self> {
+        let (tx, chunks) = std::sync::mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("nile-stdin".into())
+            .spawn(move || {
+                let stdin = io::stdin();
+                let mut stdin = stdin.lock();
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            if tx.send(Ok(buf[..read].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            break;
+                        }
+                    }
+                }
+            })
+            .context("spawn the stdin pump")?;
+        Ok(Self {
+            chunks,
+            pending: Vec::new(),
+            eof: false,
+        })
+    }
+}
+
+impl Read for StdinPump {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if !self.pending.is_empty() {
+                let read = buf.len().min(self.pending.len());
+                buf[..read].copy_from_slice(&self.pending[..read]);
+                self.pending.drain(..read);
+                return Ok(read);
+            }
+            if self.eof {
+                return Ok(0);
+            }
+            match self.chunks.try_recv() {
+                Ok(Ok(chunk)) => self.pending = chunk,
+                Ok(Err(e)) => return Err(e),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.eof = true,
             }
         }
     }
@@ -1538,5 +1631,45 @@ mod tests {
             .read(&mut buf)
             .expect("idle after a complete line is allowed");
         assert_eq!(&buf[..read], b"next\n");
+    }
+
+    /// A peer that writes one byte just inside the poll interval. Every inner
+    /// read succeeds, so the `Ok` arm must enforce the deadline itself; only
+    /// the `WouldBlock` path would never run.
+    struct Trickle {
+        gap: Duration,
+    }
+
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            thread::sleep(self.gap);
+            buf[0] = b' ';
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn a_trickle_without_a_newline_still_hits_the_deadline() {
+        let mut reader = FrameDeadline::new(
+            Trickle {
+                gap: Duration::from_millis(2),
+            },
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        );
+        let mut buf = [0u8; 64];
+        let mut result = Ok(0);
+        for _ in 0..200 {
+            result = reader.read(&mut buf);
+            if result.is_err() {
+                break;
+            }
+        }
+        let error = result.expect_err("a trickle cannot postpone the deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("partial frame"), "{error}");
     }
 }

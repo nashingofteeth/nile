@@ -1259,6 +1259,54 @@ fn socket_is_the_default_and_is_single_writer() {
     let _ = std::fs::remove_file(nle_core::state::session_lock_path(&sandbox.file(P)));
 }
 
+/// The stdio transport has no `set_read_timeout`, but it must enforce the same
+/// partial-frame policy as a socket: bytes with no newline end the process,
+/// not an idle wait. The outer bound is generous because the real deadline is 5 s.
+#[test]
+fn stdio_partial_frame_cannot_wedge() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let sandbox = Sandbox::new();
+    sandbox.ok(&["init"]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nile"))
+        .current_dir(sandbox.path())
+        .args(["--project", P, "serve", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn nile serve --stdio");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    // Bytes, no newline. Keep the pipe open so only the deadline can end it.
+    stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1")
+        .expect("write a partial frame");
+    stdin.flush().expect("flush");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    drop(stdin);
+    let status = status.expect("serve must not wedge on a partial frame");
+    assert!(
+        status.success(),
+        "a partial frame ends the stdio server cleanly: {status:?}"
+    );
+}
+
 #[test]
 fn playhead_set_moves_the_shared_cursor() {
     let sandbox = Sandbox::new();

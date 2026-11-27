@@ -281,10 +281,13 @@ durable record.
   answered. JSON-RPC batches are not supported.
 - `MAX_LINE` is 64 MiB of payload (excluding the newline); an over-cap line
   ends the connection with `LineTooLong`.
-- Timeouts belong to the socket owner (`set_read_timeout`), not this crate.
-  `nile serve` keeps an idle connection open indefinitely, but once a frame
-  has bytes and no newline it closes only that connection after 5 s
-  (`FrameDeadline` in `crates/nle-cli/src/serve.rs`).
+- Timeouts belong to the transport owner, not this crate: the socket uses
+  `set_read_timeout`, `--stdio` polls a pump thread. Both keep an idle
+  connection open indefinitely, and both give a frame 5 s from its first byte
+  to reach a newline — bytes that keep flowing do not extend it
+  (`FrameDeadline` in `crates/nle-cli/src/serve.rs`). On expiry a socket
+  connection closes; `--stdio` has one connection, so it ends the process
+  cleanly (exit 0).
 - `deny_unknown_fields` covers call params and nested action fields; a typo is
   invalid-params, not a silent default.
 - A null-id error is surfaced as `ClientError::Server`, preserving its code.
