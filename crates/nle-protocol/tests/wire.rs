@@ -10,7 +10,7 @@ use nle_core::expect::{CheckOutcome, CheckReport, CheckSummary, ReportRef};
 use nle_core::jobs::{ExportPreset, JobExport, JobProgress, JobRecord, JobState};
 use nle_core::{
     Action, AnnotationStatus, AudioSettings, CheckResult, Project, ProjectDiff, Seconds,
-    TransitionKind, TransitionLen,
+    TransitionKind, TransitionLen, VideoSettings,
 };
 use nle_protocol::{
     AnalysisHash, AnnotationList, Call, Client, ClientError, Event, Handler, INTERNAL_ERROR,
@@ -141,6 +141,19 @@ impl Handler for Fake {
                     revision: self.revision,
                     active: 1,
                     sequence: summary(2, name),
+                }))
+            }
+            Call::SequenceDerive {
+                base_revision,
+                name,
+                ..
+            } => {
+                self.check(*base_revision)?;
+                self.revision += 1;
+                Ok(Reply::Sequence(SequenceReply {
+                    revision: self.revision,
+                    active: 1,
+                    sequence: summary(3, name),
                 }))
             }
             Call::SequenceAudio {
@@ -376,6 +389,13 @@ fn all_calls() -> Vec<Call> {
         Call::SequenceAdd {
             base_revision: 0,
             name: "Vertical".into(),
+            fps: Some(Seconds::from_integer(30)),
+            video: None,
+        },
+        Call::SequenceDerive {
+            base_revision: 0,
+            from: 1,
+            name: "Vertical copy".into(),
             fps: Some(Seconds::from_integer(30)),
             video: None,
         },
@@ -640,6 +660,30 @@ fn golden_sequence_calls_and_events() {
         call
     );
 
+    let call = Call::SequenceDerive {
+        base_revision: 7,
+        from: 1,
+        name: "Vertical copy".into(),
+        fps: Some(Seconds::new(30_000, 1001)),
+        video: Some(VideoSettings {
+            width: 1080,
+            height: 1920,
+        }),
+    };
+    let request = Request::new(
+        Id::from(2u64),
+        call.method(),
+        call.params().expect("params"),
+    );
+    assert_eq!(
+        serde_json::to_string(&request).expect("serialize"),
+        r#"{"jsonrpc":"2.0","id":2,"method":"sequence.derive","params":{"base_revision":7,"fps":"30000/1001","from":1,"name":"Vertical copy","video":{"height":1920,"width":1080}}}"#
+    );
+    assert_eq!(
+        Call::decode(call.method(), call.params().expect("params")).expect("decode"),
+        call
+    );
+
     let call = Call::SequenceAudio {
         base_revision: 7,
         audio: AudioSettings {
@@ -702,6 +746,24 @@ fn typed_sequence_helpers_match_their_calls() {
         .expect("sequence add");
     assert_eq!(added.revision, 8);
     assert_eq!(added.sequence.id, 2);
+
+    let (_, output) = exchange(
+        &mut Fake::new(7),
+        Call::SequenceDerive {
+            base_revision: 7,
+            from: 1,
+            name: "Vertical copy".into(),
+            fps: None,
+            video: None,
+        },
+    );
+    let mut client = Client::new(Cursor::new(output), Vec::new());
+    let derived = client
+        .derive_sequence(7, 1, "Vertical copy", None, None)
+        .expect("sequence derive");
+    assert_eq!(derived.revision, 8);
+    assert_eq!(derived.sequence.id, 3);
+    assert_eq!(derived.sequence.name, "Vertical copy");
 
     let (_, output) = exchange(&mut Fake::new(7), Call::MediaList);
     let mut client = Client::new(Cursor::new(output), Vec::new());

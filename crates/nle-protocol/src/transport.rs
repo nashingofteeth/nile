@@ -303,6 +303,27 @@ impl<R: BufRead, W: Write> Client<R, W> {
         }
     }
 
+    /// Copy a sequence snapshot into a new sequence (not active).
+    pub fn derive_sequence(
+        &mut self,
+        base_revision: u64,
+        from: u32,
+        name: impl Into<String>,
+        fps: Option<Seconds>,
+        video: Option<VideoSettings>,
+    ) -> Result<SequenceReply, ClientError> {
+        match self.call(Call::SequenceDerive {
+            base_revision,
+            from,
+            name: name.into(),
+            fps,
+            video,
+        })? {
+            Reply::Sequence(reply) => Ok(reply),
+            other => Err(ClientError::UnexpectedReply(other.kind())),
+        }
+    }
+
     /// Set the active sequence's audio-post settings (a model write guarded
     /// by CAS). Returns the affected sequence and the active id.
     pub fn set_audio(
