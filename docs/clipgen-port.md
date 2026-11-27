@@ -151,9 +151,10 @@ returned on the terminal event / record.
 3. **Batch jobs and async events.** The queue can accept N submissions, but
    each is a separate snapshot and the client must poll. A batch helper belongs
    above the protocol; async push remains deferred.
-4. **Scale/offset geometry.** `subject-in-frame` marks blends and
-   `Scale`/`Offset` frames unverifiable; the visible-window model is a model
-   slice, not a toolkit workaround. `work-in-frame` still checks crop only.
+4. **Scale/offset geometry.** Landed: `Effect::geometry` is the export's own
+   source/canvas tracker, and `subject-in-frame`/`work-in-frame` compose static
+   crop+scale+offset through it. Keyed crops keep their percentage window;
+   mixing a keyed crop with another effect remains unverifiable.
 5. **Chunked cancellation.** Jobs deliberately exclude the parallel knob; a
    job renders one cancellable graph. Do not promise chunked cancellation
    through the job API without a scheduler redesign.

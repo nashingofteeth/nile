@@ -304,16 +304,18 @@ check, never a sample of the composited render:
 2. For each frame, `RenderReport::locate` gives `(clip, asset, source)`.
    A different asset on screen and a black frame **fail**; a blend frame is
    **unverifiable** (there is no single source picture).
-3. `clip.timeline_offset_of(source)` maps source → clip-relative timeline,
-   then `crop_segments`/`window_at` gives the visible crop window (the same
-   base→first-key ramp the exporter uses). `scale`/`offset` are
-   **unverifiable** because the visible window is not modelled yet.
+3. `clip.timeline_offset_of(source)` maps source → clip-relative timeline.
+   A static chain calls `Effect::geometry` (the export's own `Content`
+   tracker) for the visible box and the source→canvas projection; a keyed
+   crop uses `crop_segments`/`window_at` (the same base→first-key ramp the
+   exporter uses). Static `scale`/`offset` are projected, not skipped; a keyed
+   crop mixed with another effect has no render path and is unverifiable.
 4. `SampleGrid::index_at(source)` floors exactly in `i128`; a source time
    before the grid or past its packed frames is **unverifiable**, never a
    guessed frame.
 5. Every box of the label (and `subject_id`, when set) with
    `confidence_milli >= round(min_confidence × 1000)` must have its whole
-   rect inside the crop window after `margin_pct`. A label with no box at a
+   rect inside the visible window after `margin_pct`. A label with no box at a
    covered frame **fails** — this check asserts presence, unlike
    `words_complete`'s vacuous empty-span pass. If the product's retention
    floor is above the check's threshold the answer is **unverifiable** (the
@@ -415,9 +417,14 @@ Landed with subject detection:
   grid that disagrees with the request or a frame count that disagrees with
   `meta.frames`.
 - **Evaluation:** synthetic `SubjectInFrame` products cover inside/outside
-  margin, a crop window, no box, another asset, black, blend, `scale`,
-  grid coverage, incompatible/stale/missing products, label/instance and
-  confidence filtering.
+  margin, a crop window, static crop+scale+offset projection, a keyed crop at
+  each key, no box, another asset, black, blend, grid coverage,
+  incompatible/stale/missing products, label/instance and confidence
+  filtering.
+- **Geometry:** `EffectGeometry` is the export's own tracker, so
+  `Effect::chain`'s final `pad` and `visible`/`project` agree
+  (`effect_geometry_agrees_with_the_chain_it_renders`); a no-op scale stays
+  identity and a zoom/offset clips the box.
 - **End to end:** `behaviour.rs` runs `nile analysis detect --label red`, then
   `annotation add --expect subject-in-frame` and `annotation check` on a real
   export; a crop that excludes the box flips the check to fail.

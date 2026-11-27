@@ -52,20 +52,25 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   - `crop-stable [--max-move P] [--no-hold-size]`: the crop never moves faster
     than P percentage points per second (default 25) and, unless
     `--no-hold-size`, keeps its size.
-  - `work-in-frame [--margin P]`: every crop keeps P% of the picture on all
-    four sides (default 5).
+  - `work-in-frame [--margin P]`: the visible picture keeps P% of the frame on
+    all four sides (default 5). A static chain composes crop/scale/offset
+    through `Effect::geometry`; a keyed crop uses its window at each key, and a
+    chain that leaves the full frame untouched (no-op scale, full-window crop)
+    passes.
   - `subject-in-frame --asset N --product a1-… --label NAME [--subject-id ID]
     [--margin P] [--min-confidence F] [--tolerance-frames N]`: every detected
     box of that label (optionally one detector instance) with confidence at
     least F (default 0.0: every box the product retained) stays inside the
-    clip's crop window with P% of the window on every side (default 5). The
+    clip's visible window with P% of the window on every side (default 5). The
     `a1-…` is the `analysis detect` product for that asset; the detector's own
     retention floor is set there with `--min-confidence`, while this flag only
     narrows what the check consumes. Evaluation maps each output frame through
     the report to its source time, then to the product's sample grid, so it
     checks the delivered picture rather than the clip plan. Missing box is a
-    fail; blend frames, `scale`/`offset`, an out-of-grid frame and a product
-    for another source are unverifiable. Details:
+    fail; blend frames, an out-of-grid frame and a product for another source
+    are unverifiable. Static crop/scale/offset are projected through the same
+    tracker the export uses; a keyed crop keeps its percentage window, and a
+    keyed crop mixed with another effect is unverifiable. Details:
     `docs/pitfalls/analysis.md`.
   - `words-complete [--min-coverage F] [--transcript HASH]`: without a
     transcript, F of the checked frames carry audio (default 1.0). With a
