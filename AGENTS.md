@@ -130,10 +130,9 @@ plainly; never claim a pass you did not observe.
   misread) and the fix is "rebuild it" (`./demo.sh`). Bump the version; no
   migration code. Times are exact rationals (`"30000/1001"`); floats only at
   the ffmpeg/IPC boundary.
-- **Frames are 0-based everywhere** (`f0` = first frame). A timeline of `dur`
-  spans `[0, dur)`; the last representable position is `dur - 1/fps`.
-  Frame→seconds conversions use `checked_frames_to_seconds`; an unrepresentable
-  grid is a typed refusal, never a panic.
+- **Frames are 0-based everywhere** (`f0` = first frame); a `dur` timeline
+  spans `[0, dur)` — last position `dur - 1/fps`. Edit-path frame→seconds
+  conversions use `checked_frames_to_seconds` (typed refusal, never a panic).
 - **Every write path clamps clips to their media.** `Document::save` clamps
   before writing, `History::apply` after every batch; new saves go through
   `Document`, or the model reads past EOF and the export silently truncates.
@@ -183,7 +182,8 @@ plainly; never claim a pass you did not observe.
   sets a directory default (`.nile/config.json`), `--project` overrides. Legacy
   adjacent sidecars are copied in once — don't add scattered state files. The
   playhead stays in `Project.playhead`. The TUI adopts foreign changes and
-  refuses to clobber (`persist_playhead`/`persist_register` → `Ok(false)`).
+  refuses to clobber (`persist_playhead` guards project/history and
+  `persist_register` guards `clipboard.json`, each → `Ok(false)`).
 - **Gaps and the pool.** `Mode::Pool(PoolState)` keeps "pool open" and its
   selection together; tracks are 1-based (0 refused); a shorter track pads
   with a trailing gap. Source marks are keyed by asset id (`view.json`);
@@ -258,8 +258,7 @@ plainly; never claim a pass you did not observe.
   (`{notice} — preview rebuild failed: …`) instead of replacing it.
 - **Case encodes ripple** (`e`/`E`, `i`/`I`, `o`/`O`) everywhere.
   **`hints_for` is the single source of mode hints**; the message panel shows
-  the latest notice only — don't put hint text in the message. `:help`/`?` is
-  an explicit query result, not a mode hint, so it may print the command list.
+  the latest notice only — never hints; `:help` (or `:?`) prints `COMMAND_HELP`.
 - A key-capturing panel forwards valid actions; `m` toggles the pool. Opening
   it notices "media", closing "timeline". Track changes work while it is open:
   they retarget `enter` but keep the asset preview (`select_active_track`).
