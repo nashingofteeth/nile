@@ -560,6 +560,39 @@ fn bool_flags_refuse_inline_values() {
     );
 }
 
+/// The TUI's process commands (`:cache`, `:detect`, `:edl-import`,
+/// `:otio-import`) share [`split_args`] with the edits but parse their flags
+/// in `nle-cli`, never through `action::parse`. A strict clap bool missing
+/// from [`BOOL_FLAGS`] therefore split into a value: `--dry-run=false`
+/// reached `take_bool` as an option with `Some("false")`, which `take_bool`
+/// reads as *present*, so the flag silently meant `true`.
+#[test]
+fn process_bool_flags_are_strict_like_clap() {
+    let (verb, mut f) = split_args("cache prune --dry-run").unwrap();
+    assert_eq!(verb, "cache");
+    assert_eq!(f.positional().as_deref(), Some("prune"));
+    assert!(f.take_bool("dry-run"), "bare --dry-run is true");
+    assert!(f.finish(":cache prune").is_ok(), "the flag was consumed");
+
+    for (spec, flag) in [
+        ("cache prune --dry-run=false", "dry-run"),
+        ("detect --append=false", "append"),
+        ("detect --no-gaps=false", "no-gaps"),
+        ("detect --video-only=false", "video-only"),
+        ("detect --list=false", "list"),
+        ("edl-import --force=false", "force"),
+        ("otio-import --force=false", "force"),
+    ] {
+        match split_args(spec) {
+            Err(ParseError::Invalid(msg)) => assert!(
+                msg.contains(&format!("--{flag} takes no value")),
+                "{spec:?}: {msg}"
+            ),
+            _ => panic!("{spec:?} was accepted"),
+        }
+    }
+}
+
 // Tab-completed paths come back quoted; the shared tokenizer must hand them
 // to `:add`/`:import` as one argument (the shell would do this for the CLI).
 #[test]
