@@ -10,7 +10,7 @@ set -euo pipefail
 
 orig=${1:?usage: refuse-live-session PROJECT}
 project=$orig
-# Match `nile-core/src/state.rs`: where `realpath` exists, an existing project
+# Match `crates/nle-core/src/state.rs`: where `realpath` exists, an existing project
 # resolves symlinks before its state directory is chosen. Without it we fall
 # back to the literal path, so a symlinked project may not be detected.
 if [ -e "$project" ] && command -v realpath >/dev/null; then

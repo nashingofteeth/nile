@@ -268,7 +268,8 @@ The `:` line is the CLI grammar, flag for flag:
 ```
 
 `--at` defaults to the playhead, `--track` to the active track, and `--clip`
-to the clip under the playhead. `:help` lists the current mode’s keys.
+to the clip under the playhead. `:help` lists the `:` commands (the keys panel
+shows the current mode’s keys).
 
 ### Status row
 
