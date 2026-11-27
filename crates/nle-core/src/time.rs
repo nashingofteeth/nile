@@ -83,6 +83,26 @@ pub fn secs_f64(t: &Seconds) -> f64 {
     *t.numer() as f64 / *t.denom() as f64
 }
 
+/// Whole frames in `span` at `fps`, rounded, or `None` when that count does
+/// not fit `i64`. The i128 product keeps `span * fps` exact instead of letting
+/// `Rational64` cross-multiply two `i64`s into an overflow (a debug panic, a
+/// silent wrap in release); an unrepresentable count means the grid is finer
+/// than any position this timeline can encode, so callers leave the value be.
+pub(crate) fn whole_frames(span: Seconds, fps: Seconds) -> Option<i64> {
+    let num = i128::from(*span.numer()) * i128::from(*fps.numer());
+    let den = i128::from(*span.denom()) * i128::from(*fps.denom());
+    if den == 0 {
+        return None;
+    }
+    // Half away from zero, like `Rational64::round`.
+    let rounded = if num >= 0 {
+        (num + den / 2) / den
+    } else {
+        (num - den / 2) / den
+    };
+    i64::try_from(rounded).ok()
+}
+
 /// Timeline frame index for a position (the grid `snap`/history use).
 pub fn frame_of(fps: Option<&Seconds>, t: f64) -> i64 {
     match fps {
@@ -200,18 +220,26 @@ pub fn nominal_fps(fps: Seconds) -> i64 {
     i64::try_from(n / d).unwrap_or(i64::MAX)
 }
 
-/// Convert a timecode to an absolute frame index at `fps`. Drop-frame
-/// timecodes skip two (or four at 59.94) frame numbers per minute except
-/// every tenth minute.
-pub fn timecode_to_frames(tc: Timecode, fps: Seconds, drop_frame: bool) -> i64 {
+/// Convert a timecode to an absolute frame index at `fps`, or `None` when the
+/// frame count does not fit `i64` (a 99-hour timecode at an accepted extreme
+/// rate). Drop-frame timecodes skip two (or four at 59.94) frame numbers per
+/// minute except every tenth minute.
+pub fn timecode_to_frames(tc: Timecode, fps: Seconds, drop_frame: bool) -> Option<i64> {
     let nominal = nominal_fps(fps);
-    let total_minutes = 60 * tc.h as i64 + tc.m as i64;
-    let base = (tc.h as i64 * 3600 + tc.m as i64 * 60 + tc.s as i64) * nominal + tc.f as i64;
+    let total_minutes = 60i64
+        .checked_mul(i64::from(tc.h))?
+        .checked_add(i64::from(tc.m))?;
+    let seconds = i64::from(tc.h)
+        .checked_mul(3600)?
+        .checked_add(i64::from(tc.m).checked_mul(60)?)?
+        .checked_add(i64::from(tc.s))?;
+    let base = seconds.checked_mul(nominal)?.checked_add(i64::from(tc.f))?;
     if drop_frame {
-        let drop = if nominal == 60 { 4 } else { 2 };
-        base - drop * (total_minutes - total_minutes / 10)
+        let drop: i64 = if nominal == 60 { 4 } else { 2 };
+        let dropped = drop.checked_mul(total_minutes.checked_sub(total_minutes / 10)?)?;
+        base.checked_sub(dropped)
     } else {
-        base
+        Some(base)
     }
 }
 
@@ -221,6 +249,28 @@ pub fn timecode_to_frames(tc: Timecode, fps: Seconds, drop_frame: bool) -> i64 {
 /// for by accident.
 pub fn frames_to_seconds(frames: i64, fps: Seconds) -> Option<Seconds> {
     checked_frames_to_seconds(frames, fps)
+}
+
+/// Exact seconds for `frame` at `fps`, or the nearest whole second when the
+/// grid is finer than `Ratio<i64>` can encode. That is the same nearest-safe
+/// bound [`grid_time`] and `Project::last_frame` use: a reader (a render
+/// report, a sample window) never panics on a hostile rate. `fps` must be
+/// positive; the model validates it.
+pub fn frame_to_seconds_nearest(frame: i64, fps: Seconds) -> Seconds {
+    frames_to_seconds(frame, fps).unwrap_or_else(|| {
+        let t = frame as f64 / secs_f64(&fps);
+        Seconds::from_integer(t.round() as i64)
+    })
+}
+
+/// Half of one frame at `fps`, or `None` when the exact half-frame is not
+/// representable. The sampling decode window seeks this much early; dividing
+/// `1/fps` directly would double a denominator that is already near `i64`.
+pub fn half_frame(fps: Seconds) -> Option<Seconds> {
+    checked_div(
+        &checked_div(&Seconds::from_integer(1), &fps)?,
+        &Seconds::from_integer(2),
+    )
 }
 
 // ----------------------------------------------------------- checked rationals
@@ -249,8 +299,10 @@ pub(crate) fn checked_mul(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     checked_ratio(n, d)
 }
 
-/// `a / b`, or `None` on overflow (or a zero divisor).
-pub(crate) fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+/// `a / b`, or `None` on overflow (or a zero divisor). Public so a reader
+/// (a render report, a sample window) can build exact sub-frame margins that
+/// `Ratio<i64>`'s operators would panic on.
+pub fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     if *b.numer() == 0 {
         return None;
     }
@@ -516,7 +568,7 @@ mod tests {
         let fps = Seconds::from_integer(30);
         assert_eq!(nominal_fps(fps), 30);
         let tc = parse_timecode("00:00:01:15").unwrap();
-        assert_eq!(timecode_to_frames(tc, fps, false), 45);
+        assert_eq!(timecode_to_frames(tc, fps, false), Some(45));
     }
 
     #[test]
@@ -525,9 +577,9 @@ mod tests {
         let fps = Seconds::new(30000, 1001);
         assert_eq!(nominal_fps(fps), 30);
         let tc = parse_timecode("00:01:00;02").unwrap();
-        assert_eq!(timecode_to_frames(tc, fps, true), 1800);
+        assert_eq!(timecode_to_frames(tc, fps, true), Some(1800));
         let tc = parse_timecode("00:10:00;00").unwrap();
-        assert_eq!(timecode_to_frames(tc, fps, true), 17982);
+        assert_eq!(timecode_to_frames(tc, fps, true), Some(17982));
         assert_eq!(frames_to_seconds(30, fps), Some(Seconds::new(1001, 1000)));
     }
 
@@ -542,5 +594,50 @@ mod tests {
             Some(Seconds::new(86400, i64::MAX))
         );
         assert_eq!(frames_to_seconds(i64::MAX - 1, fps), None);
+    }
+
+    #[test]
+    fn nearest_frame_seconds_falls_back_to_a_whole_second() {
+        // A tiny rate makes `frame / rate` overflow i64; the reader lands on
+        // the nearest whole second instead of panicking in `Ratio`.
+        let tiny = Seconds::new(1, i64::MAX);
+        assert_eq!(
+            frame_to_seconds_nearest(2, tiny),
+            Seconds::from_integer(i64::MAX)
+        );
+        // An ordinary grid stays exact.
+        assert_eq!(
+            frame_to_seconds_nearest(45, Seconds::from_integer(30)),
+            Seconds::new(3, 2)
+        );
+    }
+
+    #[test]
+    fn half_frame_stays_exact_at_an_extreme_rate() {
+        // `1/fps` is representable, but halving its denominator directly would
+        // overflow; the checked division reduces first.
+        let fps = Seconds::new(i64::MAX, 86400);
+        assert_eq!(
+            half_frame(fps),
+            Some(Seconds::new(43200, i64::MAX)),
+            "half a frame, exactly"
+        );
+        assert_eq!(
+            half_frame(Seconds::from_integer(30)),
+            Some(Seconds::new(1, 60))
+        );
+    }
+
+    #[test]
+    fn a_99_hour_timecode_is_refused_at_an_extreme_rate() {
+        let tc = parse_timecode("99:00:00:00").unwrap();
+        assert_eq!(
+            timecode_to_frames(tc, Seconds::from_integer(30), false),
+            Some(99 * 3600 * 30)
+        );
+        // `99 * 3600` seconds times a nominal rate near `i64::MAX / 86400`
+        // cannot fit i64: refuse rather than panic (or wrap in release).
+        let fps = Seconds::new(i64::MAX, 86400);
+        assert_eq!(timecode_to_frames(tc, fps, false), None);
     }
 }

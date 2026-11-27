@@ -236,7 +236,7 @@ fn audio_channel(channel: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-fn frames_of(tc: Timecode, doc: &EdlDoc, fps: Seconds) -> i64 {
+fn frames_of(tc: Timecode, doc: &EdlDoc, fps: Seconds) -> Option<i64> {
     timecode_to_frames(tc, fps, doc.drop_frame)
 }
 
@@ -277,15 +277,16 @@ pub fn build(
         .iter()
         .filter(|e| channel_has(&e.channel, 'V'))
         .collect();
-    video.sort_by_key(|e| frames_of(e.rec_in, doc, fps));
+    video.sort_by_key(|e| frames_of(e.rec_in, doc, fps).unwrap_or(i64::MAX));
 
     let mut next_id = 1u32;
     // Standard EDLs start record time at 01:00:00:00 — the earliest event
-    // is the timeline origin, not zero.
+    // is the timeline origin, not zero. An unrepresentable frame is skipped
+    // here; `track_of` below refuses its event with a typed error.
     let rec_origin = doc
         .events
         .iter()
-        .map(|e| frames_of(e.rec_in, doc, fps))
+        .filter_map(|e| frames_of(e.rec_in, doc, fps))
         .min()
         .unwrap_or(0);
     // A timecode's frame count can outrun `Ratio<i64>` at an accepted extreme
@@ -298,8 +299,9 @@ pub fn build(
             let mut segs = Vec::new();
             let mut cursor = rec_origin;
             for ev in events {
-                let rec_in = frames_of(ev.rec_in, doc, fps);
-                let rec_out = frames_of(ev.rec_out, doc, fps);
+                let too_long = || BuildError::TooLong { event: ev.num };
+                let rec_in = frames_of(ev.rec_in, doc, fps).ok_or_else(too_long)?;
+                let rec_out = frames_of(ev.rec_out, doc, fps).ok_or_else(too_long)?;
                 if rec_in < cursor {
                     if overlap_ok {
                         continue;
@@ -311,8 +313,12 @@ pub fn build(
                         duration: span(rec_in - cursor, ev.num)?,
                     }));
                 }
-                let src_in = frames_of(ev.src_in, doc, fps) - src_offset_frames;
-                let src_out = frames_of(ev.src_out, doc, fps) - src_offset_frames;
+                let src_in = frames_of(ev.src_in, doc, fps)
+                    .and_then(|frames| frames.checked_sub(src_offset_frames))
+                    .ok_or_else(too_long)?;
+                let src_out = frames_of(ev.src_out, doc, fps)
+                    .and_then(|frames| frames.checked_sub(src_offset_frames))
+                    .ok_or_else(too_long)?;
                 // nile's timeline span for a clip is source / speed, and the
                 // record span is the timeline span the original edit used —
                 // so their ratio IS the speed. Equal spans reduce to 1.
@@ -363,14 +369,16 @@ pub fn build(
         segments: video_segs,
     }];
 
-    // Linked-audio keys: (reel, src_in_frames, src_out_frames).
+    // Linked-audio keys: (reel, src_in_frames, src_out_frames). `track_of`
+    // above already refused an unrepresentable source frame, so these are
+    // `Some`; the sentinel keeps this infallible map panic-free anyway.
     let linked: Vec<(String, i64, i64)> = video
         .iter()
         .map(|e| {
             (
                 e.reel.clone(),
-                frames_of(e.src_in, doc, fps),
-                frames_of(e.src_out, doc, fps),
+                frames_of(e.src_in, doc, fps).unwrap_or(i64::MAX),
+                frames_of(e.src_out, doc, fps).unwrap_or(i64::MAX),
             )
         })
         .collect();
@@ -391,13 +399,13 @@ pub fn build(
                 audio_channel(&e.channel).as_deref() == Some(ch.as_str())
                     && !linked.contains(&(
                         e.reel.clone(),
-                        frames_of(e.src_in, doc, fps),
-                        frames_of(e.src_out, doc, fps),
+                        frames_of(e.src_in, doc, fps).unwrap_or(i64::MAX),
+                        frames_of(e.src_out, doc, fps).unwrap_or(i64::MAX),
                     ))
             })
             .collect();
         let mut evs = evs;
-        evs.sort_by_key(|e| frames_of(e.rec_in, doc, fps));
+        evs.sort_by_key(|e| frames_of(e.rec_in, doc, fps).unwrap_or(i64::MAX));
         if evs.is_empty() {
             continue;
         }
@@ -653,7 +661,8 @@ FCM: NON-DROP FRAME
         let edl = "001 AX V C 01:00:00:00 01:00:02:00 01:00:00:00 01:00:02:00\n";
         let doc = parse(edl).unwrap();
         let fps = Seconds::from_integer(30);
-        let off = timecode_to_frames(parse_timecode("01:00:00:00").unwrap(), fps, false);
+        let off = timecode_to_frames(parse_timecode("01:00:00:00").unwrap(), fps, false)
+            .expect("one hour at 30 fps fits");
         let tl = build(&doc, fps, off, &some_asset).unwrap();
         match &tl.tracks[0].segments[0] {
             Segment::Clip(c) => {

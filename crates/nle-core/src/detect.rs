@@ -10,7 +10,7 @@
 //! source media: every `Span::Media` points back into the same rendered
 //! file, cut at the detected boundaries.
 
-use crate::time::{Seconds, frames_to_seconds};
+use crate::time::{Seconds, frames_to_seconds, whole_frames};
 
 /// A reconstructed span of the rendered source.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,11 +33,15 @@ impl Span {
 /// Snap `t` to the nearest 0-based frame boundary at `fps`. Exact-rational
 /// math — floats at the detector boundary would drift across many cuts.
 fn snap(t: Seconds, fps: Seconds) -> Seconds {
-    let n = (t * fps).round().to_integer();
-    // A grid finer than `Ratio<i64>` can encode has no exact `n/fps`; keep
-    // the unsnapped position, the same nearest-safe bound `grid_time` and
-    // `clamp_to_media` use, instead of panicking in the division.
-    frames_to_seconds(n, fps).unwrap_or(t)
+    // `t * fps` rounds in i128: `Rational64` would cross-multiply two i64s and
+    // panic at an accepted extreme rate (7 s is coprime with 86400, so the
+    // product does not reduce). A grid finer than `Ratio<i64>` can encode has
+    // no exact `n/fps`; keep the unsnapped position, the same nearest-safe
+    // bound `grid_time` and `clamp_to_media` use, instead of panicking.
+    match whole_frames(t, fps) {
+        Some(n) => frames_to_seconds(n, fps).unwrap_or(t),
+        None => t,
+    }
 }
 
 /// Build the spans of a rendered file from its detected `cuts` (media→media
@@ -221,16 +225,17 @@ mod tests {
 
     #[test]
     fn an_extreme_rate_keeps_the_unsnapped_position() {
-        // 5 s at `i64::MAX/86400` fps rounds to a frame count whose seconds
-        // overflow `i64`; the snap falls back to the original position
-        // instead of panicking in the rational division.
+        // 7 s is coprime with 86400, so `7 * i64::MAX` does not reduce and a
+        // `Rational64` multiply would panic. The i128 snap falls back to the
+        // original position instead of panicking in the rational division.
+        // (5 s divides 86400 and would reduce, hiding the bug.)
         let fps = Seconds::new(i64::MAX, 86400);
-        let spans = reconstruct(&[], &[], secs(5), fps, secs(0));
+        let spans = reconstruct(&[], &[], secs(7), fps, secs(0));
         assert_eq!(
             spans,
             vec![Span::Media {
                 start: secs(0),
-                end: secs(5)
+                end: secs(7)
             }]
         );
     }

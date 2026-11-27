@@ -70,9 +70,9 @@ pub use report::{
     FrameLocation, FrameSource, FrameSpan, RenderReport, RenderWindow, SourceSide, frame_edge,
 };
 pub use time::{
-    Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, grid_time,
-    nominal_fps, parse_rate, parse_signed_time, parse_time, parse_timecode, secs_f64,
-    timecode_to_frames,
+    Seconds, Timecode, format_seconds, frame_of, frame_to_seconds_nearest, frame_to_secs,
+    frames_to_seconds, grid_time, half_frame, nominal_fps, parse_rate, parse_signed_time,
+    parse_time, parse_timecode, secs_f64, timecode_to_frames,
 };
 pub use timeline::{
     Clip, Timeline, TimelineError, Track, TrackKind, Transition, TransitionKind, TransitionSource,

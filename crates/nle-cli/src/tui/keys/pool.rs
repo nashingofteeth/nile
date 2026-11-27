@@ -464,9 +464,10 @@ pub(crate) fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
         (Some(d), Some(fps)) => {
             let frames = (secs(&d) * secs(fps)).floor().max(1.0) as i64;
             // A grid finer than `Ratio<i64>` can encode has no exact `n/fps`;
-            // keep the media duration, the same nearest-safe bound
-            // `clamp_to_media` uses, instead of panicking in the division.
-            nle_core::frames_to_seconds(frames, *fps).unwrap_or(d)
+            // snap to the nearest whole second (the same fallback `grid_time`
+            // uses) instead of keeping the raw media duration, which would
+            // drop the whole-frame floor and let a later split strand a stump.
+            nle_core::frame_to_seconds_nearest(frames, *fps)
         }
         (Some(d), None) => d,
         (None, _) => {

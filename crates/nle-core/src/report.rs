@@ -13,7 +13,7 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::project::Project;
-use crate::time::{Seconds, format_seconds, rational_ser, secs_f64};
+use crate::time::{Seconds, format_seconds, frame_to_seconds_nearest, rational_ser, secs_f64};
 use crate::timeline::{Segment, TransitionSource, source_time};
 
 /// The report schema version, independent of `nile.json`/history versions.
@@ -164,7 +164,9 @@ impl RenderReport {
             return None;
         }
         let span = self.span_at(frame)?;
-        let offset = Seconds::from_integer(frame - span.start_frame) / self.fps;
+        // Checked: a report can carry a hostile fps, and `(frame /
+        // span.start_frame) / fps` would panic in `Ratio` at an extreme rate.
+        let offset = frame_to_seconds_nearest(frame - span.start_frame, self.fps);
         let timeline = span.timeline_start + offset;
         Some(match &span.source {
             FrameSource::Clip {
@@ -550,6 +552,36 @@ mod tests {
                 timeline: Seconds::new(1, 2),
                 id: 7
             })
+        );
+    }
+
+    #[test]
+    fn locate_falls_back_to_a_whole_second_at_an_unrepresentable_grid() {
+        // A report is local state and can be hand-edited; `locate` is a reader
+        // and must not panic when a frame / fps pair overflows `Ratio<i64>`.
+        let report = RenderReport {
+            version: REPORT_VERSION,
+            sequence: 1,
+            revision: 0,
+            output: "out.mp4".into(),
+            fps: Seconds::new(1, i64::MAX),
+            duration: Seconds::from_integer(1),
+            frame_count: 3,
+            windows: Vec::new(),
+            frame_map: vec![FrameSpan {
+                start_frame: 0,
+                frames: 3,
+                timeline_start: Seconds::from_integer(0),
+                timeline_end: Seconds::from_integer(1),
+                source: FrameSource::Black,
+            }],
+        };
+        assert_eq!(
+            report.locate(2),
+            Some(FrameLocation::Black {
+                timeline: Seconds::from_integer(i64::MAX),
+            }),
+            "the nearest-safe whole second, not a panic"
         );
     }
 

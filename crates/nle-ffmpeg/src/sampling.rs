@@ -39,8 +39,9 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nle_core::Seconds;
+use nle_core::frame_to_seconds_nearest;
 use nle_core::frames_to_seconds;
-use nle_core::time::format_seconds;
+use nle_core::time::{checked_sub, format_seconds, half_frame};
 use thiserror::Error;
 
 /// Bump when the *meaning* of a sample changes (a different pixel format, a
@@ -1307,14 +1308,20 @@ fn frame_args(spec: &FrameSpec) -> Vec<OsString> {
 /// first index through the frame after the last. The half-frame margin keeps
 /// `-ss` (printed to six decimals by [`format_seconds`]) strictly before the
 /// first wanted frame, so accurate seek keeps it.
+///
+/// Every conversion is checked: `frame / rate` can overflow `i64` at a
+/// hostile rate, so an unrepresentable bound falls back to the nearest whole
+/// second (the same bound `grid_time` uses) instead of panicking in `Ratio`.
 fn index_window(rate: &Seconds, indices: &[u64]) -> (Seconds, Seconds) {
     let first = *indices.first().expect("an index request names frames") as i64;
     let last = *indices.last().expect("an index request names frames") as i64;
-    let frame = Seconds::from_integer(1) / *rate;
-    let start = (Seconds::from_integer(first) / *rate - frame / Seconds::from_integer(2))
-        .max(Seconds::from_integer(0));
-    let end = Seconds::from_integer(last + 1) / *rate;
-    (start, end - start)
+    let zero = Seconds::from_integer(0);
+    let first_at = frame_to_seconds_nearest(first, *rate);
+    let start = checked_sub(&first_at, &half_frame(*rate).unwrap_or(zero))
+        .unwrap_or(first_at)
+        .max(zero);
+    let end = frame_to_seconds_nearest(last.saturating_add(1), *rate);
+    (start, checked_sub(&end, &start).unwrap_or(zero))
 }
 
 /// The exact argv for an audio sample. `atrim=end_sample` makes the sample
@@ -2270,6 +2277,20 @@ mod tests {
         assert!(line.contains("-t 0.216667"), "{line}");
         assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last().map(|a| a.to_str()), Some(Some("-")));
+    }
+
+    #[test]
+    fn an_unrepresentable_index_window_is_built_not_panicked() {
+        // Frame 2 at 1/i64::MAX fps has no representable seconds; the window
+        // falls back to whole seconds instead of panicking in `Ratio`, so the
+        // full argv still builds (ffmpeg will report a clean miss).
+        let spec = index_spec(Path::new("in.mp4"), Seconds::new(1, i64::MAX), vec![2]);
+        let args = frame_args(&spec);
+        let line = args_line(&args);
+        assert!(line.contains("select=eq(n\\,0)"), "{line}");
+        assert!(line.contains("-ss "), "{line}");
+        assert!(line.contains("-t "), "{line}");
+        assert_eq!(args[args.len() - 2], "--");
     }
 
     #[test]
