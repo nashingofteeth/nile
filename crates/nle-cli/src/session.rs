@@ -14,14 +14,14 @@ use std::io::BufReader;
 use std::ops::Deref;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use nle_core::edit::{Actor, EditError, Histories, History, UndoOutcome};
 use nle_core::jobs::{JobExport, JobRecord};
 use nle_core::{
     Action, AudioSettings, Batch, BatchOutcome, Document, Outcome as ActionOutcome, PreviewOutcome,
     Project, ProjectError, Register, VideoSettings, frame_of, grid_time, load_register,
-    save_register, secs_f64,
+    register_path, save_register, secs_f64,
 };
 use nle_protocol::{Client, ClientError, Outcome as WireOutcome, Preview as WirePreview};
 
@@ -69,10 +69,40 @@ struct RemoteSession {
     save_error: Option<String>,
 }
 
+/// A session file's identity as last read or written. Atomic saves rename a
+/// fresh temp into place, so the inode changes even when the filesystem's
+/// mtime granularity is coarser than the write. Mirrors the TUI's `Seen` so a
+/// file writer cannot be mistaken for our own save.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FileStamp {
+    mtime: Option<SystemTime>,
+    len: u64,
+    ino: u64,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    };
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some(FileStamp {
+        mtime: meta.modified().ok(),
+        len: meta.len(),
+        ino,
+    })
+}
+
 /// A loaded project plus the state that travels with it across commands.
 pub struct Session {
     backend: Backend,
     path: PathBuf,
+    /// The register sidecar as we last read/wrote it; a different stamp is a
+    /// file writer's yank and must not be clobbered by our next save.
+    register_stamp: Option<FileStamp>,
 }
 
 impl Session {
@@ -92,6 +122,7 @@ impl Session {
             Ok(Some(remote)) => Ok(Self {
                 backend: Backend::Remote(remote),
                 path: path.to_path_buf(),
+                register_stamp: None,
             }),
             Ok(None) => Self::load(path),
             Err(e) => Err(SessionError::Io(e)),
@@ -101,12 +132,18 @@ impl Session {
     /// Adopt a project and its per-sequence histories (the TUI), and read the
     /// shared register beside `path`.
     pub fn from_histories(project: Project, histories: Histories, path: PathBuf) -> Self {
+        let register = load_register(&path);
+        // Read the stamp *after* `load_register`, which may copy a legacy
+        // sidecar into the state directory: that migration is ours, not a
+        // foreign write.
+        let register_stamp = file_stamp(&register_path(&path));
         Self {
             backend: Backend::Direct {
                 document: Document::with_histories(project, histories),
-                register: load_register(&path),
+                register,
             },
             path,
+            register_stamp,
         }
     }
 
@@ -564,7 +601,11 @@ impl Session {
 
     pub fn save_register(&mut self) -> std::io::Result<()> {
         match &mut self.backend {
-            Backend::Direct { register, .. } => save_register(&self.path, register.as_ref()),
+            Backend::Direct { register, .. } => {
+                save_register(&self.path, register.as_ref())?;
+                self.register_stamp = file_stamp(&register_path(&self.path));
+                Ok(())
+            }
             Backend::Remote(remote) => match remote.take_save_error() {
                 Some(reason) => Err(std::io::Error::other(reason)),
                 None => Ok(()),
@@ -627,8 +668,31 @@ impl Session {
         if changed {
             self.save_history()?;
         }
-        self.save_register()?;
+        if self.register_changed() {
+            // A file writer got there first (`nile yank`): adopt its register
+            // instead of overwriting it. The action that triggered this save
+            // loses its register change, which is the no-clobber guarantee.
+            self.adopt_register();
+        } else {
+            self.save_register()?;
+        }
         Ok(())
+    }
+
+    /// Whether a file writer changed the register since we loaded or last
+    /// saved it. A remote session leaves the file to the server.
+    fn register_changed(&self) -> bool {
+        !self.is_remote() && file_stamp(&register_path(&self.path)) != self.register_stamp
+    }
+
+    /// Take the register now on disk and re-baseline the stamp, so a later
+    /// save writes from the file writer's state rather than its old snapshot.
+    fn adopt_register(&mut self) {
+        if self.is_remote() {
+            return;
+        }
+        self.set_register(load_register(&self.path));
+        self.register_stamp = file_stamp(&register_path(&self.path));
     }
 }
 
@@ -789,6 +853,46 @@ mod remote_tests {
         session.persist().expect("save");
         let again = Session::load(&path).expect("reload");
         assert_eq!(again.project().playhead, nle_core::Seconds::from_integer(1));
+    }
+
+    // The server is the single writer, but a one-shot CLI command is still
+    // file-based: a `nile yank` between load and save must survive `save_if`.
+    #[test]
+    fn save_if_does_not_clobber_a_foreign_register() {
+        let (_dir, path) = seeded();
+        let project = Project::load(&path).expect("load");
+        let ours = Register::of(
+            &project,
+            Segment::Gap(Gap {
+                duration: nle_core::Seconds::from_integer(1),
+            }),
+        );
+        let foreign = Register::of(
+            &project,
+            Segment::Gap(Gap {
+                duration: nle_core::Seconds::from_integer(2),
+            }),
+        );
+        nle_core::save_register(&path, Some(&ours)).expect("seed register");
+        let mut session = Session::load(&path).expect("load");
+        assert_eq!(session.register(), Some(&ours));
+
+        // A file writer replaces the register after we loaded.
+        nle_core::save_register(&path, Some(&foreign)).expect("foreign yank");
+        session.set_register(Some(ours.clone()));
+        session.save_if(true, true).expect("save");
+
+        assert_eq!(
+            nle_core::load_register(&path),
+            Some(foreign.clone()),
+            "the shell's register survived"
+        );
+        assert_eq!(session.register(), Some(&foreign), "and was adopted");
+
+        // The stamp is re-baselined, so the next save writes again.
+        session.set_register(Some(ours.clone()));
+        session.save_if(true, true).expect("save");
+        assert_eq!(nle_core::load_register(&path), Some(ours));
     }
 
     #[test]

@@ -92,8 +92,8 @@ pub(crate) fn trim_key(
 
 /// Run one catalog action — the single path every edit takes, keybind or
 /// `:cmd`: apply through the undo history, reanchor the playhead, persist,
-/// refresh the monitor. Returns whether it applied (the action set its own
-/// notice either way).
+/// refresh the monitor. Returns whether it applied **and saved** (the action
+/// set its own notice either way).
 /// What a delete can take away: clip/transition ids and the segment count.
 /// `dd` on a clip leaves a gap (the count stays), so ids are needed; deleting
 /// a gap keeps the ids, so the count is needed too.
@@ -258,19 +258,67 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
             }
             app.set_message(&outcome.desc);
             // The register is shared with the CLI (`nile yank`/`nile paste`).
-            if app.project.save_register().is_ok() {
-                app.note_register();
+            // Check only *that* file before saving it: the save re-stamps the
+            // file, which would hide the shell's yank from the guard. The
+            // project and its history still save — an unrelated edit must not
+            // be rolled back by a foreign register.
+            match persist_register(app) {
+                Ok(true) => {}
+                Ok(false) if !outcome.changed => {
+                    // A yank's only output is the register, so a refused
+                    // write is the action's result. Normal adopts the shell's
+                    // file now; a held mode leaves it to `watch_foreign`,
+                    // because reloading would invalidate the mode's indices.
+                    if matches!(app.mode, Mode::Normal) {
+                        let file = app.foreign_file().unwrap_or("a session file").to_string();
+                        return adopt_foreign(app, player, &file);
+                    }
+                    return false;
+                }
+                Ok(false) => {}
+                Err(e) => app.fail(&format!("register save failed: {e}")),
             }
             if outcome.changed {
-                persist_and_refresh(app, player);
+                persist_and_refresh(app, player)
+            } else {
+                true
             }
-            true
         }
         Err(e) => {
             app.fail(&crate::edit_message(&e));
             false
         }
     }
+}
+
+/// Save the shared register unless a shell wrote *it* first. `Ok(false)` =
+/// refused, so the caller adopts the file instead of clobbering it — the same
+/// guard as `persist_playhead`, and it must run before the write: saving
+/// re-stamps the file, so a check afterwards can never see the change the
+/// write just covered.
+fn persist_register(app: &mut App) -> std::io::Result<bool> {
+    if app.register_changed() {
+        return Ok(false);
+    }
+    app.project.save_register()?;
+    app.note_register();
+    Ok(true)
+}
+
+/// Adopt the shared file we refused to write over and report the action as
+/// not applied: the reload replaces the state the action changed, so `false`
+/// is the honest answer. Same notice shape as `persist_and_refresh`'s
+/// refusal, naming the file that actually moved.
+fn adopt_foreign(app: &mut App, player: &dyn Mpv, file: &str) -> bool {
+    if let Err(e) = reload_project(app, player, true) {
+        app.fail(&format!("reload failed: {e}"));
+        return false;
+    }
+    let prev = app.message.clone();
+    app.fail(&format!(
+        "{prev} — not saved: {file} changed on disk (reloaded)"
+    ));
+    false
 }
 
 /// Atomic save + view refresh. Called after every successful edit (and
@@ -286,15 +334,8 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) -> bool {
         Ok(false) => {
             // A shell wrote the project first: adopt theirs rather than
             // clobber it, and say so — this edit was not saved.
-            if let Err(e) = reload_project(app, player, true) {
-                app.fail(&format!("reload failed: {e}"));
-                return false;
-            }
-            let prev = app.message.clone();
-            app.fail(&format!(
-                "{prev} — not saved: nile.json changed on disk (reloaded)"
-            ));
-            return false;
+            let file = app.foreign_file().unwrap_or("a session file").to_string();
+            return adopt_foreign(app, player, &file);
         }
         Err(e) => {
             app.fail(&format!("save failed: {e}"));
@@ -370,7 +411,12 @@ pub(crate) fn select_sequence(app: &mut App, player: &dyn Mpv, id: u32) -> Optio
 }
 
 pub(crate) fn edit_delete(app: &mut App, player: &dyn Mpv) {
-    edit_yank(app, player); // dd yanks first (vim: dd fills the register)
+    // dd yanks first (vim: dd fills the register). If that yank was refused
+    // (a shell's register is on disk), don't delete: the composite would save
+    // the project with the shell's register and replace the adoption notice.
+    if !edit_yank(app, player) {
+        return;
+    }
     run_action(
         app,
         player,
@@ -382,7 +428,7 @@ pub(crate) fn edit_delete(app: &mut App, player: &dyn Mpv) {
     );
 }
 
-pub(crate) fn edit_yank(app: &mut App, player: &dyn Mpv) {
+pub(crate) fn edit_yank(app: &mut App, player: &dyn Mpv) -> bool {
     run_action(
         app,
         player,
@@ -390,5 +436,5 @@ pub(crate) fn edit_yank(app: &mut App, player: &dyn Mpv) {
             track: app.active(),
             target: Target::At(app.playhead),
         },
-    );
+    )
 }

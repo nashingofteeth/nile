@@ -16,6 +16,10 @@ file's value on reload, and writes it back through one writer
 transport stops moving (plus on quit). It is session state — no history
 entry, and edits still take an explicit `--at`.
 
+- The TUI checks `external_change()` **before** a write and returns
+  `Ok(false)`, then reloads; a foreign register blocks only the register
+  write, never the project save.
+
 - Normal edits follow the **media frame** (clip id + source), not the
   timecode: a ripple head trim moves the playhead **back** by the trim; a
   gap-left head trim and tail trims leave it put.
