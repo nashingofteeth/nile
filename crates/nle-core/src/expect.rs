@@ -27,7 +27,7 @@ use crate::annotation::{Annotation, AnnotationKind, AnnotationStatus};
 use crate::project::{Project, Sequence};
 use crate::report::{FrameLocation, FrameSource, FrameSpan, RenderReport, SourceSide, frame_edge};
 use crate::time::{Seconds, checked_sub, format_seconds, rational_ser, secs_f64};
-use crate::timeline::{Clip, CropWindow, Effect, Segment, TransitionSource};
+use crate::timeline::{Clip, CropWindow, Effect, Segment, TransitionSource, offset_of_source};
 
 fn default_move_pct() -> f64 {
     25.0
@@ -1612,7 +1612,7 @@ struct Shown {
 
 impl Shown {
     fn timeline_of(&self, source: Seconds) -> Seconds {
-        self.tl_start + (source - self.src_start) / self.speed
+        self.tl_start + offset_of_source(self.src_start, self.speed, source)
     }
 }
 
@@ -1730,7 +1730,7 @@ fn check_transcript_words(
     // check over a span that shows another asset cannot describe this span, so
     // refuse the shape instead of passing "no words".
     let in_span = shown.iter().any(|range| {
-        let end = range.tl_start + (range.src_end - range.src_start) / range.speed;
+        let end = range.timeline_of(range.src_end);
         range.tl_start < ctx.span.1 && end > ctx.span.0
     });
     if !in_span {
@@ -2899,6 +2899,33 @@ mod tests {
                 .unwrap()
                 .contains("1/2 words complete; \"straddle\" at source 3 s is cut")
         );
+    }
+
+    #[test]
+    fn a_word_span_end_maps_through_the_shown_rate() {
+        // The 2× clip starts 4 s into the timeline, so source 0..10 is
+        // timeline 4..9 and a `Shown`'s end is `tl_start + span / speed`.
+        // The "asset is shown in the anchor" check must use that map, not
+        // subtract the source span and forget `tl_start` (which would put
+        // this end at 5 s, before the anchor and wrongly refuse it).
+        let project = project_with(vec![track(vec![
+            Segment::Gap(Gap { duration: s(4) }),
+            spanned_clip(1, 0, 10, 2),
+        ])]);
+        let report = report(&[(300, shot(1, 1))]);
+        let (_dir, store) = temp_store();
+        let hash = store
+            .import(&transcript(1, vec![word("tail", 8, 10)]))
+            .unwrap();
+        let outcome = evaluate_with(
+            &project,
+            &report,
+            // Clip-relative source 8..10 is timeline 8..9.
+            &range(with_transcript(&hash, 1.0), 8, 10),
+            &AnalysisStores::with_transcripts(store.clone()),
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+        assert_eq!(outcome.detail.as_deref(), Some("1/1 words complete"));
     }
 
     #[test]
