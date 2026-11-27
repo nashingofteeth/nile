@@ -1534,6 +1534,73 @@ mod tests {
         ));
     }
 
+    /// A panicking handler poisons the shared mutex, but a later connection
+    /// must still read: only writes become unavailable. The test-only handler
+    /// runs a real mutation under the same guard `ConnectionHandler::handle`
+    /// takes, then panics before releasing it — the state a panicking
+    /// `action.apply` leaves behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_panicked_handler_leaves_reads_available() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(Seconds::from_integer(30));
+        project.save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start(&path).expect("queue");
+        let shared = Arc::new(Mutex::new(ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: None,
+            jobs,
+        }));
+
+        let panicking = Arc::clone(&shared);
+        let thread = thread::spawn(move || {
+            let mut handler = panicking.lock().expect("unpoisoned");
+            let reply = handler.handle(&Call::ActionApply {
+                base_revision: 0,
+                actions: vec![Action::TrackAdd {
+                    kind: TrackKind::Audio,
+                }],
+                from: None,
+            });
+            assert!(reply.is_ok(), "the mutation ran: {reply:?}");
+            panic!("test handler panicked while holding the lock");
+        });
+        assert!(thread.join().is_err(), "the test handler panicked");
+
+        // A later connection recovers the value and keeps reading.
+        let mut reads = ConnectionHandler {
+            shared: Arc::clone(&shared),
+            events: Vec::new(),
+        };
+        assert!(matches!(reads.handle(&Call::Hello), Ok(Reply::Hello(_))));
+        assert!(matches!(
+            reads.handle(&Call::ProjectShow),
+            Ok(Reply::Project(_))
+        ));
+        assert!(shared.lock().is_ok(), "the mutex poison was cleared");
+
+        // The latched flag, not the mutex, refuses the next mutation.
+        let refused = reads
+            .handle(&Call::ActionApply {
+                base_revision: 0,
+                actions: vec![Action::TrackAdd {
+                    kind: TrackKind::Audio,
+                }],
+                from: None,
+            })
+            .expect_err("a mutation after a panic is refused");
+        assert_eq!(refused.code, nle_protocol::INTERNAL_ERROR);
+        assert!(refused.message.contains("read-only"), "{}", refused.message);
+        assert!(
+            shared.lock().expect("still usable").poisoned.is_some(),
+            "the read-only latch survives the cleared mutex poison"
+        );
+    }
+
     #[test]
     fn nothing_to_undo_is_an_invalid_request() {
         assert_eq!(
