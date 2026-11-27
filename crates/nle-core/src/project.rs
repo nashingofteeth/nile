@@ -67,6 +67,8 @@ pub enum ProjectError {
     SequenceDuplicate(u32),
     #[error("sequence #{0} has a non-positive frame rate")]
     NonPositiveFps(u32),
+    #[error("sequence #{0} has a zero output canvas")]
+    ZeroCanvas(u32),
     #[error("sequence #{0}: {1}")]
     SequenceAudio(u32, String),
     #[error("track #{0} not found")]
@@ -207,8 +209,9 @@ impl Asset {
     }
 }
 
-/// Where a sequence came from. Derived sequences are future work, but the
-/// provenance is recorded from day one so they stay traceable.
+/// Where a sequence came from. A `Derived` origin records the source id and
+/// the copy spec (`kind` plus any derive-time overrides); the snapshot is not
+/// regenerated automatically.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum SequenceOrigin {
     #[default]
@@ -407,10 +410,11 @@ impl Project {
     ///
     /// This is deliberately a **snapshot**, not a live derivation: the source
     /// and the copy share the media pool but not their timelines or histories.
-    /// `origin` records where it came from, and `manual_edits` starts at zero
-    /// so a later regeneration command can tell whether the copy diverged.
-    /// Annotations are sequence-scoped and are not copied; settings and audio
-    /// post are. The new sequence is not made active.
+    /// `origin` records where it came from and any fps/video overrides, and
+    /// `manual_edits` starts at zero so a later regeneration command can tell
+    /// whether the copy diverged. Expectations are copied with fresh ids;
+    /// notes/markers stay on the source. Settings and audio post are copied.
+    /// The new sequence is not made active.
     pub fn derive_sequence(
         &mut self,
         from: u32,
@@ -423,11 +427,24 @@ impl Project {
             .cloned()
             .ok_or(ProjectError::SequenceNotFound(from))?;
         let id = self.next_sequence_id();
+        if fps.is_some_and(|fps| fps <= Seconds::from_integer(0)) {
+            return Err(ProjectError::NonPositiveFps(id));
+        }
+        if video
+            .as_ref()
+            .is_some_and(|video| video.width == 0 || video.height == 0)
+        {
+            return Err(ProjectError::ZeroCanvas(id));
+        }
+        let mut spec = serde_json::json!({ "kind": "copy" });
+        if let Some(fps) = fps {
+            spec["fps"] = serde_json::json!(format!("{}/{}", fps.numer(), fps.denom()));
+        }
+        if let Some(video) = &video {
+            spec["video"] = serde_json::to_value(video).expect("a finite VideoSettings serialises");
+        }
         let mut sequence = Sequence::new(id, name);
-        sequence.origin = SequenceOrigin::Derived {
-            from,
-            spec: serde_json::json!({ "kind": "copy" }),
-        };
+        sequence.origin = SequenceOrigin::Derived { from, spec };
         sequence.fps = fps.or(source.fps);
         sequence.video = video.or(source.video);
         sequence.timeline = source.timeline;
@@ -435,6 +452,28 @@ impl Project {
         // Sequence::new already has manual_edits = 0 and playhead = 0: a
         // derived sequence starts at its own head, not the source's cursor.
         self.sequences.push(sequence);
+
+        // Expectations are verification, not notes: a derived deliverable
+        // must not check green-on-nothing. Copy them with fresh ids (their
+        // clip anchors are valid because the timeline is identical); notes
+        // and markers remain scoped to the source.
+        let mut next_annotation = self.next_annotation_id();
+        let expectations: Vec<Annotation> = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                annotation.sequence == from
+                    && matches!(annotation.kind, AnnotationKind::Expectation { .. })
+            })
+            .cloned()
+            .map(|mut annotation| {
+                annotation.id = next_annotation;
+                next_annotation = next_annotation.saturating_add(1);
+                annotation.sequence = id;
+                annotation
+            })
+            .collect();
+        self.annotations.extend(expectations);
         Ok(id)
     }
 
@@ -746,6 +785,13 @@ impl Project {
                 .is_some_and(|fps| fps <= Seconds::from_integer(0))
             {
                 return Err(ProjectError::NonPositiveFps(sequence.id));
+            }
+            if sequence
+                .video
+                .as_ref()
+                .is_some_and(|video| video.width == 0 || video.height == 0)
+            {
+                return Err(ProjectError::ZeroCanvas(sequence.id));
             }
             sequence
                 .audio
@@ -1746,6 +1792,33 @@ mod tests {
         p.playhead = Seconds::from_integer(2);
         let source_timeline = p.timeline.clone();
         let source = p.active_id();
+        let clip = match &p.timeline.video_track().unwrap().segments[0] {
+            Segment::Clip(clip) => clip.id,
+            other => panic!("expected a clip, got {other:?}"),
+        };
+        let source_expectation = p
+            .add_annotation(
+                1,
+                AnnotationKind::Expectation {
+                    expect: Expectation::Cam {
+                        asset: Some(1),
+                        group: None,
+                        tolerance_frames: 0,
+                    },
+                },
+                Anchor::Timeline {
+                    start: ClipPoint {
+                        clip,
+                        source: Seconds::from_integer(0),
+                    },
+                    end: ClipPoint {
+                        clip,
+                        source: Seconds::from_integer(1),
+                    },
+                },
+                provenance(),
+            )
+            .expect("source expectation");
         let id = p
             .derive_sequence(
                 source,
@@ -1764,7 +1837,11 @@ mod tests {
             derived.origin,
             SequenceOrigin::Derived {
                 from: source,
-                spec: serde_json::json!({ "kind": "copy" }),
+                spec: serde_json::json!({
+                    "kind": "copy",
+                    "fps": "24/1",
+                    "video": {"width": 1080, "height": 1920}
+                }),
             }
         );
         assert_eq!(derived.timeline, source_timeline);
@@ -1779,6 +1856,30 @@ mod tests {
         assert_eq!(derived.audio, p.sequence(source).unwrap().audio);
         assert_eq!(derived.manual_edits, 0);
         assert_eq!(derived.playhead, Seconds::from_integer(0));
+
+        // Expectations are verification, not notes: the copy carries them
+        // with a fresh id so a derived render cannot check green-on-nothing.
+        let copied: Vec<_> = p
+            .annotations
+            .iter()
+            .filter(|annotation| annotation.sequence == id)
+            .collect();
+        assert_eq!(copied.len(), 1);
+        assert!(
+            matches!(copied[0].kind, AnnotationKind::Expectation { .. }),
+            "{:?}",
+            copied[0]
+        );
+        assert_ne!(copied[0].id, source_expectation);
+        assert_eq!(
+            p.annotations
+                .iter()
+                .filter(|annotation| annotation.sequence == source)
+                .count(),
+            1,
+            "the source keeps its expectation"
+        );
+        p.validate().expect("the copied expectation is valid");
 
         // Editing one timeline does not touch the other.
         let mut derived = p.sequence(id).unwrap().clone();
@@ -1798,6 +1899,70 @@ mod tests {
             source_timeline,
             "the source is untouched"
         );
+    }
+
+    #[test]
+    fn a_derived_sequence_copies_a_non_active_source_and_inherits_the_settings() {
+        let mut p = sample_project();
+        p.fps = Some(Seconds::from_integer(30));
+        p.video = Some(VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let second = p.add_sequence(
+            "Second",
+            Some(Seconds::from_integer(24)),
+            Some(VideoSettings {
+                width: 720,
+                height: 1280,
+            }),
+        );
+        p.select_sequence(second).unwrap();
+        let source_timeline = p.sequence(1).unwrap().timeline.clone();
+        let id = p.derive_sequence(1, "Copy", None, None).unwrap();
+        let copy = p.sequence(id).unwrap();
+        assert_eq!(
+            copy.origin,
+            SequenceOrigin::Derived {
+                from: 1,
+                spec: serde_json::json!({ "kind": "copy" }),
+            }
+        );
+        assert_eq!(copy.fps, Some(Seconds::from_integer(30)));
+        assert_eq!(
+            copy.video,
+            Some(VideoSettings {
+                width: 320,
+                height: 240
+            })
+        );
+        assert_eq!(copy.timeline, source_timeline);
+        assert_eq!(p.active_id(), second, "the active source is irrelevant");
+    }
+
+    #[test]
+    fn a_zero_canvas_is_refused_before_a_sequence_is_added() {
+        let mut p = Project::new();
+        p.video = Some(VideoSettings {
+            width: 0,
+            height: 720,
+        });
+        assert!(matches!(p.validate(), Err(ProjectError::ZeroCanvas(1))));
+
+        let mut p = sample_project();
+        assert!(matches!(
+            p.derive_sequence(
+                1,
+                "Zero",
+                None,
+                Some(VideoSettings {
+                    width: 1280,
+                    height: 0
+                })
+            ),
+            Err(ProjectError::ZeroCanvas(2))
+        ));
+        assert_eq!(p.sequences.len(), 1, "the refusal did not add a sequence");
     }
 
     #[test]

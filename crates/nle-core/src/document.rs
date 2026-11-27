@@ -149,6 +149,12 @@ impl Document {
                 self.project.next_sequence_id(),
             ));
         }
+        if video
+            .as_ref()
+            .is_some_and(|video| video.width == 0 || video.height == 0)
+        {
+            return Err(ProjectError::ZeroCanvas(self.project.next_sequence_id()));
+        }
         let id = self.project.add_sequence(name, fps, video);
         self.histories.ensure(id);
         self.project.bump_revision();
@@ -159,7 +165,8 @@ impl Document {
     ///
     /// The source and copy share the media pool but not timelines or undo
     /// stacks; the copy is not undoable, like `add_sequence`. `fps`/`video`
-    /// override the source settings when present.
+    /// override the source settings when present; expectations are copied,
+    /// notes/markers stay on the source.
     pub fn derive_sequence(
         &mut self,
         from: u32,
