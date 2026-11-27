@@ -662,6 +662,15 @@ impl Clip {
         self.source_duration() / self.speed
     }
 
+    /// [`Clip::duration`] with checked arithmetic: `None` when the source
+    /// span or the division by `speed` exceeds the exact rational. A clip can
+    /// be *validated* (its reduced duration fits) yet still make the raw
+    /// subtraction overflow on a large common denominator — an extreme rate
+    /// leaves asset bounds like `1 - 1/M`.
+    pub(crate) fn checked_duration(&self) -> Option<Seconds> {
+        checked_div(&checked_sub(&self.asset_out, &self.asset_in)?, &self.speed)
+    }
+
     /// Source time at a timeline offset inside the clip (timeline →
     /// source). Edits move in timeline time but `asset_in/out` live in
     /// source time, so crossing that boundary scales by `speed`.
@@ -788,7 +797,7 @@ impl Segment {
     /// extreme span) must be rejected, not panic the caller.
     pub(crate) fn checked_duration(&self) -> Option<Seconds> {
         match self {
-            Segment::Clip(c) => checked_div(&checked_sub(&c.asset_out, &c.asset_in)?, &c.speed),
+            Segment::Clip(c) => c.checked_duration(),
             Segment::Gap(g) => Some(g.duration),
             Segment::Transition(t) => Some(t.dur),
         }
@@ -828,6 +837,29 @@ impl Track {
             .iter()
             .take(index)
             .fold(Seconds::from_integer(0), |acc, s| acc + s.duration())
+    }
+
+    /// [`Track::end`] with checked arithmetic: `None` when a partial sum
+    /// can't be represented. A validated track is always representable, but
+    /// an edit's *intermediate* track can hold durations (a one-frame
+    /// transition at an extreme fps) whose exact prefix sum exceeds
+    /// `Ratio<i64>` even though the final total reduces. Refuse, never panic.
+    pub(crate) fn checked_end(&self) -> Option<Seconds> {
+        self.segments
+            .iter()
+            .try_fold(Seconds::from_integer(0), |acc, s| {
+                checked_add(&acc, &s.checked_duration()?)
+            })
+    }
+
+    /// [`Track::start_of`] with checked arithmetic.
+    pub(crate) fn checked_start_of(&self, index: usize) -> Option<Seconds> {
+        self.segments
+            .iter()
+            .take(index)
+            .try_fold(Seconds::from_integer(0), |acc, s| {
+                checked_add(&acc, &s.checked_duration()?)
+            })
     }
 
     /// Index of the segment containing `t` (start ≤ t < end).

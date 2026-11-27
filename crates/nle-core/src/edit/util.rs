@@ -3,7 +3,7 @@
 //! `pub(super)`: the operations are the public surface, these are not.
 
 use crate::project::Project;
-use crate::time::{Seconds, format_seconds};
+use crate::time::{Seconds, checked_frames_to_seconds, format_seconds, product_at_least_one};
 use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind};
 
 use super::{EditError, EditOp};
@@ -41,7 +41,7 @@ pub(super) fn snap(project: &Project, t: f64) -> Result<Seconds, EditError> {
     match project.fps {
         Some(fps) => {
             let n = (t * secs_f64(&fps)).round() as i64;
-            Ok(Seconds::new(n, 1) / fps)
+            checked_frames_to_seconds(n, fps).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))
         }
         None => Ok(Seconds::from_integer(t.round() as i64)),
     }
@@ -69,7 +69,9 @@ pub(super) fn stamp(project: &Project, t: &Seconds) -> String {
 /// in a 30 fps timeline).
 pub(super) fn at_least_a_frame(project: &Project, dur: &Seconds) -> Result<(), EditError> {
     let fps = project.fps.ok_or(EditError::NoFps)?;
-    if (*dur * fps).floor().to_integer() >= 1 {
+    // Compare `dur * fps >= 1` exactly instead of multiplying first: the
+    // product's denominator overflows `i64` for a tiny positive fps.
+    if product_at_least_one(dur, &fps) {
         Ok(())
     } else {
         Err(EditError::TooShort)

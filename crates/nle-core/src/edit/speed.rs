@@ -3,7 +3,7 @@
 //! owns is retimed with it.
 
 use crate::project::Project;
-use crate::time::{Seconds, checked_div, format_seconds};
+use crate::time::{Seconds, checked_add, checked_div, checked_mul, checked_sub, format_seconds};
 use crate::timeline::{MAX_TIMELINE_SECONDS, Segment, TransitionSource};
 
 use super::effects::adjacent_transitions;
@@ -72,9 +72,16 @@ pub fn set_speed_on(
     // A fast retime can shrink the span below a frame (a 1-frame clip at 2×):
     // refuse rather than round the *request* up to a frame, which would apply
     // a rate nobody asked for (3 s at "100×" must not quietly become 90×).
-    at_least_a_frame(project, &(want - owned))?;
-    let total = Seconds::from_integer((want * fps).round().to_integer()) / fps;
-    let mine_dur = total - owned;
+    let want_less_owned =
+        checked_sub(&want, &owned).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    at_least_a_frame(project, &want_less_owned)?;
+    // Snap `want` to the frame grid: `round(want * fps) / fps`. The product
+    // and the division both overflow `Ratio<i64>` for an extreme rate, so
+    // both cross the checked helpers.
+    let frames = checked_mul(&want, &fps).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    let total = checked_div(&Seconds::from_integer(frames.round().to_integer()), &fps)
+        .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    let mine_dur = checked_sub(&total, &owned).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
     at_least_a_frame(project, &mine_dur)?;
     let Some(speed) = checked_div(&span, &total) else {
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
@@ -94,7 +101,15 @@ pub fn set_speed_on(
 
     // A slow-down lengthens the track: keep it inside the timeline limit
     // (the validate backstop would call it "corrupt", which it isn't).
-    if tr.end() - c.duration() + mine_dur > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
+    let grown = checked_sub(
+        &tr.checked_end()
+            .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?,
+        &c.checked_duration()
+            .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?,
+    )
+    .and_then(|end| checked_add(&end, &mine_dur))
+    .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    if grown > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
     }
 

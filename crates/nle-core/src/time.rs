@@ -106,7 +106,12 @@ pub fn grid_time(fps: Option<&Seconds>, t: f64) -> Seconds {
     match fps {
         Some(fps) => {
             let n = (t * secs_f64(fps)).round() as i64;
-            Seconds::new(n, 1) / *fps
+            // A grid finer than `Ratio<i64>` can encode (e.g. a one-second
+            // position at `i64::MAX/86400` fps) has no exact `n/fps`; fall
+            // back to the whole second, the same nearest-safe bound
+            // `Project::last_frame` uses, instead of panicking in `Ratio`.
+            checked_frames_to_seconds(n, *fps)
+                .unwrap_or_else(|| Seconds::from_integer(t.round() as i64))
         }
         None => Seconds::from_integer(t.round() as i64),
     }
@@ -244,6 +249,27 @@ pub(crate) fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     let n = (*a.numer() as i128).checked_mul(*b.denom() as i128)?;
     let d = (*a.denom() as i128).checked_mul(*b.numer() as i128)?;
     checked_ratio(n, d)
+}
+
+/// Exact seconds for `frames` at `fps`, or `None` when `frames / fps` is not
+/// representable (an extreme rate makes the product overflow `i64`). The
+/// unchecked [`frames_to_seconds`] is fine for media-derived counts; this is
+/// the crossing edit paths use so a hand-edited rate refuses, not panics.
+pub(crate) fn checked_frames_to_seconds(frames: i64, fps: Seconds) -> Option<Seconds> {
+    checked_div(&Seconds::from_integer(frames), &fps)
+}
+
+/// `a * b >= 1`, compared exactly by cross-multiplying in `i128`.
+///
+/// The frame-grid test ("is this span at least one frame?") only needs the
+/// comparison, never the product. Computing the product first overflows
+/// `Ratio<i64>` for an extreme rate (a tiny fps makes the denominator
+/// `dur.den * fps.den` exceed `i64`), so compare the two `i64 × i64`
+/// cross-products instead — each fits an `i128`.
+pub(crate) fn product_at_least_one(a: &Seconds, b: &Seconds) -> bool {
+    let lhs = (*a.numer() as i128) * (*b.numer() as i128);
+    let rhs = (*a.denom() as i128) * (*b.denom() as i128);
+    lhs >= rhs
 }
 
 fn ratio_op(a: &Seconds, b: &Seconds, op: fn(i128, i128) -> Option<i128>) -> Option<Seconds> {
@@ -391,6 +417,48 @@ mod tests {
         assert_eq!(
             checked_add(&b, &Seconds::new(1_929, 1_000_000_000)),
             Some(a)
+        );
+    }
+
+    #[test]
+    fn extreme_rates_compare_without_overflowing() {
+        // Huge fps: `a * b` would overflow the product's numerator.
+        assert!(product_at_least_one(
+            &Seconds::from_integer(1),
+            &Seconds::new(i64::MAX, 1)
+        ));
+        // Tiny fps: the product's denominator would overflow.
+        assert!(!product_at_least_one(
+            &Seconds::from_integer(1),
+            &Seconds::new(1, i64::MAX)
+        ));
+        // An exact half-frame is still refused; one whole frame is accepted.
+        assert!(!product_at_least_one(
+            &Seconds::new(1, 2),
+            &Seconds::from_integer(1)
+        ));
+        assert!(product_at_least_one(
+            &Seconds::from_integer(1),
+            &Seconds::from_integer(1)
+        ));
+    }
+
+    #[test]
+    fn checked_frame_conversion_refuses_an_unrepresentable_grid() {
+        // One frame at `i64::MAX/86400` fps is 86400/i64::MAX s: a tiny but
+        // representable duration.
+        let fps = Seconds::new(i64::MAX, 86400);
+        assert_eq!(
+            checked_frames_to_seconds(1, fps),
+            Some(Seconds::new(86400, i64::MAX))
+        );
+        // `(i64::MAX - 1) * 86400` does not fit i64, so the frame count is
+        // refused rather than wrapping (or panicking in `Ratio`).
+        assert_eq!(checked_frames_to_seconds(i64::MAX - 1, fps), None);
+        // The same frame count at 1 fps is ordinary.
+        assert_eq!(
+            checked_frames_to_seconds(i64::MAX, Seconds::from_integer(1)),
+            Some(Seconds::from_integer(i64::MAX))
         );
     }
 

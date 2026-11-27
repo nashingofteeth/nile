@@ -4,7 +4,7 @@
 use crate::annotation::{Anchor, AnnotationKind, SourceRef};
 use crate::edit::EditError;
 use crate::expect::Expectation;
-use crate::time::{Seconds, frames_to_seconds, parse_signed_time, secs_f64};
+use crate::time::{Seconds, checked_frames_to_seconds, parse_signed_time, secs_f64};
 use crate::timeline::{Effect, MAX_TIMELINE_SECONDS, TrackKind, TransitionKind};
 
 use super::{Action, DEFAULT_TRANSITION_FRAMES, Edge, GapLen, Target, TransitionLen};
@@ -705,7 +705,7 @@ pub(super) fn transition_frames(frames: i64, fps: &Seconds) -> Result<Seconds, E
     if frames as f64 > limit {
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
     }
-    Ok(frames_to_seconds(frames, *fps))
+    checked_frames_to_seconds(frames, *fps).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))
 }
 
 /// Parse one `:cmd` line into an [`Action`].

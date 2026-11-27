@@ -13,7 +13,7 @@ pub use delete::{
 };
 
 use crate::project::Project;
-use crate::time::Seconds;
+use crate::time::{Seconds, checked_add, checked_frames_to_seconds, checked_mul, checked_sub};
 use crate::timeline::{
     Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Track, Transition, TransitionSource,
 };
@@ -50,12 +50,17 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
     let t = snap(project, playhead)?;
     let (ti, si, c) = clip_at(project, track, &t)?;
     let seg_start = track_at(project, ti)?.start_of(si);
-    let left_len = t - seg_start;
-    if left_len <= Seconds::from_integer(0) || left_len >= c.duration() {
+    let left_len = checked_sub(&t, &seg_start).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    let clip_dur = c
+        .checked_duration()
+        .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    if left_len <= Seconds::from_integer(0) || left_len >= clip_dur {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     at_least_a_frame(project, &left_len)?;
-    at_least_a_frame(project, &(c.duration() - left_len))?;
+    let right_len =
+        checked_sub(&clip_dur, &left_len).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    at_least_a_frame(project, &right_len)?;
 
     let mut left = Clip {
         id: c.id,
@@ -95,7 +100,7 @@ pub(super) fn append_at_end(
     track: &Track,
     void: Seconds,
     payload: Segment,
-) -> Vec<EditOp> {
+) -> Result<Vec<EditOp>, EditError> {
     let len = track.segments.len();
     if let (Some(have), Some(last)) = (
         match track.segments.last() {
@@ -109,16 +114,18 @@ pub(super) fn append_at_end(
         // gap beside it.
         let zero = Seconds::from_integer(0);
         let span = if void > zero { void } else { zero };
-        let grown = have + span;
-        return match payload {
-            Segment::Gap(pg) => vec![EditOp::Replace {
-                track: ti,
-                index: len - 1,
-                before: last.clone(),
-                after: Segment::Gap(Gap {
-                    duration: grown + pg.duration,
-                }),
-            }],
+        let grown = checked_add(&have, &span).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+        return Ok(match payload {
+            Segment::Gap(pg) => {
+                let total = checked_add(&grown, &pg.duration)
+                    .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+                vec![EditOp::Replace {
+                    track: ti,
+                    index: len - 1,
+                    before: last.clone(),
+                    after: Segment::Gap(Gap { duration: total }),
+                }]
+            }
             payload if span > zero => vec![
                 EditOp::Replace {
                     track: ti,
@@ -137,23 +144,25 @@ pub(super) fn append_at_end(
                 index: len,
                 segment: payload,
             }],
-        };
+        });
     }
     if void <= Seconds::from_integer(0) {
-        return vec![EditOp::Insert {
+        return Ok(vec![EditOp::Insert {
             track: ti,
             index: len,
             segment: payload,
-        }];
+        }]);
     }
-    match payload {
-        Segment::Gap(pg) => vec![EditOp::Insert {
-            track: ti,
-            index: len,
-            segment: Segment::Gap(Gap {
-                duration: void + pg.duration,
-            }),
-        }],
+    Ok(match payload {
+        Segment::Gap(pg) => {
+            let total =
+                checked_add(&void, &pg.duration).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+            vec![EditOp::Insert {
+                track: ti,
+                index: len,
+                segment: Segment::Gap(Gap { duration: total }),
+            }]
+        }
         payload => vec![
             EditOp::Insert {
                 track: ti,
@@ -166,7 +175,7 @@ pub(super) fn append_at_end(
                 segment: payload,
             },
         ],
-    }
+    })
 }
 
 /// The pasted piece for a clipboard segment: a clip takes a fresh id, a
@@ -219,21 +228,22 @@ pub fn paste_on(
     // At/past the end (or an empty track): nothing to overwrite — append,
     // bridging the void with a gap when there's distance to cover.
     if track.segments.is_empty() || t >= track.end() {
-        let void = t - track.end();
+        let void = checked_sub(&t, &track.end()).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
         return Ok(Batch {
-            ops: append_at_end(ti, track, void, pasted.clone()),
+            ops: append_at_end(ti, track, void, pasted.clone())?,
             desc: format!("paste at {}", stamp(project, &t)),
         });
     }
 
     let si = track.index_at(t).ok_or(EditError::NoSegment)?;
     let seg = track.segments[si].clone();
-    let left_len = t - track.start_of(si);
+    let left_len =
+        checked_sub(&t, &track.start_of(si)).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
     // A left remainder under one frame is treated as "at the edge" so it
     // can't strand a sub-frame sliver.
     let left_ok =
         left_len > Seconds::from_integer(0) && at_least_a_frame(project, &left_len).is_ok();
-    let target = t + dur;
+    let target = checked_add(&t, &dur).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
 
     // How far the overwrite reaches (`remove_upto`): the straddled
     // segment containing the paste's end, or the whole tail when the
@@ -260,8 +270,10 @@ pub fn paste_on(
     // when the paste ends exactly on a boundary).
     let right = match straddle {
         Some((ei, at)) => {
-            let off = at - track.start_of(ei);
-            let rem = track.segments[ei].duration() - off;
+            let off = checked_sub(&at, &track.start_of(ei))
+                .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+            let rem = checked_sub(&track.segments[ei].duration(), &off)
+                .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
             if rem > Seconds::from_integer(0) && at_least_a_frame(project, &rem).is_ok() {
                 match &track.segments[ei] {
                     // A transition is opaque: the paste consumes it whole.
@@ -371,14 +383,22 @@ pub fn insert_gap_on(
     // Bound the length *before* converting frames to a duration: `frames`
     // near i64::MAX would overflow the conversion itself.
     let limit = Seconds::from_integer(MAX_TIMELINE_SECONDS);
-    let max_frames = (limit * fps).to_integer();
+    // `limit * fps` overflows an absurd (but positive) rate; refuse it rather
+    // than panicking inside `Ratio`. A tiny rate yields zero representable
+    // frames, so every positive `frames` is correctly too long.
+    let max_frames = checked_mul(&limit, &fps)
+        .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?
+        .to_integer();
     if frames > max_frames {
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
     }
     let gap = Segment::Gap(Gap {
-        duration: Seconds::new(frames, 1) / fps,
+        duration: checked_frames_to_seconds(frames, fps)
+            .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?,
     });
-    if t + gap.duration() > limit {
+    let gap_end =
+        checked_add(&t, &gap.duration()).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+    if gap_end > limit {
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
     }
     let ti = track;
@@ -395,9 +415,9 @@ pub fn insert_gap_on(
 
     // At/past the end: bridge the void (if any), coalesced with the new gap.
     if track.segments.is_empty() || t >= track.end() {
-        let void = t - track.end();
+        let void = checked_sub(&t, &track.end()).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
         return Ok(Batch {
-            ops: append_at_end(ti, track, void, gap),
+            ops: append_at_end(ti, track, void, gap)?,
             desc: format!("insert gap at {}", stamp(project, &t)),
         });
     }
@@ -405,23 +425,20 @@ pub fn insert_gap_on(
     let si = track.index_at(t).ok_or(EditError::NoSegment)?;
     let seg = track.segments[si].clone();
     let seg_start = track.start_of(si);
-    let off = t - seg_start;
+    let off = checked_sub(&t, &seg_start).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
 
     match &seg {
         // `_` on a transition would split it; refuse (phase 1).
         Segment::Transition(_) => Err(EditError::Transition),
         // Over a gap: add to it.
-        Segment::Gap(g) => Ok(Batch {
-            ops: replace_with_many(
-                ti,
-                si,
-                &seg,
-                vec![Segment::Gap(Gap {
-                    duration: g.duration + gap.duration(),
-                })],
-            ),
-            desc: format!("insert gap at {}", stamp(project, &t)),
-        }),
+        Segment::Gap(g) => {
+            let grown = checked_add(&g.duration, &gap.duration())
+                .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+            Ok(Batch {
+                ops: replace_with_many(ti, si, &seg, vec![Segment::Gap(Gap { duration: grown })]),
+                desc: format!("insert gap at {}", stamp(project, &t)),
+            })
+        }
         // Over a clip: split it at the playhead, gap between the halves.
         Segment::Clip(c) => {
             // A split within a frame of either edge is that edge: no slivers.
@@ -491,14 +508,14 @@ pub fn paste_ripple_on(
     // At or past the track end: the void becomes a gap (coalesced with the
     // payload when it is itself a gap), then the payload lands on the playhead.
     if t >= track.end() {
-        let void = t - track.end();
+        let void = checked_sub(&t, &track.end()).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
         return Ok(Batch {
             ops: append_at_end(
                 ti,
                 track,
                 void,
                 pasted_piece(snapshot, project.next_clip_id()),
-            ),
+            )?,
             desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
         });
     }
@@ -508,15 +525,10 @@ pub fn paste_ripple_on(
 
     // A gap pasted into a gap just lengthens it.
     if let (Segment::Gap(g), Segment::Gap(pg)) = (&seg, snapshot) {
+        let grown = checked_add(&g.duration, &pg.duration)
+            .ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
         return Ok(Batch {
-            ops: replace_with_many(
-                ti,
-                si,
-                &seg,
-                vec![Segment::Gap(Gap {
-                    duration: g.duration + pg.duration,
-                })],
-            ),
+            ops: replace_with_many(ti, si, &seg, vec![Segment::Gap(Gap { duration: grown })]),
             desc: format!("ripple paste at {} — gap inserted", stamp(project, &t)),
         });
     }
@@ -529,7 +541,8 @@ pub fn paste_ripple_on(
         // consuming it — a ripple paste would have to cut it in two.
         Segment::Transition(_) => return Err(EditError::Transition),
         Segment::Clip(c) => {
-            let head_len = t - seg_start;
+            let head_len =
+                checked_sub(&t, &seg_start).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
             let (head_ok, tail_ok) = split_sides(project, c.duration(), head_len);
             let pid = project.next_clip_id();
             let mut pieces = Vec::new();
@@ -565,8 +578,10 @@ pub fn paste_ripple_on(
             // Guard the remainders like `paste_on` does: an off-grid gap start
             // could otherwise strand a sub-frame sliver.
             let mut pieces = Vec::new();
-            let head = t - seg_start;
-            let tail = g.duration - head;
+            let head =
+                checked_sub(&t, &seg_start).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+            let tail =
+                checked_sub(&g.duration, &head).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
             if head > Seconds::from_integer(0) && at_least_a_frame(project, &head).is_ok() {
                 pieces.push(Segment::Gap(Gap { duration: head }));
             }
