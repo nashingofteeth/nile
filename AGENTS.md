@@ -45,8 +45,10 @@ own the dependency list, release profile and lld flags.
 `README.md` = how to **use** it; `PLAN.md` = where it is **going**;
 `AGENTS.md` = the always-on rules; `docs/` = per-area notes read on demand.
 
-**Propose exact wording for `PLAN.md`/`AGENTS.md` changes; apply only after
-approval.** `README.md` and `docs/` may move with the code.
+**Agents may always update `PLAN.md`** — status rows, pending lists, the next
+pointer — without asking, and should keep it accurate when a slice lands.
+`AGENTS.md` changes still need approval; `README.md` and `docs/` move with the
+code.
 
 **Default is don't add.** A note earns a place only if it changes an agent's
 default action and is not obvious from the code, a test, `README.md`, or a
@@ -88,8 +90,10 @@ to say so.
    open choices before editing; offer options instead of inventing a second
    roadmap. In Plan mode, do not modify files — the user switches agents when
    ready.
-2. **Branch from `main`.** `feat/<slice>` or `fix/<slice>`; never work or
-   commit on `main`.
+2. **Branch from `main` in a worktree.** One slice per branch:
+   `feat/<slice>` or `fix/<slice>` under `.worktrees/`; never work or commit
+   on `main`. Independent slices may run as subagents in parallel, one
+   worktree per agent; never share a worktree.
 3. **Commit in reviewable slices.** Core/model first, then front-ends and
    protocol, then tests/docs when they do not belong with the code. One
    logical change per commit (`feat:`/`fix:`/`refactor:`/`docs:`), subject then
@@ -102,14 +106,15 @@ to say so.
    `git diff --check`, check touched paths/links, and smoke-run any command
    example you changed. Doc comments are code and still need
    `cargo doc -D warnings`. Push with a clean tree.
-5. **Review fixes stay here.** A review is not merge permission. Commit fixes
-   onto the feature branch and push; do not open a separate
+5. **Review before merge.** Run a `/review` pass (or the `nile-review`
+   subagent) over the branch; fix findings on the same branch and push. A
+   review is not merge permission, and do not open a separate
    `fix/...-review` branch. The branch reviewed is the branch that merges.
 6. **Merge only on an explicit request.** `git merge --no-ff`, rerun
    `scripts/check.sh` on `main`, push, then delete the merged branch locally
    and remotely. "review" or "proceed" is not "merge".
-7. **Plan next after merge.** Propose the next slice before starting it; update
-   `PLAN.md` status and the next pointer only with approval.
+7. **Plan next after merge.** Propose the next slice before starting it; keep
+   `PLAN.md` current as part of the landing (see the docs policy above).
 
 After pushing `main`, track CI with `gh run list` / `gh run watch`; report the
 result and call queue/runner-capacity failures infrastructure, not code.
