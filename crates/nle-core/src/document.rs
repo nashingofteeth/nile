@@ -975,6 +975,13 @@ mod tests {
     fn save_clamps_sequences_that_are_not_active() {
         let mut doc = document();
         let second = second_sequence(&mut doc);
+        let empty = doc
+            .project
+            .add_sequence("Short", Some(Seconds::new(30, 1)), None);
+        // Stale cursors on both inactive timelines: one with media, one empty
+        // (whose only representable position is 0).
+        doc.project.sequence_mut(second).unwrap().playhead = Seconds::from_integer(99);
+        doc.project.sequence_mut(empty).unwrap().playhead = Seconds::from_integer(99);
         doc.select_sequence(1).unwrap();
         if let Segment::Clip(c) = &mut doc
             .project
@@ -990,7 +997,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.json");
         doc.save(&path).unwrap();
-        let loaded = Project::load(&path).unwrap();
+        let mut loaded = Project::load(&path).unwrap();
         let seg = &loaded
             .sequence(second)
             .unwrap()
@@ -1003,6 +1010,48 @@ mod tests {
             "clamped to media"
         );
         assert_eq!(loaded.active_id(), 1, "saving kept the active sequence");
+        let ids: Vec<u32> = loaded.sequences.iter().map(|s| s.id).collect();
+        for id in ids {
+            loaded.select_sequence(id).unwrap();
+            assert!(
+                loaded.playhead <= loaded.last_frame(),
+                "sequence {id}: playhead {} past last frame {}",
+                crate::time::format_seconds(&loaded.playhead),
+                crate::time::format_seconds(&loaded.last_frame())
+            );
+        }
+        loaded.select_sequence(empty).unwrap();
+        assert_eq!(
+            loaded.playhead,
+            Seconds::from_integer(0),
+            "an empty sequence clamps its cursor to 0"
+        );
+    }
+
+    #[test]
+    fn a_refused_save_leaves_the_document_unchanged() {
+        let mut doc = document();
+        // An unpooled asset makes the model invalid, and the stale cursor is
+        // what save would otherwise repair before the refusal.
+        if let Segment::Clip(c) = &mut doc.project.timeline.video_track_mut().unwrap().segments[0] {
+            c.asset = 99;
+        }
+        doc.project.playhead = Seconds::from_integer(99);
+        let revision = doc.revision();
+        let playhead = doc.project.playhead;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.json");
+        let err = doc
+            .save(&path)
+            .expect_err("an unpooled asset refuses the save");
+        assert!(matches!(err, ProjectError::Asset(99, _)), "{err}");
+        assert_eq!(doc.project.playhead, playhead, "the cursor is not repaired");
+        assert_eq!(
+            doc.revision(),
+            revision,
+            "a refused save is not a model write"
+        );
+        assert!(!path.exists(), "nothing reached disk");
     }
 
     #[test]
