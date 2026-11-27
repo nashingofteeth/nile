@@ -528,6 +528,71 @@ fn an_optional_boolean_flag_distinguishes_bare_true_from_false() {
     assert_eq!(f.take_opt("normalize"), None, "absent is not a false");
 }
 
+#[test]
+fn bool_flags_refuse_inline_values() {
+    // clap takes a strict bool as bare (`--range`), so `:cmd` must too.
+    // Silently dropping the `=false` turned a refusal into a paste.
+    for (spec, flag) in [
+        ("paste --at 3 --range=false", "range"),
+        ("delete --at 3 --ripple=false", "ripple"),
+        ("annotation add hi --timeline=false --at 1", "timeline"),
+        (
+            "annotation add --expect absent --timeline --at 1 --black=false",
+            "black",
+        ),
+        (
+            "annotation add --expect crop-stable --timeline --at 1 --no-hold-size=false",
+            "no-hold-size",
+        ),
+    ] {
+        match parse(spec, &defaults()) {
+            Err(ParseError::Invalid(msg)) => assert!(
+                msg.contains(&format!("--{flag} takes no value")),
+                "{spec:?}: {msg}"
+            ),
+            other => panic!("{spec:?} parsed as {other:?}"),
+        }
+    }
+    // The bare spelling still means true.
+    assert_eq!(
+        parse("paste --range --at 3", &defaults()),
+        Ok(Action::PasteRange { track: 5, at: 3.0 })
+    );
+}
+
+/// The TUI's process commands (`:cache`, `:detect`, `:edl-import`,
+/// `:otio-import`) share [`split_args`] with the edits but parse their flags
+/// in `nle-cli`, never through `action::parse`. A strict clap bool missing
+/// from [`BOOL_FLAGS`] therefore split into a value: `--dry-run=false`
+/// reached `take_bool` as an option with `Some("false")`, which `take_bool`
+/// reads as *present*, so the flag silently meant `true`.
+#[test]
+fn process_bool_flags_are_strict_like_clap() {
+    let (verb, mut f) = split_args("cache prune --dry-run").unwrap();
+    assert_eq!(verb, "cache");
+    assert_eq!(f.positional().as_deref(), Some("prune"));
+    assert!(f.take_bool("dry-run"), "bare --dry-run is true");
+    assert!(f.finish(":cache prune").is_ok(), "the flag was consumed");
+
+    for (spec, flag) in [
+        ("cache prune --dry-run=false", "dry-run"),
+        ("detect --append=false", "append"),
+        ("detect --no-gaps=false", "no-gaps"),
+        ("detect --video-only=false", "video-only"),
+        ("detect --list=false", "list"),
+        ("edl-import --force=false", "force"),
+        ("otio-import --force=false", "force"),
+    ] {
+        match split_args(spec) {
+            Err(ParseError::Invalid(msg)) => assert!(
+                msg.contains(&format!("--{flag} takes no value")),
+                "{spec:?}: {msg}"
+            ),
+            _ => panic!("{spec:?} was accepted"),
+        }
+    }
+}
+
 // Tab-completed paths come back quoted; the shared tokenizer must hand them
 // to `:add`/`:import` as one argument (the shell would do this for the CLI).
 #[test]

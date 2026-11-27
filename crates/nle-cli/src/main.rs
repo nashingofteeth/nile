@@ -1784,6 +1784,256 @@ mod tests {
         );
     }
 
+    /// The same argv must mean the same action whether clap parsed it
+    /// (through [`to_action`]) or the shared `:cmd` grammar did. The
+    /// reachability test builds `Cmd` values directly, so a long flag wired
+    /// to the wrong field (`--track` feeding `clip`, say) can still pass it;
+    /// this sweep parses one argv per catalog slot both ways with
+    /// CLI-equivalent defaults (an omitted `--track` is track 1 → 0 on both
+    /// sides; every `--at` is explicit). For every case but `speed` the
+    /// `:cmd` line is the argv itself, so the flags cannot drift between the
+    /// two lists.
+    #[test]
+    fn same_flags_parse_identically_in_cli_and_catalog() {
+        let cases: &[&[&str]] = &[
+            &["trim-in", "--at", "2", "--track", "2", "--ripple"],
+            &["trim-out", "--at", "1"],
+            &["split", "--at", "1.5"],
+            &["gap", "--at", "1", "--frames", "3"],
+            &["delete", "--at", "2"],
+            &["yank", "--clip", "7"],
+            &["paste", "--at", "1", "--ripple"],
+            &[
+                "extend", "--seg", "1", "--edge", "out", "--to", "3", "--track", "2",
+            ],
+            &["purge-stumps", "--track", "2"],
+            &["track", "add", "audio"],
+            &["track", "mute", "2"],
+            &["track", "rm", "2"],
+            &["media", "rm", "3"],
+            &["undo"],
+            &["redo"],
+            &["transition", "fade", "--at", "3", "--frames", "15"],
+            &[
+                "effect",
+                "eq",
+                "--clip",
+                "1",
+                "--brightness",
+                "0.5",
+                "--saturation",
+                "0.8",
+            ],
+            &["effect", "rm", "--clip", "1", "--index", "0"],
+            &["effect", "clear", "--clip", "1"],
+            &["delete", "--from-seg", "1", "--to-seg", "2"],
+            &["yank", "--from-seg", "1", "--to-seg", "2"],
+            &["paste", "--range", "--at", "3"],
+            &["annotation", "add", "hi", "--asset", "1", "--time", "0"],
+            &["annotation", "rm", "1"],
+            &["annotation", "resolve", "1"],
+            &["annotation", "add", "hi", "--timeline", "--at", "1"],
+            &[
+                "effect", "crop", "--clip", "1", "--at", "1", "--x", "10", "--w", "90",
+            ],
+        ];
+        let defaults = nle_core::ParseDefaults::default();
+        let mut seen = vec![false; nle_core::action::SLOTS];
+        let mut check = |argv: &[&str], colon: &str| {
+            let cli = clap_action(argv);
+            let catalog = nle_core::action::parse(colon, &defaults)
+                .unwrap_or_else(|e| panic!("{colon:?}: {e}"));
+            assert_eq!(cli, catalog, "{argv:?} and {colon:?} disagree");
+            let slot = cli.slot();
+            assert!(!seen[slot], "{argv:?} duplicates slot {slot}");
+            seen[slot] = true;
+        };
+        for argv in cases {
+            check(argv, &argv.join(" "));
+        }
+        // `speed` is the one slot whose CLI takes the clip id positionally
+        // and the percentage as a second positional; `:cmd` spells the id
+        // `--clip`.
+        check(&["speed", "1", "200"], "speed 200 --clip 1");
+        assert!(seen.iter().all(|&s| s), "uncovered slots: {seen:?}");
+
+        // `:speed --rate` is a deliberate `:cmd` superset of the CLI's
+        // positional percentage (the `R` prompt's spelling); it must mean
+        // the same action, not a second grammar.
+        assert_eq!(
+            nle_core::action::parse("speed --rate 200 --clip 1", &defaults).unwrap(),
+            nle_core::action::parse("speed 200 --clip 1", &defaults).unwrap(),
+            ":speed --rate is the same action as the positional rate"
+        );
+
+        // `nile remove` is the other verb whose CLI spelling differs: its
+        // clip id is positional, and it lands on `Delete`.
+        assert_eq!(
+            clap_action(&["remove", "1", "--ripple"]),
+            nle_core::action::parse("delete --clip 1 --ripple", &defaults).unwrap()
+        );
+        // An omitted `--track` is track 1 on both sides (0 in the model).
+        assert_eq!(
+            clap_action(&["split", "--at", "1"]),
+            nle_core::action::parse("split --at 1", &defaults).unwrap()
+        );
+    }
+
+    /// The `:cmd` tokenizer's strict-bool list is only a mirror of clap if
+    /// every strict clap bool is on it. Walk clap's command tree rather than
+    /// write a second hand list: an option with a long spelling and clap's
+    /// `SetTrue` action is a strict bool, and a missing one means
+    /// `--flag=false` is tokenized as a value (so `take_bool` reads `true`).
+    #[test]
+    fn every_clap_strict_bool_is_a_strict_colon_bool() {
+        use clap::CommandFactory as _;
+
+        fn long_bools(cmd: &clap::Command, out: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                // Help/version are generated only when the command is built;
+                // positionals have no long spelling, and a value-taking
+                // option (including `--normalize [BOOL]`) is not `SetTrue`.
+                if let Some(long) = arg.get_long()
+                    && matches!(arg.get_action(), clap::ArgAction::SetTrue)
+                    && !matches!(arg.get_id().as_str(), "help" | "version")
+                {
+                    out.push(long.to_string());
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                long_bools(sub, out);
+            }
+        }
+
+        let mut clap_bools = Vec::new();
+        long_bools(&Cli::command(), &mut clap_bools);
+        clap_bools.sort();
+        clap_bools.dedup();
+        for flag in &clap_bools {
+            assert!(
+                nle_core::action::BOOL_FLAGS.contains(&flag.as_str()),
+                "--{flag} is a strict clap bool but missing from BOOL_FLAGS"
+            );
+        }
+        // Size parity catches an entry with no clap twin as well as a vacuous
+        // walk; `--dump` exists only with the `tui` feature.
+        assert_eq!(
+            clap_bools.len(),
+            nle_core::action::BOOL_FLAGS.len() - usize::from(!cfg!(feature = "tui")),
+            "the clap walk and BOOL_FLAGS must name the same flags: {clap_bools:?}"
+        );
+        // `--normalize` is the optional pair (`[BOOL]`), so it takes a value
+        // and must not be treated as strict.
+        assert!(!clap_bools.iter().any(|flag| flag == "normalize"));
+        assert!(!nle_core::action::BOOL_FLAGS.contains(&"normalize"));
+    }
+
+    /// Clap refuses `--flag=false` for a strict bool; the shared tokenizer
+    /// must refuse the same spelling, or the two front-ends disagree about
+    /// what a flag means. One valid argv per strict flag: the bare form
+    /// parses, the inline form does not.
+    #[test]
+    fn clap_and_colon_agree_that_strict_bools_take_no_value() {
+        assert!(
+            Cli::try_parse_from(["nile", "paste", "--at", "3", "--range=false"]).is_err(),
+            "clap must refuse an inline value on a strict bool"
+        );
+
+        let cases: &[(&str, &[&str])] = &[
+            ("unset", &["default", "--unset"]),
+            ("force", &["init", "--force"]),
+            ("ripple", &["delete", "--at", "3", "--ripple"]),
+            ("range", &["paste", "--at", "3", "--range"]),
+            ("json", &["show", "--json"]),
+            ("maps", &["show", "--json", "--maps"]),
+            ("append", &["detect-edits", "in.mp4", "--append"]),
+            ("no-gaps", &["detect-edits", "in.mp4", "--no-gaps"]),
+            ("video-only", &["detect-edits", "in.mp4", "--video-only"]),
+            ("list", &["detect-edits", "in.mp4", "--list"]),
+            ("stdio", &["serve", "--stdio"]),
+            (
+                "copy",
+                &[
+                    "trim", "in.mp4", "--in", "0", "--out", "1", "-o", "out.mp4", "--copy",
+                ],
+            ),
+            ("dry-run", &["cache", "prune", "--dry-run"]),
+            (
+                "timeline",
+                &["annotation", "add", "hi", "--timeline", "--at", "1"],
+            ),
+            (
+                "no-hold-size",
+                &[
+                    "annotation",
+                    "add",
+                    "--expect",
+                    "crop-stable",
+                    "--timeline",
+                    "--at",
+                    "1",
+                    "--no-hold-size",
+                ],
+            ),
+            (
+                "black",
+                &[
+                    "annotation",
+                    "add",
+                    "--expect",
+                    "absent",
+                    "--timeline",
+                    "--at",
+                    "1",
+                    "--black",
+                ],
+            ),
+        ];
+
+        let check = |flag: &str, argv: &[&str]| {
+            assert!(
+                nle_core::action::BOOL_FLAGS.contains(&flag),
+                "--{flag} has no strict-bool entry"
+            );
+            let mut bare = vec!["nile"];
+            bare.extend_from_slice(argv);
+            Cli::try_parse_from(&bare)
+                .unwrap_or_else(|e| panic!("nile {} should parse: {e}", argv.join(" ")));
+
+            let spell = format!("--{flag}");
+            let inline: Vec<String> = argv
+                .iter()
+                .map(|arg| {
+                    if *arg == spell {
+                        format!("{spell}=false")
+                    } else {
+                        (*arg).to_string()
+                    }
+                })
+                .collect();
+            let mut full = vec!["nile".to_string()];
+            full.extend(inline.iter().cloned());
+            assert!(
+                Cli::try_parse_from(&full).is_err(),
+                "clap accepted {spell}=false"
+            );
+            match nle_core::action::split_args(&inline.join(" ")) {
+                Err(nle_core::ParseError::Invalid(msg)) => assert!(
+                    msg.contains(&format!("--{flag} takes no value")),
+                    "{spell}=false: {msg}"
+                ),
+                _ => panic!("{spell}=false was accepted"),
+            }
+        };
+        for &(flag, argv) in cases {
+            check(flag, argv);
+        }
+        // `edit` exists only with the `tui` feature, so this entry cannot sit
+        // in the shared slice without a `mut` that is unused headless.
+        #[cfg(feature = "tui")]
+        check("dump", &["edit", "--dump"]);
+    }
+
     /// Parsing and wire round-tripping are not enough: a flag can survive both
     /// while mapping to the wrong unit or a default. Pin the ambiguous
     /// spellings by value.

@@ -29,8 +29,30 @@ pub enum ParseError {
     Invalid(String),
 }
 
-/// Boolean options (everything else takes a value).
-const BOOL_FLAGS: &[&str] = &["ripple", "range", "timeline", "no-hold-size", "black"];
+/// Strict valueless booleans (bare `--flag`, exactly as clap declares them);
+/// the optional pair is below. Every strict `bool` in the CLI's clap
+/// definitions belongs here, including flags only a process command reads:
+/// `split_args` is shared, so a missing name would treat `--flag=false` as a
+/// value and silently mean `true` (`cache prune --dry-run=false`).
+pub const BOOL_FLAGS: &[&str] = &[
+    "append",
+    "black",
+    "copy",
+    "dry-run",
+    "dump",
+    "force",
+    "json",
+    "list",
+    "maps",
+    "no-gaps",
+    "no-hold-size",
+    "range",
+    "ripple",
+    "stdio",
+    "timeline",
+    "unset",
+    "video-only",
+];
 
 /// Options whose boolean value is optional: bare means `true`, `=false`
 /// (or a following `false`) means `false`. `normalize` is the audio-post
@@ -92,6 +114,14 @@ pub fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
             return Err(ParseError::Invalid(format!("bad option {tok:?}")));
         }
         let value = if BOOL_FLAGS.contains(&name.as_str()) {
+            // A strict bool is bare (`--ripple`), exactly as clap spells it.
+            // Dropping an inline value would turn `--range=false` into
+            // `--range`, so the two front-ends would disagree.
+            if let Some(v) = inline {
+                return Err(ParseError::Invalid(format!(
+                    "--{name} takes no value (got {v:?}) — write --{name} or drop it"
+                )));
+            }
             None
         } else if OPTIONAL_BOOL_FLAGS.contains(&name.as_str()) {
             match inline {

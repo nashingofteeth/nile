@@ -1380,8 +1380,8 @@ mod register;
 use parse::transition_frames;
 
 pub use parse::{
-    EFFECT_USAGE, EffectArgs, ExpectArgs, Flags, ParseDefaults, ParseError, TRACK_USAGE,
-    effect_from_args, expect_from_args, parse, split_args,
+    BOOL_FLAGS, EFFECT_USAGE, EffectArgs, ExpectArgs, Flags, ParseDefaults, ParseError,
+    TRACK_USAGE, effect_from_args, expect_from_args, parse, split_args,
 };
 pub use register::{
     REGISTER_VERSION, Register, RegisterEntry, load_register, load_register_without_migration,
