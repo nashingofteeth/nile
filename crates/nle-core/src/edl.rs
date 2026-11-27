@@ -179,6 +179,8 @@ pub enum BuildError {
     BadSpan { event: u32 },
     #[error("event {event}: record out is not after record in")]
     RecSpan { event: u32 },
+    #[error("event {event}: span is too long to represent at this frame rate")]
+    TooLong { event: u32 },
     #[error("event {event}: no pool asset matches {name:?}")]
     Unresolved { event: u32, name: String },
 }
@@ -286,6 +288,11 @@ pub fn build(
         .map(|e| frames_of(e.rec_in, doc, fps))
         .min()
         .unwrap_or(0);
+    // A timecode's frame count can outrun `Ratio<i64>` at an accepted extreme
+    // rate; refuse that event by number instead of panicking in the division.
+    let span = |frames: i64, event: u32| {
+        frames_to_seconds(frames, fps).ok_or(BuildError::TooLong { event })
+    };
     let mut track_of =
         |events: &[&EdlEvent], overlap_ok: bool| -> Result<Vec<Segment>, BuildError> {
             let mut segs = Vec::new();
@@ -301,7 +308,7 @@ pub fn build(
                 }
                 if rec_in > cursor {
                     segs.push(Segment::Gap(Gap {
-                        duration: frames_to_seconds(rec_in - cursor, fps),
+                        duration: span(rec_in - cursor, ev.num)?,
                     }));
                 }
                 let src_in = frames_of(ev.src_in, doc, fps) - src_offset_frames;
@@ -325,8 +332,8 @@ pub fn build(
                         segs.push(Segment::Clip(Clip {
                             id: next_id,
                             asset,
-                            asset_in: frames_to_seconds(src_in, fps),
-                            asset_out: frames_to_seconds(src_out, fps),
+                            asset_in: span(src_in, ev.num)?,
+                            asset_out: span(src_out, ev.num)?,
                             speed,
                             effects: Vec::new(),
                         }));
@@ -335,7 +342,7 @@ pub fn build(
                     // A black event (`BL`) is empty space, not a clip — the
                     // fuzzy reel matcher used to latch it onto `blue.mp4`.
                     None if is_black_reel(&ev.reel) => segs.push(Segment::Gap(Gap {
-                        duration: frames_to_seconds(rec_out - rec_in, fps),
+                        duration: span(rec_out - rec_in, ev.num)?,
                     })),
                     None => {
                         return Err(BuildError::Unresolved {
@@ -573,6 +580,24 @@ FCM: NON-DROP FRAME
         assert!(matches!(segs[0], Segment::Clip(_)), "{segs:?}");
         assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
         assert!(matches!(segs[2], Segment::Clip(_)), "{segs:?}");
+    }
+
+    #[test]
+    fn an_unrepresentable_span_at_an_extreme_rate_is_refused() {
+        let fps = Seconds::new(i64::MAX, 86400);
+        // A clip's source span: one second of timecode rounds to a frame
+        // count whose seconds overflow i64 at this rate.
+        let clip = "001 AX V C 00:00:00:00 00:00:01:00 01:00:00:00 01:00:01:00\n";
+        let doc = parse(clip).unwrap();
+        let err = build(&doc, fps, 0, &some_asset).unwrap_err();
+        assert_eq!(err, BuildError::TooLong { event: 1 });
+
+        // A black gap reaches the same conversion through the record span.
+        let black = "001 BL V C 00:00:00:00 00:00:00:00 01:00:00:00 01:00:02:00\n";
+        let doc = parse(black).unwrap();
+        let resolve = |ev: &EdlEvent| (ev.reel == "AX").then_some(1);
+        let err = build(&doc, fps, 0, &resolve).unwrap_err();
+        assert_eq!(err, BuildError::TooLong { event: 1 });
     }
 
     #[test]

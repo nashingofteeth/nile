@@ -462,8 +462,11 @@ pub(crate) fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
     // inserted clips are clean.
     let whole = match (dur, app.project.fps.as_ref()) {
         (Some(d), Some(fps)) => {
-            let frames = (secs(&d) * secs(fps)).floor().max(1.0);
-            Seconds::new(frames as i64, 1) / *fps
+            let frames = (secs(&d) * secs(fps)).floor().max(1.0) as i64;
+            // A grid finer than `Ratio<i64>` can encode has no exact `n/fps`;
+            // keep the media duration, the same nearest-safe bound
+            // `clamp_to_media` uses, instead of panicking in the division.
+            nle_core::frames_to_seconds(frames, *fps).unwrap_or(d)
         }
         (Some(d), None) => d,
         (None, _) => {

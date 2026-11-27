@@ -192,7 +192,12 @@ pub fn parse_timecode(input: &str) -> Result<Timecode, TimeError> {
 /// The nominal integer frame rate (29.97 → 30, 59.94 → 60), used to label
 /// timecode fields.
 pub fn nominal_fps(fps: Seconds) -> i64 {
-    (fps.numer() + fps.denom() / 2) / fps.denom()
+    // `numer + denom/2` overflows i64 at an extreme accepted rate
+    // (`i64::MAX/86400`); the quotient still fits, so compute the rounding
+    // step in i128 rather than panicking in `+`.
+    let n = i128::from(*fps.numer()) + i128::from(*fps.denom()) / 2;
+    let d = i128::from(*fps.denom());
+    i64::try_from(n / d).unwrap_or(i64::MAX)
 }
 
 /// Convert a timecode to an absolute frame index at `fps`. Drop-frame
@@ -210,9 +215,12 @@ pub fn timecode_to_frames(tc: Timecode, fps: Seconds, drop_frame: bool) -> i64 {
     }
 }
 
-/// Exact seconds for a frame index at `fps`.
-pub fn frames_to_seconds(frames: i64, fps: Seconds) -> Seconds {
-    Seconds::new(frames, 1) / fps
+/// Exact seconds for a frame index at `fps`, or `None` when `frames / fps`
+/// is not representable (an extreme rate makes the product overflow `i64`).
+/// Every caller handles the `None`; there is no unchecked variant to reach
+/// for by accident.
+pub fn frames_to_seconds(frames: i64, fps: Seconds) -> Option<Seconds> {
+    checked_frames_to_seconds(frames, fps)
 }
 
 // ----------------------------------------------------------- checked rationals
@@ -253,8 +261,8 @@ pub(crate) fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
 
 /// Exact seconds for `frames` at `fps`, or `None` when `frames / fps` is not
 /// representable (an extreme rate makes the product overflow `i64`). The
-/// unchecked [`frames_to_seconds`] is fine for media-derived counts; this is
-/// the crossing edit paths use so a hand-edited rate refuses, not panics.
+/// implementation behind the public [`frames_to_seconds`], shared by the
+/// crossing edit paths so a hand-edited rate refuses, not panics.
 pub(crate) fn checked_frames_to_seconds(frames: i64, fps: Seconds) -> Option<Seconds> {
     checked_div(&Seconds::from_integer(frames), &fps)
 }
@@ -520,6 +528,19 @@ mod tests {
         assert_eq!(timecode_to_frames(tc, fps, true), 1800);
         let tc = parse_timecode("00:10:00;00").unwrap();
         assert_eq!(timecode_to_frames(tc, fps, true), 17982);
-        assert_eq!(frames_to_seconds(30, fps), Seconds::new(1001, 1000));
+        assert_eq!(frames_to_seconds(30, fps), Some(Seconds::new(1001, 1000)));
+    }
+
+    #[test]
+    fn public_frame_conversion_refuses_an_unrepresentable_grid() {
+        // The public conversion is the checked one: one frame at this rate is
+        // a tiny but representable duration; a huge frame count would need a
+        // numerator wider than `i64`.
+        let fps = Seconds::new(i64::MAX, 86400);
+        assert_eq!(
+            frames_to_seconds(1, fps),
+            Some(Seconds::new(86400, i64::MAX))
+        );
+        assert_eq!(frames_to_seconds(i64::MAX - 1, fps), None);
     }
 }

@@ -39,6 +39,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nle_core::Seconds;
+use nle_core::frames_to_seconds;
 use nle_core::time::format_seconds;
 use thiserror::Error;
 
@@ -151,11 +152,12 @@ impl FrameMode {
                     return None;
                 }
                 let index = i64::try_from(index).ok()?;
-                Some(*start + Seconds::from_integer(index) / *fps)
+                let at = frames_to_seconds(index, *fps)?;
+                Some(*start + at)
             }
             FrameMode::Indices { rate, indices } => {
                 let source = i64::try_from(*indices.get(index)?).ok()?;
-                Some(Seconds::from_integer(source) / *rate)
+                frames_to_seconds(source, *rate)
             }
         }
     }
@@ -2320,6 +2322,25 @@ mod tests {
         assert_eq!(spec.time_of(0), Some(Seconds::from_integer(0)));
         assert_eq!(spec.time_of(1), Some(Seconds::new(7 * 1001, 30_000)));
         assert_eq!(spec.time_of(2), Some(Seconds::new(29 * 1001, 30_000)));
+    }
+
+    #[test]
+    fn an_unrepresentable_frame_time_is_refused_not_panicked() {
+        // A tiny rate makes `index / rate` overflow i64; `time` reports the
+        // unrepresentable frame instead of panicking in the division.
+        let indices = FrameMode::Indices {
+            rate: Seconds::new(1, i64::MAX),
+            indices: vec![2],
+        };
+        assert_eq!(indices.time(0), None);
+
+        // One frame at the huge reciprocal rate is still exactly representable.
+        let grid = FrameMode::Grid {
+            start: Seconds::from_integer(0),
+            duration: Seconds::from_integer(1),
+            fps: Seconds::new(i64::MAX, 86400),
+        };
+        assert_eq!(grid.time(1), Some(Seconds::new(86400, i64::MAX)));
     }
 
     #[test]

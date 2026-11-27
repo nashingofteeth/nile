@@ -788,11 +788,17 @@ impl ServeHandler {
     }
 
     /// A history frame as exact timeline seconds. Without an fps the model's
-    /// frame is a second (the same fallback `frame_to_secs` uses).
-    fn frame_seconds(&self, frame: i64) -> Seconds {
+    /// frame is a second (the same fallback `frame_to_secs` uses). An extreme
+    /// rate can make the frame unrepresentable; refuse it with a clear error
+    /// instead of panicking in the rational division.
+    fn frame_seconds(&self, frame: i64) -> Result<Seconds, RpcError> {
         match self.session.project().fps.as_ref() {
-            Some(fps) => frames_to_seconds(frame, *fps),
-            None => Seconds::from_integer(frame),
+            Some(fps) => frames_to_seconds(frame, *fps).ok_or_else(|| {
+                RpcError::internal(format!(
+                    "playhead frame {frame} is not representable at the project frame rate"
+                ))
+            }),
+            None => Ok(Seconds::from_integer(frame)),
         }
     }
 
@@ -1011,7 +1017,8 @@ impl ServeHandler {
         let playhead = preview
             .outcome
             .playhead
-            .map(|frame| self.frame_seconds(frame));
+            .map(|frame| self.frame_seconds(frame))
+            .transpose()?;
         let outcome = self.wire_outcome(preview.outcome, self.session.revision(), playhead);
         Ok(Reply::Preview(Preview {
             outcome,
@@ -1066,7 +1073,7 @@ impl ServeHandler {
             )
         } else if let Some(frame) = outcome.playhead {
             // A batch has no one edge to follow: its last explicit playhead.
-            Some(secs_f64(&self.frame_seconds(frame)))
+            Some(secs_f64(&self.frame_seconds(frame)?))
         } else if outcome.changed {
             Some(current.clamp(0.0, secs_f64(&self.session.project().last_frame())))
         } else {
@@ -1185,8 +1192,28 @@ mod tests {
     #[test]
     fn frames_convert_with_the_project_rate() {
         let h = handler();
-        assert_eq!(h.frame_seconds(30), Seconds::from_integer(1));
-        assert_eq!(h.frame_seconds(15), Seconds::new(1, 2));
+        assert_eq!(h.frame_seconds(30).unwrap(), Seconds::from_integer(1));
+        assert_eq!(h.frame_seconds(15).unwrap(), Seconds::new(1, 2));
+    }
+
+    #[test]
+    fn an_unrepresentable_playhead_frame_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.json");
+        let mut project = Project::new();
+        project.fps = Some(Seconds::new(i64::MAX, 86400));
+        project.save(&path).expect("save");
+        let session = Session::load(&path).expect("load");
+        let jobs = JobQueue::start(&path).expect("queue");
+        let h = ServeHandler {
+            session,
+            events: Vec::new(),
+            poisoned: None,
+            jobs,
+        };
+        assert_eq!(h.frame_seconds(1).unwrap(), Seconds::new(86400, i64::MAX));
+        let error = h.frame_seconds(i64::MAX - 1).expect_err("unrepresentable");
+        assert!(error.message.contains("not representable"), "{error:?}");
     }
 
     fn handler_with_runner(

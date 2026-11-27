@@ -34,7 +34,10 @@ impl Span {
 /// math — floats at the detector boundary would drift across many cuts.
 fn snap(t: Seconds, fps: Seconds) -> Seconds {
     let n = (t * fps).round().to_integer();
-    frames_to_seconds(n, fps)
+    // A grid finer than `Ratio<i64>` can encode has no exact `n/fps`; keep
+    // the unsnapped position, the same nearest-safe bound `grid_time` and
+    // `clamp_to_media` use, instead of panicking in the division.
+    frames_to_seconds(n, fps).unwrap_or(t)
 }
 
 /// Build the spans of a rendered file from its detected `cuts` (media→media
@@ -213,6 +216,22 @@ mod tests {
                     end: secs(6)
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn an_extreme_rate_keeps_the_unsnapped_position() {
+        // 5 s at `i64::MAX/86400` fps rounds to a frame count whose seconds
+        // overflow `i64`; the snap falls back to the original position
+        // instead of panicking in the rational division.
+        let fps = Seconds::new(i64::MAX, 86400);
+        let spans = reconstruct(&[], &[], secs(5), fps, secs(0));
+        assert_eq!(
+            spans,
+            vec![Span::Media {
+                start: secs(0),
+                end: secs(5)
+            }]
         );
     }
 
