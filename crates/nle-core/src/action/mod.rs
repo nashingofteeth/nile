@@ -214,7 +214,7 @@ pub enum Action {
         clip: u32,
     },
     /// Drop sub-frame stumps and snap to the frame grid (`:purge`).
-    /// Re-baselines the undo stack.
+    /// Recorded as an undoable track-list change; a no-op records nothing.
     PurgeStumps {
         /// `None` = every track.
         track: Option<usize>,
