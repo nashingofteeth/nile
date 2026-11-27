@@ -753,6 +753,10 @@ fn ensure_audio_master(project: &Project, project_path: &Path) -> Option<PathBuf
 
 /// Bump whenever the audio-post filter graph or any key input changes: the
 /// version is hashed, so old masters get orphaned instead of played stale.
+///
+/// A graph rewrite still needs this human bump: the test pins this constant
+/// into the key, but it cannot see that the graph changed under it. A stale
+/// master is only detectable as "not this version's".
 const AUDIO_PREVIEW_VERSION: u64 = 4;
 
 #[derive(Hash)]
@@ -1487,6 +1491,11 @@ mod tests {
                 .map(str::to_owned),
             Some(format!("{key:016x}.m4a")),
             "the master's name is its key"
+        );
+        assert_eq!(
+            key,
+            audio_hash_for(&p, AUDIO_PREVIEW_VERSION),
+            "audio_hash uses the constant"
         );
         assert_ne!(
             key,
