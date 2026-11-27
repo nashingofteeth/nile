@@ -1636,12 +1636,10 @@ mod tests {
     /// A peer that writes one byte just inside the poll interval. Every inner
     /// read succeeds, so the `Ok` arm must enforce the deadline itself; only
     /// the `WouldBlock` path would never run.
-    #[cfg(unix)]
     struct Trickle {
         gap: Duration,
     }
 
-    #[cfg(unix)]
     impl Read for Trickle {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if buf.is_empty() {
@@ -1653,7 +1651,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_trickle_without_a_newline_still_hits_the_deadline() {
         let mut reader = FrameDeadline::new(
