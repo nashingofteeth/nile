@@ -481,8 +481,8 @@ shared by the TUI and agents — with no clipgen code present.
   undo never mixes sequences. Actions stay unchanged: sequence is session
   scope, resolved like the active track (`--sequence`, TUI switch, protocol
   param).
-- `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter
-  land now; derived sequences come later but must be traceable from day one.
+- `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter;
+  snapshot derive landed; presets/regeneration remain.
 - Export takes a sequence; proxy/export caches key per sequence.
 - Landed: v16 projects with shared media, media groups and annotations, v23
   per-sequence histories with
@@ -644,8 +644,10 @@ shared by the TUI and agents — with no clipgen code present.
 
 ### 7. Toolkit hooks (after the core)
 
-- Derived sequences (`sequence derive --from … --preset 9x16`), export
-  presets per sequence, batch render jobs.
+- Snapshot derived sequences landed (`sequence derive --from N --name NAME
+  [--size WxH] [--fps RATE]`; expectations copied, origin records overrides).
+  Presets/regeneration, per-sequence export presets and batch render jobs
+  remain.
 - Marker/chapter annotations in the TUI; transcript and text-based editing
   build on annotations + time maps later.
 - `nile mcp` as a thin protocol adapter; a review/log view that shows
