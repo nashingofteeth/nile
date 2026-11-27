@@ -39,7 +39,8 @@ checks); older files are rejected, never migrated.
 - `History::apply` clamps the edited sequence. `Document::save` uses
   `clamp_project_all`, so a sequence that is not active is still clamped
   before the file is written: its clips to their media and its stored
-  playhead to that sequence's own `last_frame`. A save validates a copy
+  playhead to `[0, that sequence's own last_frame]` (a negative cursor would
+  serialize as an unreadable `"-5/1"`). A save validates a copy
   first, so a refused save leaves the in-memory document untouched.
 - `asset_usage` spans every sequence: removing a pool asset must stay refused
   while any timeline uses it.
