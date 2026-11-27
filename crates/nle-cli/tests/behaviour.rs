@@ -34,9 +34,11 @@ fn a_relative_export_name_with_a_colon_renders() {
     let exported = s.file("a:b.mp4").display().to_string();
     s.assert_dur(&exported, 6.0, "6 s");
 
-    // `nile trim` builds its argv through the same helper.
+    // `nile trim` builds its argv through the same helper, on both sides:
+    // the probe and `-i` read `a:b.mp4` as a file, and `-o` writes one.
+    fs::copy(s.file("red.mp4"), s.file("a:b.mp4")).expect("copy to a colon name");
     s.ok(&[
-        "trim", "red.mp4", "--in", "0", "--out", "1", "-o", "t:c.mp4",
+        "trim", "a:b.mp4", "--in", "0", "--out", "1", "-o", "t:c.mp4",
     ]);
     let trimmed = s.file("t:c.mp4").display().to_string();
     s.assert_dur(&trimmed, 1.0, "1 s");
