@@ -374,9 +374,11 @@ fn shape(p: &Project) -> Vec<(String, Seconds, Seconds)> {
 
 #[test]
 fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
-    // [Gap 1 @0..1] [Clip #1 1..3] [Gap 1 @3..4] [Clip #2 4..6]
-    // At t = 3 clip #1 ends and the gap starts: `i`/`I` consume the clip,
-    // `o`/`O` the gap — two different neighbours at one cut.
+    // [Gap 1 @0..1] [Clip #7 1..3] [Gap 1 @3..4] [Clip #9 4..6]
+    // At t = 3 clip #7 ends and the gap starts: `i`/`I` consume the clip,
+    // `o`/`O` the gap — two different neighbours at one cut. The ids are
+    // deliberately offset from the segment indices (7 at 1, 9 at 3) so an
+    // id-vs-index mix-up cannot pass by coincidence.
     let shared_cut = || {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
@@ -386,7 +388,7 @@ fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
                 duration: Seconds::from_integer(1),
             }),
             Segment::Clip(Clip {
-                id: 1,
+                id: 7,
                 asset: a,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
@@ -397,7 +399,7 @@ fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
                 duration: Seconds::from_integer(1),
             }),
             Segment::Clip(Clip {
-                id: 2,
+                id: 9,
                 asset: a,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
@@ -429,13 +431,13 @@ fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
         )
     };
 
-    // `i`: clip #1 goes and its span fuses the leading gap with the
+    // `i`: clip #7 goes and its span fuses the leading gap with the
     // following one — a gap at the seam, followers unmoved.
     let i = run(false, false);
     assert_eq!(
         shape(&i),
-        vec![gap(0, 4), clip(2, 4, 2)],
-        "`i` consumes clip #1 and leaves one merged gap"
+        vec![gap(0, 4), clip(9, 4, 2)],
+        "`i` consumes clip #7 and leaves one merged gap"
     );
     assert_eq!(i.timeline.end(), Seconds::from_integer(6), "length held");
 
@@ -443,8 +445,8 @@ fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
     let capital_i = run(false, true);
     assert_eq!(
         shape(&capital_i),
-        vec![gap(0, 2), clip(2, 2, 2)],
-        "`I` ripples clip #1 away and slides clip #2"
+        vec![gap(0, 2), clip(9, 2, 2)],
+        "`I` ripples clip #7 away and slides clip #9"
     );
     assert_eq!(
         capital_i.timeline.end(),
@@ -452,12 +454,23 @@ fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
         "shrunk by 2"
     );
 
-    // `o`: the gap is the consumed segment; clip #2 slides onto the cut.
+    // `o`: the gap is the consumed segment; clip #9 slides onto the cut.
     let o = run(true, false);
     assert_eq!(
         shape(&o),
-        vec![gap(0, 1), clip(1, 1, 2), clip(2, 3, 2)],
-        "`o` consumes the gap, not clip #1"
+        vec![gap(0, 1), clip(7, 1, 2), clip(9, 3, 2)],
+        "`o` consumes the gap, not clip #7"
+    );
+    let slid = clip_by_id(&o, 9);
+    assert_eq!(
+        slid.asset_in,
+        Seconds::from_integer(0),
+        "clip #9 slides onto the cut with its material untouched"
+    );
+    assert_eq!(
+        slid.asset_out,
+        Seconds::from_integer(2),
+        "clip #9's out-point is untouched"
     );
     assert_eq!(o.timeline.end(), Seconds::from_integer(5), "shrunk by 1");
 
@@ -465,7 +478,23 @@ fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
     let capital_o = run(true, true);
     assert_eq!(
         shape(&capital_o),
-        shape(&o),
+        vec![gap(0, 1), clip(7, 1, 2), clip(9, 3, 2)],
         "a gap delete ripples under either case"
+    );
+    assert_eq!(shape(&capital_o), shape(&o), "`O` equals `o` here");
+    assert_eq!(
+        clip_by_id(&capital_o, 9).asset_in,
+        Seconds::from_integer(0),
+        "`O` slides clip #9 with its material untouched"
+    );
+    assert_eq!(
+        clip_by_id(&capital_o, 9).asset_out,
+        Seconds::from_integer(2),
+        "`O` leaves clip #9's out-point alone"
+    );
+    assert_eq!(
+        capital_o.timeline.end(),
+        Seconds::from_integer(5),
+        "`O` shrunk by 1"
     );
 }
