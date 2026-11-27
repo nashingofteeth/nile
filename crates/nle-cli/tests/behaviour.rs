@@ -85,6 +85,17 @@ fn sequence_derive_copies_the_timeline_and_keeps_edits_separate() {
     let before: serde_json::Value =
         serde_json::from_str(&s.ok(&["show", "--json"])).expect("project json");
     let source_tracks = before["sequences"][0]["timeline"]["tracks"].clone();
+    s.ok(&[
+        "annotation",
+        "add",
+        "--expect",
+        "cam",
+        "--timeline",
+        "--at",
+        "1",
+        "--asset",
+        "1",
+    ]);
 
     s.ok(&[
         "sequence",
@@ -124,6 +135,13 @@ fn sequence_derive_copies_the_timeline_and_keeps_edits_separate() {
         s.size("vertical.mp4"),
         (1080, 1920),
         "the derived canvas is the one exported"
+    );
+    let copied_checks = s.ok(&["annotation", "ls", "--sequence", "2"]);
+    assert!(copied_checks.contains("expect"), "{copied_checks}");
+    let check = s.ok(&["annotation", "check", "--report", "vertical.mp4"]);
+    assert!(
+        check.contains("1 check(s): 1 pass"),
+        "the derived render inherits the source expectation: {check}"
     );
 
     // A derived sequence has its own timeline: deleting one of its copied

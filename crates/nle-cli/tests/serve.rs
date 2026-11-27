@@ -669,9 +669,21 @@ fn sequence_derive_round_trips_through_the_server() {
         })),
     );
     assert_eq!(bad["error"]["code"], -32602);
-    let stale = call(
+    let zero = call(
         &mut serve,
         5,
+        "sequence.derive",
+        Some(json!({
+            "base_revision": revision + 1,
+            "from": 1,
+            "name": "Zero canvas",
+            "video": {"width": 0, "height": 720}
+        })),
+    );
+    assert_eq!(zero["error"]["code"], -32602, "{zero}");
+    let stale = call(
+        &mut serve,
+        6,
         "sequence.derive",
         Some(json!({
             "base_revision": revision,
