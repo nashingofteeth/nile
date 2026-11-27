@@ -1,6 +1,6 @@
 use super::super::keys::extend::{
-    ExtendPreviewSpec, Side, armed_on_side, clamp_extend, extend_step_index, plan_extend,
-    plan_for_armed, projected_total, run_commit_action, snap_extend_target,
+    ExtendPreviewSpec, Side, armed_on_side, clamp_extend, commit_extend, extend_step_index,
+    plan_extend, plan_for_armed, projected_total, run_commit_action, snap_extend_target,
 };
 use super::super::keys::handle_key;
 use super::super::motion::{on_boundary, secs};
@@ -616,15 +616,15 @@ fn extend_commit_undo_returns_to_entry() {
     assert_eq!(app.playhead, 3.0, "back to where extend mode was entered");
 }
 
-// After committing a tail extend the playhead lands on the new clip
-// end (the edge we extended to), for both ripple and absorb.
+// After committing a tail extend the playhead lands on the new clip end
+// (the edge we extended to), for both ripple and absorb. Commit through the
+// production path: `commit_extend` → `run_action` → `playhead::land`.
 #[test]
 fn tail_extend_commit_lands_on_the_new_end() {
-    for (kind, ripple) in [
-        (CommitKind::AbsorbTail, false),
-        (CommitKind::AbsorbTail, true),
-    ] {
-        let mut app = App::new(asset_project(), temp_project_path("t"));
+    let fake = FakeMpv::new();
+    for ripple in [false, true] {
+        let mut app = App::new(asset_project(), temp_project_path("extend-land"));
+        app.loaded = true;
         app.playhead = 6.0; // extend C1's tail [0..3) out to 6.0
         app.mode = Mode::Extend(ExtendState {
             track: 0,
@@ -637,11 +637,12 @@ fn tail_extend_commit_lands_on_the_new_end() {
             preview_off: -1.0,
         });
         let target = app.playhead;
-        let batch =
-            run_commit_action(&app, &Armed::Clip { id: 1, head: false }, kind, ripple).unwrap();
-        // Mirror run_edit's extend attribution (the armed edge).
-        let frame = frame_of(app.project.fps.as_ref(), 3.0);
-        app.project.apply(batch, frame).unwrap();
+        commit_extend(&mut app, &fake);
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "ripple={ripple}: commit leaves extend"
+        );
         let end = {
             let track = app.project.timeline.video_track().unwrap();
             let si = track.clip_index(1).unwrap();
@@ -650,6 +651,10 @@ fn tail_extend_commit_lands_on_the_new_end() {
         assert_eq!(
             end, target,
             "clip end == committed target (ripple={ripple})"
+        );
+        assert_eq!(
+            app.playhead, end,
+            "the cursor lands on the committed edge (ripple={ripple})"
         );
     }
 }
