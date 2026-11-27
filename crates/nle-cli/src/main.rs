@@ -1438,7 +1438,7 @@ pub(crate) fn parse_fps_arg(s: &str) -> Result<Seconds> {
     Ok(rate)
 }
 
-/// A speed accepts `n/d` or a positive decimal (`1`, `0.5`, `0.8`, `2`).
+/// A speed is a positive percentage (`100` = normal, `50` = half, `200` = 2×).
 fn parse_speed_arg(s: &str) -> Result<Seconds> {
     let bad = || format!("invalid speed {s:?} (try 100, 200, or 50)");
     let percent: f64 = s.parse().with_context(bad)?;
@@ -1767,6 +1767,19 @@ mod tests {
             clap_action(&["split", "--at", "1"]),
             clap_action(&["split", "--at", "1", "--track", "1"]),
             "an omitted --track must mean track 1"
+        );
+    }
+
+    #[test]
+    fn speed_is_a_percentage_not_a_ratio() {
+        // The CLI's `speed` argument is a percentage: `1` is 0.01×, never
+        // 1×, and a rational like `3/2` is refused rather than read as 1.5×.
+        let one = parse_speed_arg("1").unwrap();
+        assert_eq!(nle_core::time::format_seconds(&one), "0.01");
+        assert_eq!(parse_speed_arg("100").unwrap(), Seconds::from_integer(1));
+        assert!(
+            parse_speed_arg("3/2").is_err(),
+            "a ratio is not a percentage"
         );
     }
 
