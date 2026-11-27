@@ -29,8 +29,30 @@ pub enum ParseError {
     Invalid(String),
 }
 
-/// Boolean options (everything else takes a value).
-const BOOL_FLAGS: &[&str] = &["ripple", "range", "timeline", "no-hold-size", "black"];
+/// Strict valueless booleans (bare `--flag`, exactly as clap declares them);
+/// the optional pair is below. Every strict `bool` in the CLI's clap
+/// definitions belongs here, including flags only a process command reads:
+/// `split_args` is shared, so a missing name would treat `--flag=false` as a
+/// value and silently mean `true` (`cache prune --dry-run=false`).
+pub const BOOL_FLAGS: &[&str] = &[
+    "append",
+    "black",
+    "copy",
+    "dry-run",
+    "dump",
+    "force",
+    "json",
+    "list",
+    "maps",
+    "no-gaps",
+    "no-hold-size",
+    "range",
+    "ripple",
+    "stdio",
+    "timeline",
+    "unset",
+    "video-only",
+];
 
 /// Options whose boolean value is optional: bare means `true`, `=false`
 /// (or a following `false`) means `false`. `normalize` is the audio-post
