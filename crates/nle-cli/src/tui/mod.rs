@@ -477,20 +477,46 @@ impl App {
         self.seen.register = stamp(&action::register_path(self.project.path()));
     }
 
+    /// The project file's name as the refusal notice shows it. A project is
+    /// not necessarily `nile.json` (`--project trip.json`, a renamed file).
+    fn project_name(&self) -> &str {
+        self.project
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("the project file")
+    }
+
+    /// Whether the project or its undo sidecar moved under us. The register
+    /// is a separate file and must not block a project write.
+    fn project_changed(&self) -> bool {
+        !self.project.is_remote()
+            && (stamp(self.project.path()) != self.seen.project
+                || stamp(&Histories::sidecar_path(self.project.path())) != self.seen.history)
+    }
+
+    /// Whether a shell wrote the yank register under us. Kept separate from
+    /// [`Self::project_changed`] so a `nile yank` blocks only the register
+    /// write, not an unrelated timeline save.
+    fn register_changed(&self) -> bool {
+        !self.project.is_remote()
+            && stamp(&action::register_path(self.project.path())) != self.seen.register
+    }
+
     /// The shared session file a shell wrote since we last read or wrote it,
     /// named as the sidecar on disk. `None` = in sync. The name is what the
     /// refusal notice shows, so it must match the file that actually changed.
-    fn foreign_file(&self) -> Option<&'static str> {
+    fn foreign_file(&self) -> Option<&str> {
         if self.project.is_remote() {
             return None;
         }
         if stamp(self.project.path()) != self.seen.project {
-            return Some("nile.json");
+            return Some(self.project_name());
         }
         if stamp(&Histories::sidecar_path(self.project.path())) != self.seen.history {
             return Some("history.json");
         }
-        if stamp(&action::register_path(self.project.path())) != self.seen.register {
+        if self.register_changed() {
             return Some("clipboard.json");
         }
         None
@@ -1213,8 +1239,9 @@ fn playhead_moved(app: &App) -> bool {
 ///
 /// `Ok(true)` = written; `Ok(false)` = a shell got there first, so nothing
 /// was written (the caller adopts the file instead — we never clobber).
+/// A register-only change does not block the stored playhead.
 fn persist_playhead(app: &mut App) -> anyhow::Result<bool> {
-    if app.external_change() {
+    if app.project_changed() {
         return Ok(false);
     }
     // Remote set_playhead returns the server's cursor on failure, so adopting

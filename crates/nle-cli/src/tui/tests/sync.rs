@@ -1,6 +1,7 @@
-use super::super::actions::run_action;
+use super::super::actions::{edit_delete, run_action};
 use super::super::croc::CrocAct;
 use super::super::jobs::PreviewMsg;
+use super::super::keys::visual::visual_key;
 use super::super::keys::{handle_key, set_active_track};
 use super::super::motion::{fmt_timecode, secs};
 use super::*;
@@ -210,6 +211,227 @@ fn a_foreign_register_write_is_not_clobbered() {
             .contains("not saved: clipboard.json changed on disk (reloaded)"),
         "{}",
         app.message
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+// A register-only foreign write must not block an unrelated project edit:
+// only the register write is refused. In a held mode the adoption stays with
+// `watch_foreign`, so the mode's indices are not invalidated mid-edit.
+#[test]
+fn a_visual_delete_ignores_a_foreign_register() {
+    let path = temp_project_path("visual-register");
+    watchable_project().save(&path).unwrap();
+    let p = Project::load(&path).unwrap();
+    let ours = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(2),
+        }),
+    );
+    nle_core::save_register(&path, Some(&ours)).unwrap();
+    let mut app = App::new(watchable_project(), path.clone());
+    app.mode = Mode::Visual(VisualState {
+        track: 0,
+        anchor: 0,
+        cursor: 0,
+    });
+    let project_before = std::fs::read(&path).unwrap();
+
+    // The shell yanks into the shared register while visual mode is open.
+    let foreign = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(1),
+        }),
+    );
+    nle_core::save_register(&path, Some(&foreign)).unwrap();
+    let register_before = std::fs::read(nle_core::register_path(&path)).unwrap();
+
+    visual_key(&mut app, &FakeMpv::new(), key('d'));
+
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "the range delete applied (and left visual mode)"
+    );
+    assert!(
+        !app.message.contains("not saved"),
+        "the edit notice survived: {}",
+        app.message
+    );
+    assert_ne!(
+        std::fs::read(&path).unwrap(),
+        project_before,
+        "the delete saved the project"
+    );
+    assert_eq!(
+        std::fs::read(nle_core::register_path(&path)).unwrap(),
+        register_before,
+        "the shell's register survived"
+    );
+    assert!(
+        app.external_change(),
+        "the register stays foreign until watch_foreign adopts it"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+#[test]
+fn a_foreign_register_does_not_block_the_playhead_save() {
+    let path = temp_project_path("register-playhead");
+    watchable_project().save(&path).unwrap();
+    let p = Project::load(&path).unwrap();
+    let foreign = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(1),
+        }),
+    );
+    let mut app = App::new(watchable_project(), path.clone());
+    nle_core::save_register(&path, Some(&foreign)).unwrap();
+    assert!(app.external_change());
+
+    app.playhead = 2.0;
+    assert!(
+        persist_playhead(&mut app).unwrap(),
+        "a register-only change does not block the project write"
+    );
+    assert_eq!(
+        Project::load(&path).unwrap().playhead,
+        Seconds::from_integer(2)
+    );
+    assert!(app.external_change(), "the register is still foreign");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+// `dd` yanks first; a refused yank must stop the composite so the delete
+// cannot save with the shell's register and replace the adoption notice.
+#[test]
+fn dd_after_a_foreign_register_keeps_notice_or_refuses() {
+    let path = temp_project_path("dd-register");
+    watchable_project().save(&path).unwrap();
+    let p = Project::load(&path).unwrap();
+    let ours = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(2),
+        }),
+    );
+    nle_core::save_register(&path, Some(&ours)).unwrap();
+    let mut app = App::new(watchable_project(), path.clone());
+    app.playhead = 1.0;
+
+    let foreign = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(1),
+        }),
+    );
+    nle_core::save_register(&path, Some(&foreign)).unwrap();
+    let register_before = std::fs::read(nle_core::register_path(&path)).unwrap();
+    let project_before = std::fs::read(&path).unwrap();
+
+    edit_delete(&mut app, &FakeMpv::new());
+
+    assert!(
+        app.message
+            .contains("not saved: clipboard.json changed on disk (reloaded)"),
+        "{}",
+        app.message
+    );
+    assert_eq!(
+        std::fs::read(nle_core::register_path(&path)).unwrap(),
+        register_before,
+        "the shell's register survived"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        project_before,
+        "dd refused instead of saving with the shell's register"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+// The positive path: no foreign file, so a yank writes the register through
+// `persist_register` and re-baselines the stamp.
+#[test]
+fn a_normal_yank_writes_the_register() {
+    let path = temp_project_path("yank-register");
+    watchable_project().save(&path).unwrap();
+    let p = Project::load(&path).unwrap();
+    let before = nle_core::Register::of(
+        &p,
+        TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(2),
+        }),
+    );
+    nle_core::save_register(&path, Some(&before)).unwrap();
+    let mut app = App::new(watchable_project(), path.clone());
+    app.playhead = 1.0;
+    let bytes_before = std::fs::read(nle_core::register_path(&path)).unwrap();
+
+    let applied = run_action(
+        &mut app,
+        &FakeMpv::new(),
+        &Action::Yank {
+            track: 0,
+            target: Target::At(1.0),
+        },
+    );
+
+    assert!(applied, "a normal yank applies");
+    assert_ne!(
+        std::fs::read(nle_core::register_path(&path)).unwrap(),
+        bytes_before,
+        "the yank reached the sidecar"
+    );
+    assert!(
+        !app.external_change(),
+        "our own register save is not foreign"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
+    let _ = std::fs::remove_file(nle_core::register_path(&path));
+}
+
+// A project save that rolls back must report the action as not applied, and
+// the notice must name the actual project file (not a hardcoded `nile.json`).
+#[test]
+fn a_rolled_back_edit_reports_not_applied_and_names_the_project_file() {
+    let path = temp_project_path("rollback-name");
+    watchable_project().save(&path).unwrap();
+    let mut app = App::new(watchable_project(), path.clone());
+
+    // A shell wrote the project first; our split must be abandoned.
+    let mut p = Project::load(&path).unwrap();
+    p.set_playhead(2.0);
+    p.save(&path).unwrap();
+    let project_before = std::fs::read(&path).unwrap();
+
+    let applied = run_action(
+        &mut app,
+        &FakeMpv::new(),
+        &Action::Split { track: 0, at: 1.0 },
+    );
+
+    assert!(!applied, "a rolled-back edit is not applied");
+    assert!(
+        app.message.contains("t.json changed on disk (reloaded)"),
+        "the notice names the real project file: {}",
+        app.message
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        project_before,
+        "the shell's project survived"
     );
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(nle_core::Histories::sidecar_path(&path));
