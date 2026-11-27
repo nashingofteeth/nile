@@ -702,6 +702,24 @@ enum JobCmd {
         #[arg(long)]
         encoder_preset: Option<String>,
     },
+    /// Queue one export per sequence into a directory
+    Batch {
+        /// Directory for the renders (created if missing)
+        #[arg(long, value_name = "DIR")]
+        output_dir: PathBuf,
+        /// Render only these sequences, in this order (default: every sequence)
+        #[arg(long, value_name = "ID")]
+        sequence: Vec<u32>,
+        /// Quality tier: preview, balanced, max
+        #[arg(long, value_enum, default_value = "balanced")]
+        preset: QualityPreset,
+        /// Override the tier's quality (0-51, lower = better)
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=51))]
+        crf: Option<u8>,
+        /// Override the encoder's own preset (x264 names or SVT-AV1 number)
+        #[arg(long)]
+        encoder_preset: Option<String>,
+    },
 }
 
 /// Media-pool subcommands.
