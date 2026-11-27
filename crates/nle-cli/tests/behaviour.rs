@@ -598,9 +598,14 @@ fn annotation_add_help_and_default_agree_on_zero_min_confidence() {
     s.base(); // red 0–2, green 2–4, blue 4–6 at 30 fps
 
     // The doc comment is the help text, so a promised default that the
-    // mapping does not take makes the check look stricter than it is.
+    // mapping does not take makes the check look stricter than it is. Scope
+    // the assertion to this flag: the help also prints `(default 0)` for
+    // `--tolerance-frames`, so a bare substring would pass by coincidence.
     let help = s.ok(&["annotation", "add", "--help"]);
-    assert!(help.contains("(default 0)"), "{help}");
+    assert!(
+        help.contains("subject-in-frame: lowest box confidence to count (0..=1, default 0)"),
+        "{help}"
+    );
 
     // Omitted `--min-confidence` must reach the model as 0.0: every box the
     // detector retained counts (the product's own floor belongs to analysis).
