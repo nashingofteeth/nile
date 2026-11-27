@@ -92,6 +92,14 @@ pub fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
             return Err(ParseError::Invalid(format!("bad option {tok:?}")));
         }
         let value = if BOOL_FLAGS.contains(&name.as_str()) {
+            // A strict bool is bare (`--ripple`), exactly as clap spells it.
+            // Dropping an inline value would turn `--range=false` into
+            // `--range`, so the two front-ends would disagree.
+            if let Some(v) = inline {
+                return Err(ParseError::Invalid(format!(
+                    "--{name} takes no value (got {v:?}) — write --{name} or drop it"
+                )));
+            }
             None
         } else if OPTIONAL_BOOL_FLAGS.contains(&name.as_str()) {
             match inline {
