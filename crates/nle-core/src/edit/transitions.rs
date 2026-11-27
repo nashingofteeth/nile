@@ -176,6 +176,20 @@ pub fn add_transition(
     })
 }
 
+/// The segment index a blend lookup should start from. `index_at` is
+/// half-open, so a trailing blend's far edge is the timeline end where it
+/// finds no segment; the last segment is still that blend's far side.
+fn blend_index_at(tr: &Track, t: Seconds) -> Option<usize> {
+    if let Some(si) = tr.index_at(t) {
+        return Some(si);
+    }
+    if t == tr.end() && matches!(tr.segments.last(), Some(Segment::Transition(_))) {
+        tr.segments.len().checked_sub(1)
+    } else {
+        None
+    }
+}
+
 /// The transition containing `at` on `track`: its segment index, a clone,
 /// and its start. `None` when the position is not inside a blend.
 pub fn transition_at(
@@ -185,7 +199,7 @@ pub fn transition_at(
 ) -> Result<Option<(usize, Transition, Seconds)>, EditError> {
     let t = snap(project, at)?;
     let tr = track_at(project, track)?;
-    let Some(mut si) = tr.index_at(t) else {
+    let Some(mut si) = blend_index_at(tr, t) else {
         return Ok(None);
     };
     if !matches!(tr.segments[si], Segment::Transition(_)) {
@@ -205,7 +219,8 @@ pub fn transition_at(
 /// Resize an existing transition to `dur`, keeping each clip side's rate.
 /// A longer blend takes more material from both neighbours (and shortens a
 /// clip↔clip timeline by the added length); a shorter one gives it back.
-/// `None` when the length is unchanged. `at` is any time inside the blend.
+/// `None` when the length is unchanged. `at` is any time inside the blend or
+/// its far edge (the original cut; the timeline end for a trailing fade).
 pub fn retime_transition_on(
     project: &Project,
     track: usize,
@@ -218,7 +233,7 @@ pub fn retime_transition_on(
     if tr.kind != TrackKind::Video {
         return Err(EditError::TransitionsNeedVideo);
     }
-    let mut si = tr.index_at(t).ok_or(EditError::NoSegment)?;
+    let mut si = blend_index_at(tr, t).ok_or(EditError::NoSegment)?;
     if !matches!(tr.segments[si], Segment::Transition(_))
         && si > 0
         && tr.start_of(si) == t

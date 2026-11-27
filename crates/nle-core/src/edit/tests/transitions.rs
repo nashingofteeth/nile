@@ -273,6 +273,66 @@ fn retime_a_fade_keeps_the_timeline_length() {
 }
 
 #[test]
+fn retime_a_trailing_fade_at_its_far_edge() {
+    // A fade at the timeline end: [clip 0..3] becomes
+    // [clip 0..5/2][fade 5/2..3). The blend's far edge is the timeline end,
+    // where `index_at` finds no segment.
+    let mut p = Project::new();
+    p.fps = Some(Seconds::from_integer(30));
+    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+        id: 1,
+        asset: a,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(3),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    })];
+    let mut h = History::default();
+    let batch = add_transition(&p, 0, 3.0, TransitionKind::FadeBlack, Seconds::new(1, 2)).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+    assert_eq!(
+        p.timeline.video_track().unwrap().end(),
+        Seconds::from_integer(3)
+    );
+    assert!(matches!(
+        p.timeline.video_track().unwrap().segments[1],
+        Segment::Transition(_)
+    ));
+
+    // Both lookup and retime accept the far edge, and the lookup pins where
+    // the blend starts (where the clip gave up 5/2 s).
+    let (_, _, start) = transition_at(&p, 0, 3.0)
+        .unwrap()
+        .expect("the far edge identifies the trailing blend");
+    assert_eq!(start, Seconds::new(5, 2));
+    let batch = retime_transition_on(&p, 0, 3.0, Seconds::from_integer(1))
+        .unwrap()
+        .expect("a change");
+    h.apply(&mut p, batch, 0).unwrap();
+    let track = p.timeline.video_track().unwrap();
+    match &track.segments[0] {
+        Segment::Clip(c) => {
+            assert_eq!(
+                c.asset_out,
+                Seconds::from_integer(2),
+                "the clip gives up another 5/2 s for the longer fade"
+            );
+        }
+        s => panic!("expected a clip, got {s:?}"),
+    }
+    let Segment::Transition(t) = &track.segments[1] else {
+        panic!("expected a blend")
+    };
+    assert_eq!(t.dur, Seconds::from_integer(1));
+    assert_eq!(
+        p.timeline.end(),
+        Seconds::from_integer(3),
+        "a fade leaves the length unchanged"
+    );
+}
+
+#[test]
 fn add_transition_refuses_bad_seams() {
     let p = fixture();
     // Mid-clip isn't a boundary.
