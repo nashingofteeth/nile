@@ -91,10 +91,10 @@ persists, and emits `project.changed` then `sequence.changed`. It does not
 switch.
 `sequence.derive {base_revision, from, name, fps?, video?}` is the snapshot
 copy: it shares the media pool but not the timeline/history, copies the source
-timeline (annotations are not copied), optionally overrides fps/video, does
-not switch, and returns the new `SequenceSummary`. It is the same model-write
-path as `sequence.add` (CAS, revision bump, both events). Additive, so
-`PROTOCOL_VERSION` stays 5.
+timeline and expectations (notes/markers stay on the source), records any
+fps/video override in `origin.spec`, does not switch, and returns the new
+`SequenceSummary`. It is the same model-write path as `sequence.add` (CAS,
+revision bump, both events). Additive, so `PROTOCOL_VERSION` stays 5.
 `sequence.audio {base_revision, audio}` sets the active sequence's
 loudness/fade settings. `audio` is the model's `AudioSettings` serde form
 (`{"normalize":bool,"fade_in":"1/2","fade_out":"1/1"}`; missing fields default

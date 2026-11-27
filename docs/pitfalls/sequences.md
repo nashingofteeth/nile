@@ -33,8 +33,11 @@ checks); older files are rejected, never migrated.
 ## Save and validation span sequences
 
 - `Project::validate` walks every sequence and checks unique ids, a valid
-  `active`, and a positive `fps`. `parse_fps_arg` and `Document::add_sequence`
-  reject `--fps 0` before it can reach `grid_time` (which divides by the rate).
+  `active`, a positive `fps`, a non-zero output canvas, and that every
+  `Derived` origin names an existing source. `parse_fps_arg` and
+  `Document::add_sequence` reject `--fps 0` before it can reach `grid_time`
+  (which divides by the rate); `Document::add_sequence`/`derive_sequence` and
+  the TUI also refuse a zero width/height before saving.
   Loading rejects a project with no sequences.
 - `History::apply` clamps the edited sequence. `Document::save` uses
   `clamp_project_all`, so a sequence that is not active is still clamped
@@ -86,10 +89,15 @@ settings. This is deliberately not a live derivation:
   settings are copied. No crop/scale policy is applied — a 9x16 preset belongs
   to the toolkit, not `nle-core`.
 - The copy is not made active and starts at playhead 0 with `manual_edits = 0`.
-- Annotations are sequence-scoped and are **not** copied. A later regeneration
-  or annotation-copy policy needs an explicit decision.
+- **Expectations are copied**, with fresh annotation ids and the copy's
+  sequence id. Their clip anchors stay valid because the timeline is identical;
+  this prevents a derived render from checking green-on-nothing. Notes and
+  markers stay on the source (a separate note-copy policy is not decided).
+  Copied expectations keep their review status; the check still runs.
 - The new sequence is a whole-project model write (revision bump), not an
-  undoable edit; its history starts empty. `spec` is `{"kind":"copy"}` today.
+  undoable edit; its history starts empty. `spec` is
+  `{"kind":"copy"}` plus `fps`/`video` overrides when supplied, so a later
+  regeneration can distinguish an inherited canvas from a chosen one.
 - `sequence.derive` exposes the same operation over the protocol. Additive, so
   `PROTOCOL_VERSION` stays 5.
 

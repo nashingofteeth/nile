@@ -131,10 +131,11 @@ there is more than one. `:sequence ls` lists them, `:sequence N` switches, and
 `:sequence add NAME [--width W --height H --fps RATE]` creates one.
 `nile sequence derive --from N --name NAME [--size WxH] [--fps RATE]` copies a
 sequence snapshot into a new sequence without switching; the copy has its own
-undo stack and starts at 0, and a later `--size`/`--fps` changes its canvas
-and grid. Presets such as 9x16 are not applied yet — add crop/scale effects
-or wait for the preset slice. Switching sequences saves `active`, adopts that
-timeline's playhead, resets the active track and reloads the monitor. Undo is
+undo stack and starts at 0, and the optional `--size`/`--fps` set the
+copy's canvas and grid. Presets such as 9x16 are not applied yet — add
+crop/scale effects or wait for the preset slice. Switching sequences saves
+`active`, adopts that timeline's playhead, resets the active track and
+reloads the monitor. Undo is
 per sequence: an edit made on one timeline never replays on another.
 
 Audio post is per sequence and off by default: `nile sequence audio

@@ -86,7 +86,7 @@ Reads do not need CAS.
 |---|---|
 | Project/read | `hello`, `project.show`, `timeline.edl`, `playhead.set` |
 | Edit | `action.preview`, `action.apply`, `undo`, `redo` |
-| Sequences | `sequence.list`, `sequence.use`, `sequence.add`, `sequence.audio` |
+| Sequences | `sequence.list`, `sequence.use`, `sequence.add`, `sequence.derive`, `sequence.audio` |
 | Media | `media.list`, `media.add` (removal is the `AssetRm` action) |
 | Annotations/checks | `annotation.list`, `annotation.check` |
 | Transcripts | `analysis.add` |
@@ -136,11 +136,12 @@ returned on the terminal event / record.
 ## 6. Gaps to decide before porting
 
 1. **Derived sequences are snapshot-only.** `sequence derive` copies the
-   timeline into a new sequence (own history, shared media, no annotations),
-   but does not apply a 9x16/crop preset or regenerate from a changed source.
-   Decide whether angle/crop planning should add effects in the toolkit or
-   whether nile needs a preset/regeneration operation. Do not build a parallel
-   timeline in the toolkit.
+   timeline, effects, audio post and **expectations** into a new sequence (own
+   history, shared media; notes/markers stay on the source), but does not apply
+   a 9x16/crop preset or regenerate from a changed source. The origin records
+   the `fps`/`video` overrides. Decide whether angle/crop planning should add
+   effects in the toolkit or whether nile needs a preset/regeneration
+   operation. Do not build a parallel timeline in the toolkit.
 2. **Analysis is CLI-only.** `analysis.add` stores transcripts but there is no
    protocol `analysis.detect`/`analyze-audio`. The earlier contract deliberately
    keeps a remote client from naming executables. Options: run the CLI on the

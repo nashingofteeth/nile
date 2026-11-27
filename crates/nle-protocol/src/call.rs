@@ -509,8 +509,9 @@ impl SequenceList {
     }
 }
 
-/// `sequence.use` / `sequence.add` result: the affected sequence and the
-/// active id after the call (an add does not switch; a use does).
+/// `sequence.use` / `sequence.add` / `sequence.derive` result: the affected
+/// sequence and the active id after the call (add/derive do not switch; a use
+/// does).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SequenceReply {
     pub revision: u64,
