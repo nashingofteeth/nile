@@ -751,7 +751,13 @@ fn ensure_audio_master(project: &Project, project_path: &Path) -> Option<PathBuf
     Some(path)
 }
 
-const AUDIO_PREVIEW_VERSION: u64 = 3;
+/// Bump whenever the audio-post filter graph or any key input changes: the
+/// version is hashed, so old masters get orphaned instead of played stale.
+///
+/// A graph rewrite still needs this human bump: the test pins this constant
+/// into the key, but it cannot see that the graph changed under it. A stale
+/// master is only detectable as "not this version's".
+const AUDIO_PREVIEW_VERSION: u64 = 4;
 
 #[derive(Hash)]
 struct AudioKeySide {
@@ -802,8 +808,14 @@ fn audio_key_side(project: &Project, side: &TransitionSource) -> AudioKeySide {
 }
 
 fn audio_hash(project: &Project) -> u64 {
+    audio_hash_for(project, AUDIO_PREVIEW_VERSION)
+}
+
+/// The version is a parameter only so a test can prove that bumping it moves
+/// the key; production always passes `AUDIO_PREVIEW_VERSION`.
+fn audio_hash_for(project: &Project, version: u64) -> u64 {
     let mut h = DefaultHasher::new();
-    AUDIO_PREVIEW_VERSION.hash(&mut h);
+    version.hash(&mut h);
     project.fps.map(|f| pair(&f)).hash(&mut h);
     project.audio.normalize.hash(&mut h);
     pair(&project.audio.fade_in).hash(&mut h);
@@ -1469,6 +1481,27 @@ mod tests {
         let audio = build.audio.expect("audio master");
         assert!(audio.is_file(), "{}", audio.display());
         assert!(nle_ffmpeg::probe(&audio).unwrap().has_audio());
+        // The master's name is its versioned key, so a filter-graph bump
+        // orphans this render instead of serving stale audio.
+        let key = audio_hash(&p);
+        assert_eq!(
+            audio
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_owned),
+            Some(format!("{key:016x}.m4a")),
+            "the master's name is its key"
+        );
+        assert_eq!(
+            key,
+            audio_hash_for(&p, AUDIO_PREVIEW_VERSION),
+            "audio_hash uses the constant"
+        );
+        assert_ne!(
+            key,
+            audio_hash_for(&p, AUDIO_PREVIEW_VERSION + 1),
+            "the preview version is part of the key"
+        );
         let again = build_composite_preview_with(&p, &project_path, &mut |_, _, _| {}).unwrap();
         assert_eq!(again.audio, Some(audio), "the master is cached");
 
