@@ -2905,9 +2905,10 @@ mod tests {
     fn a_word_span_end_maps_through_the_shown_rate() {
         // The 2× clip starts 4 s into the timeline, so source 0..10 is
         // timeline 4..9 and a `Shown`'s end is `tl_start + span / speed`.
-        // The "asset is shown in the anchor" check must use that map, not
-        // subtract the source span and forget `tl_start` (which would put
-        // this end at 5 s, before the anchor and wrongly refuse it).
+        // This does not fail on the pre-fix arithmetic, which computes the
+        // same 9: it guards a future refactor that drops `tl_start` and keeps
+        // only the span, putting the end at 5 s — before the anchor — and
+        // wrongly refusing it.
         let project = project_with(vec![track(vec![
             Segment::Gap(Gap { duration: s(4) }),
             spanned_clip(1, 0, 10, 2),
