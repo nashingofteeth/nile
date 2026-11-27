@@ -1775,6 +1775,7 @@ mod tests {
         // The CLI's `speed` argument is a percentage: `1` is 0.01×, never
         // 1×, and a rational like `3/2` is refused rather than read as 1.5×.
         let one = parse_speed_arg("1").unwrap();
+        assert_eq!(one, Seconds::new(1, 100));
         assert_eq!(nle_core::time::format_seconds(&one), "0.01");
         assert_eq!(parse_speed_arg("100").unwrap(), Seconds::from_integer(1));
         assert!(
