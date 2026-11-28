@@ -691,9 +691,9 @@ existing renders in `fixtures/`.
 ## Timeline filmstrips (shipped)
 
 - Video tracks get a two-row truecolor strip under the clip row when
-  `Ctrl-t` / `:filmstrip` is on (off by default). `--dump` stays compact:
-  enabling there remembers the preference with a "waiting for the preview"
-  notice, and the rows start once the live monitor does.
+  `Ctrl-t` / `:filmstrip` is on (off by default). The rows need the live
+  preview: `--dump` never shows them, and enabling there is refused with a
+  notice.
 - Strips are 64×4 RGB sprites sampled across each clip's source span, cached
   under `.nile/<stem>/cache/filmstrip/` and extracted on a worker. They show
   raw source frames; effects are not baked.
