@@ -121,6 +121,7 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
             // Refuse before `create_dir_all`: a bad selection or an existing
             // file must not leave an empty directory (or half a batch) behind.
             let plan = plan_outputs(&dir, &picked)?;
+            let created = !dir.exists();
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("create the output directory {}", dir.display()))?;
             let export = JobExport {
@@ -141,6 +142,12 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
                         queued.push(job.id);
                     }
                     Err(error) => {
+                        // The server may refuse a path a live job owns even
+                        // though our `exists()` plan passed. If nothing was
+                        // queued, do not leave the directory this batch made.
+                        if queued.is_empty() {
+                            discard_empty_batch_dir(&dir, created);
+                        }
                         let error = anyhow::Error::msg(error)
                             .context(format!("submit sequence #{sequence}"));
                         return Err(if queued.is_empty() {
@@ -206,6 +213,16 @@ fn plan_outputs(dir: &Path, sequences: &[u32]) -> Result<Vec<(u32, PathBuf)>> {
         plan.push((sequence, output));
     }
     Ok(plan)
+}
+
+/// Drop the directory a failed batch created, but only while it is still
+/// empty: `remove_dir` refuses a non-empty tree, which is the guard we want if
+/// another writer dropped a file in meanwhile. The submit error is the one to
+/// report, so a cleanup failure is ignored.
+fn discard_empty_batch_dir(dir: &Path, created: bool) {
+    if created {
+        let _ = std::fs::remove_dir(dir);
+    }
 }
 
 fn id_list<T: std::fmt::Display>(ids: &[T]) -> String {
@@ -323,6 +340,33 @@ mod tests {
         assert!(
             !dir.join("sequence-1.mp4").exists(),
             "the plan writes nothing"
+        );
+    }
+
+    #[test]
+    fn failed_batch_cleanup_removes_only_the_empty_directory_it_created() {
+        let parent = tempfile::tempdir().expect("tempdir");
+
+        let created = parent.path().join("created");
+        std::fs::create_dir(&created).expect("mkdir");
+        discard_empty_batch_dir(&created, true);
+        assert!(!created.exists(), "the batch's own empty directory goes");
+
+        let foreign = parent.path().join("foreign");
+        std::fs::create_dir(&foreign).expect("mkdir");
+        discard_empty_batch_dir(&foreign, false);
+        assert!(
+            foreign.exists(),
+            "a directory the batch did not create stays"
+        );
+
+        let occupied = parent.path().join("occupied");
+        std::fs::create_dir(&occupied).expect("mkdir");
+        std::fs::write(occupied.join("sequence-1.mp4"), b"a render").expect("write");
+        discard_empty_batch_dir(&occupied, true);
+        assert!(
+            occupied.join("sequence-1.mp4").exists(),
+            "a non-empty directory is left alone"
         );
     }
 }
