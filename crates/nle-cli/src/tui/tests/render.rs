@@ -491,6 +491,7 @@ fn video_tracks_get_filmstrip_rows() {
     let key = FilmstripKey::new(1, &Seconds::from_integer(1), &Seconds::from_integer(4));
     app.filmstrips.insert(key, Filmstrip::new(rgb).unwrap());
     app.filmstrip_enabled = true;
+    app.preview_enabled = true; // the live TUI: rows wait for the extractor
 
     let draw = |app: &App| {
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -521,6 +522,38 @@ fn video_tracks_get_filmstrip_rows() {
         (0..24u16).all(|y| (0..80u16).all(|x| plain[(x, y)].symbol() != "▀")),
         "the toggle removes the strip rows"
     );
+}
+
+// Strips are only laid out while the preview can extract them; `--dump`
+// stays compact even if a strip was cached.
+#[test]
+fn filmstrip_rows_need_the_live_preview() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut app = App::new(asset_project(), temp_project_path("filmstrip-preview-off"));
+    let rgb = vec![200u8; (FILMSTRIP_COLS * FILMSTRIP_ROWS * 3) as usize];
+    let key = FilmstripKey::new(1, &Seconds::from_integer(1), &Seconds::from_integer(4));
+    app.filmstrips.insert(key, Filmstrip::new(rgb).unwrap());
+    app.filmstrip_enabled = true;
+
+    let draw = |app: &App| {
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| render(f, app)).unwrap();
+        term.backend().buffer().clone()
+    };
+    let no_preview = draw(&app);
+    app.filmstrip_enabled = false;
+    let compact = draw(&app);
+    for y in 0..24u16 {
+        for x in 0..80u16 {
+            let (a, b) = (&no_preview[(x, y)], &compact[(x, y)]);
+            assert_eq!(
+                (a.symbol(), a.fg, a.bg),
+                (b.symbol(), b.fg, b.bg),
+                "({x},{y}) stays compact without the preview"
+            );
+        }
+    }
 }
 
 // The active audio track gets a waveform row; cached peaks render as blocks.

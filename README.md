@@ -123,7 +123,8 @@ When enabled, video tracks show a two-row filmstrip under the clip labels: raw
 source frames sampled across each clip's source span and cached under
 `.nile/<stem>/cache/filmstrip/`. `Ctrl-t` or `:filmstrip` toggles the rows
 for this session; they start off, and effects are not baked into the preview
-strip.
+strip. The rows need the live preview/monitor: `--dump` never shows them, and
+`:filmstrip on` without a preview is refused with a notice.
 
 A project can hold several **sequences** — separate timelines with their own
 frame rate, output size, playhead, audio post and undo stack, sharing one
@@ -266,7 +267,7 @@ The `:` line is the CLI grammar, flag for flag:
 :sequence derive --from N --name NAME [--size WxH] [--fps RATE]
 :sequence audio [--normalize [BOOL]] [--fade-in S --fade-out S]
 :media ls|rm                  :cache prune [--days N] [--dry-run]
-:filmstrip [on|off]           # timeline strips (session-only, default off)
+:filmstrip [on|off]           # timeline strips (session-only; needs preview)
 :import PATH|DIR …            :add FILE
 # Tab completes paths; quote paths with spaces, or use the yazi picker (`a`)
 :show / :seek T

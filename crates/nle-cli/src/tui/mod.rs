@@ -339,8 +339,8 @@ pub struct App {
     pub(crate) filmstrip_failed: std::collections::HashSet<FilmstripKey>,
     /// The filmstrip extractor, if one is running.
     filmstrip_job: Option<FilmstripJob>,
-    /// Two-row timeline strips; off by default in the real TUI, tests and
-    /// `--dump` until the user enables them.
+    /// Two-row timeline strips; off by default and only enabled while the
+    /// preview can extract them (never in `--dump` or tests).
     pub(crate) filmstrip_enabled: bool,
     /// The monitor's EDL being built off-thread (proxy renders); `None` when
     /// idle.
@@ -736,12 +736,22 @@ impl App {
 
     /// Toggle the two-row timeline strips, starting their worker when they
     /// come back on. The same wording is used by the key and `:filmstrip`.
+    ///
+    /// Strips are extracted from the live preview; with no monitor (`--dump`)
+    /// there is nothing to fill them, so turning them on is refused rather
+    /// than announced.
     pub(crate) fn set_filmstrips(&mut self, on: bool) {
-        self.filmstrip_enabled = on;
-        if on {
+        if !on {
+            self.filmstrip_enabled = false;
+            self.set_message("filmstrips off");
+        } else if self.preview_enabled {
+            self.filmstrip_enabled = true;
             start_filmstrips(self);
+            self.set_message("filmstrips on");
+        } else {
+            self.filmstrip_enabled = false;
+            self.set_message("filmstrips need the live preview — not available in --dump");
         }
-        self.set_message(&format!("filmstrips {}", if on { "on" } else { "off" }));
     }
 
     pub(crate) fn toggle_filmstrips(&mut self) {

@@ -194,7 +194,10 @@ pub(crate) fn track_has_video(project: &Project, track: &Track) -> bool {
 }
 
 pub(crate) fn filmstrip_rows(app: &App, track: &Track) -> usize {
-    if app.filmstrip_enabled && track_has_video(&app.project, track) {
+    // Rows wait for the preview: without an extractor they would only show
+    // placeholders forever (`--dump`), so the setting is remembered but the
+    // layout stays compact until the live monitor can fill them.
+    if app.filmstrip_enabled && app.preview_enabled && track_has_video(&app.project, track) {
         FILMSTRIP_ROWS as usize
     } else {
         0

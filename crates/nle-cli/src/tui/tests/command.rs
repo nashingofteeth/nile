@@ -789,21 +789,42 @@ fn effect_command_adds_an_effect() {
 }
 
 #[test]
-fn filmstrip_command_toggles_the_timeline_rows() {
+fn filmstrip_command_refuses_without_a_preview() {
     let mut app = App::new(asset_project(), temp_project_path("filmstrip-cmd"));
     assert!(!app.filmstrip_enabled);
-    assert_eq!(cmd(&mut app, "filmstrip"), "filmstrips on");
-    assert!(app.filmstrip_enabled);
+    let notice = cmd(&mut app, "filmstrip");
+    assert!(notice.contains("preview"), "{notice}");
+    assert!(!app.filmstrip_enabled, "the refusal leaves the flag off");
     assert_eq!(cmd(&mut app, "filmstrip off"), "filmstrips off");
     assert!(!app.filmstrip_enabled);
     assert!(cmd(&mut app, "filmstrip maybe").contains("on|off"));
 }
 
 #[test]
-fn ctrl_t_toggles_the_filmstrip_rows() {
+fn filmstrip_command_toggles_with_a_preview() {
+    let mut app = App::new(asset_project(), temp_project_path("filmstrip-cmd-live"));
+    app.preview_enabled = true;
+    assert_eq!(cmd(&mut app, "filmstrip on"), "filmstrips on");
+    assert!(app.filmstrip_enabled);
+    assert!(app.filmstrip_job.is_some(), "a worker was spawned");
+    assert_eq!(cmd(&mut app, "filmstrip off"), "filmstrips off");
+    assert!(!app.filmstrip_enabled);
+}
+
+#[test]
+fn ctrl_t_filmstrip_refuses_without_a_preview_and_toggles_with_one() {
     let mut app = App::new(asset_project(), temp_project_path("filmstrip-key"));
     let fake = FakeMpv::new();
     assert!(!app.filmstrip_enabled);
+    handle_key(
+        &mut app,
+        &fake,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+    );
+    assert!(!app.filmstrip_enabled, "the refusal leaves the flag off");
+    assert!(app.message.contains("preview"), "{}", app.message);
+
+    app.preview_enabled = true;
     handle_key(
         &mut app,
         &fake,
