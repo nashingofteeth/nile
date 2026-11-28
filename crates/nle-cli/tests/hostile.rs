@@ -1587,11 +1587,10 @@ fn a_non_utf8_add_path_is_refused_before_auto_import() {
     s.assert_loads("non-UTF-8 add", &text);
 }
 
-/// Clip ids are meant to be unique across tracks, but a hand-edited or
-/// imported project can repeat one. `--clip N` must resolve deterministically
-/// (the first track that has it) and edit only there.
+/// Clip ids are unique across every track of a sequence, so a hand-edited
+/// duplicate is refused at load: `--clip N` would otherwise be ambiguous.
 #[test]
-fn a_duplicate_clip_id_across_tracks_edits_the_first_track() {
+fn a_duplicate_clip_id_across_tracks_refuses_load_before_any_edit() {
     let s = Sandbox::new();
     s.hostile_base();
     let mut project: serde_json::Value =
@@ -1604,41 +1603,23 @@ fn a_duplicate_clip_id_across_tracks_edits_the_first_track() {
         .as_array_mut()
         .expect("tracks")
         .push(first);
-    s.write(P, &serde_json::to_string_pretty(&project).expect("json"));
+    let text = serde_json::to_string_pretty(&project).expect("json");
+    s.write(P, &text);
 
-    s.insist("duplicate clip id (show)", P, &["show"]);
+    let shown = s.insist("duplicate clip id (show)", P, &["show"]);
     let id_arg = id.to_string();
-    s.insist(
+    let edited = s.insist(
         "duplicate clip id (delete)",
         P,
         &["delete", "--clip", &id_arg],
     );
-    s.assert_loads("duplicate clip id", "");
-
-    let after: serde_json::Value = serde_json::from_str(&s.read(P)).expect("the project reloads");
-    let tracks = after["sequences"][0]["timeline"]["tracks"]
-        .as_array()
-        .expect("tracks");
-    assert_eq!(tracks.len(), 2, "the cloned track must still be there");
-    let clip_ids = |track: &serde_json::Value| -> Vec<u64> {
-        track["segments"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|seg| seg.get("Clip"))
-            .filter_map(|clip| clip["id"].as_u64())
-            .collect()
-    };
-    assert!(
-        !clip_ids(&tracks[0]).contains(&id),
-        "track 0 still has clip {id}: {}",
-        tracks[0]
-    );
-    assert!(
-        clip_ids(&tracks[1]).contains(&id),
-        "the edit did not land on the first-matching track 0; track 1 lost clip {id}: {}",
-        tracks[1]
-    );
+    for output in [&shown, &edited] {
+        assert!(
+            output.contains(&format!("sequence #1: segment #{id} is duplicated")),
+            "the refusal must name the duplicated sequence/segment id: {output}"
+        );
+    }
+    assert_eq!(s.read(P), text, "a refused load does not rewrite the file");
 }
 
 /// Frame fields that JSON can express but no CLI edit writes: the rational
