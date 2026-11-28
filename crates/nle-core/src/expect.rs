@@ -26,9 +26,9 @@ use crate::analysis::{AnalysisStores, ProductResult, SAMPLE_VERSION};
 use crate::annotation::{Annotation, AnnotationKind, AnnotationStatus};
 use crate::project::{Project, Sequence};
 use crate::report::{FrameLocation, FrameSource, FrameSpan, RenderReport, SourceSide, frame_edge};
-use crate::time::{Seconds, checked_sub, format_seconds, rational_ser, secs_f64};
+use crate::time::{Seconds, format_seconds, rational_ser, secs_f64};
 use crate::timeline::{
-    Clip, CropWindow, Effect, Segment, TransitionSource, crop_passes, offset_of_source,
+    Clip, CropPass, CropWindow, Effect, Segment, TransitionSource, crop_passes, offset_of_source,
 };
 
 fn default_move_pct() -> f64 {
@@ -959,7 +959,7 @@ fn check_crop_stable(
             out.detail = Some(format!("clip #{id} is not in sequence #{}", ctx.sequence));
             return out;
         };
-        let Some(Effect::Crop { x, y, w, h, keys }) = clip
+        let Some(crop) = clip
             .effects
             .iter()
             .find(|effect| matches!(effect, Effect::Crop { .. }))
@@ -972,61 +972,55 @@ fn check_crop_stable(
         if from == to {
             continue; // a point is vacuously stable: no interval to move over
         }
-        // The static window is a virtual key at t=0 (unless a real key
-        // already sits there): the exporter interpolates from it toward the
-        // first key, so that ramp is movement too.
-        let zero = Seconds::from_integer(0);
-        let mut points: Vec<(Seconds, f64, f64, f64, f64)> = Vec::with_capacity(keys.len() + 1);
-        if !keys.iter().any(|key| key.at <= zero) {
-            points.push((zero, *x, *y, *w, *h));
-        }
-        points.extend(
-            keys.iter()
-                .filter(|key| key.at >= zero)
-                .map(|key| (key.at, key.x, key.y, key.w, key.h)),
-        );
-        points.sort_by_key(|point| point.0);
-        for pair in points.windows(2) {
-            let (before, after) = (pair[0], pair[1]);
-            // Only the interpolation ramps that cover the checked window
-            // matter; a move entirely outside the anchor is somebody else's
-            // check.
-            if after.0 <= from || before.0 >= to {
-                continue;
+        // Movement comes from the rendered pass plan, not raw key times: a
+        // key past the clip end stretches its pass to the clip end (so the
+        // rate is higher than key spacing suggests), while a lone past-end
+        // key never starts a pass at all.
+        let mut previous: Option<CropPass> = None;
+        for pass in crop_passes(crop, clip.duration()) {
+            // Only passes that cover the checked window matter; a move
+            // entirely outside the anchor is somebody else's check.
+            let overlaps = pass.start < to && pass.end > from;
+            if overlaps {
+                let dt = secs_f64(&(pass.end - pass.start));
+                if dt <= 0.0 {
+                    return failed(
+                        out,
+                        format!("crop pass is empty at {} s", format_seconds(&pass.start)),
+                    );
+                }
+                let dx = (pass.x1 - pass.x0).abs() / dt;
+                let dy = (pass.y1 - pass.y0).abs() / dt;
+                if dx > max_move || dy > max_move {
+                    return failed(
+                        out,
+                        format!(
+                            "clip #{id} crop moves {:.2} %/s at {} s (max {max_move} %/s)",
+                            dx.max(dy),
+                            format_seconds(&pass.end)
+                        ),
+                    );
+                }
+                // A size step at the pass boundary is inside the anchor only
+                // when that boundary itself is; a step before `from` does not
+                // move during the checked window.
+                if hold_size
+                    && pass.start > from
+                    && pass.start < to
+                    && let Some(before) = previous
+                    && ((pass.w - before.w).abs() > 1e-9 || (pass.h - before.h).abs() > 1e-9)
+                {
+                    return failed(
+                        out,
+                        format!(
+                            "clip #{id} crop size changes between {} s and {} s (hold_size)",
+                            format_seconds(&before.start),
+                            format_seconds(&pass.start)
+                        ),
+                    );
+                }
             }
-            let Some(dt) = checked_sub(&after.0, &before.0) else {
-                return failed(out, "crop key times overflow".to_string());
-            };
-            let dt = secs_f64(&dt);
-            if dt <= 0.0 {
-                return failed(
-                    out,
-                    format!("crop keys collide at {} s", format_seconds(&after.0)),
-                );
-            }
-            let dx = (after.1 - before.1).abs() / dt;
-            let dy = (after.2 - before.2).abs() / dt;
-            if dx > max_move || dy > max_move {
-                return failed(
-                    out,
-                    format!(
-                        "clip #{id} crop moves {:.2} %/s at {} s (max {max_move} %/s)",
-                        dx.max(dy),
-                        format_seconds(&after.0)
-                    ),
-                );
-            }
-            if hold_size && ((after.3 - before.3).abs() > 1e-9 || (after.4 - before.4).abs() > 1e-9)
-            {
-                return failed(
-                    out,
-                    format!(
-                        "clip #{id} crop size changes between {} s and {} s (hold_size)",
-                        format_seconds(&before.0),
-                        format_seconds(&after.0)
-                    ),
-                );
-            }
+            previous = Some(pass);
         }
     }
     passed(out)
@@ -2233,6 +2227,39 @@ mod tests {
             key(2, 20.0, 10.0, 80.0, 80.0),
         ])])])]);
         let outcome = evaluate(&pan, &report, &range(expect, 0, 5));
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+    }
+
+    #[test]
+    fn crop_stable_reads_pass_time_for_a_past_end_key() {
+        let expect = Expectation::CropStable {
+            max_move_pct_per_sec: 5.0,
+            hold_size: true,
+        };
+        let report = report(&[(300, shot(1, 1))]);
+        // Key 20 is past the 10 s clip end: the pass from 1 runs to 10, so
+        // 70 % / 9 s ≈ 7.78 %/s, not the raw 70 / 19 ≈ 3.68 %/s.
+        let moving = project_with(vec![track(vec![clip_with(vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![key(1, 0.0, 0.0, 10.0, 10.0), key(20, 70.0, 0.0, 10.0, 10.0)],
+        }])])]);
+        let outcome = evaluate(&moving, &report, &range(expect.clone(), 1, 10));
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("7.78 %/s"));
+
+        // A lone past-end key starts no pass at all: the base is held, so it
+        // must not look like a slow 3.5 %/s pan.
+        let lone = project_with(vec![track(vec![clip_with(vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![key(20, 70.0, 0.0, 10.0, 10.0)],
+        }])])]);
+        let outcome = evaluate(&lone, &report, &range(expect, 0, 10));
         assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
     }
 

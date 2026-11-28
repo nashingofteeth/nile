@@ -286,7 +286,7 @@ pub(super) fn trim_beside_blend_on(
         }
     };
     if !out {
-        after.rebase_crop_keys(delta);
+        after.rebase_crop_keys(delta, c.duration());
     }
     at_least_a_frame(project, &after.duration())?;
 
@@ -394,7 +394,7 @@ pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batc
             speed: c.speed,
             effects: c.effects.clone(),
         };
-        after.rebase_crop_keys(delta);
+        after.rebase_crop_keys(delta, c.duration());
         at_least_a_frame(project, &after.duration())?;
         let mut ops = vec![EditOp::Replace {
             track: ti,
@@ -573,7 +573,7 @@ pub fn trim_out_on(project: &Project, track: usize, playhead: f64) -> Result<Bat
         let next = next.clone();
         let mut after = next.clone();
         after.asset_in = next.asset_in - source_span(&next, delta);
-        after.rebase_crop_keys(-delta);
+        after.rebase_crop_keys(-delta, next.duration());
         if after.asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: next.id,

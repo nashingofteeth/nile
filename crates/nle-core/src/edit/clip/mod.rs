@@ -70,7 +70,7 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
         speed: c.speed,
         effects: c.effects.clone(),
     };
-    left.truncate_crop_keys(left_len);
+    left.truncate_crop_keys(left_len, clip_dur);
     let mut right = Clip {
         id: project.next_clip_id()?,
         asset: c.asset,
@@ -79,7 +79,7 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
         speed: c.speed,
         effects: c.effects.clone(),
     };
-    right.rebase_crop_keys(left_len);
+    right.rebase_crop_keys(left_len, clip_dur);
     let left = Segment::Clip(left);
     let right = Segment::Clip(right);
     Ok(Batch {
@@ -355,7 +355,7 @@ pub fn paste_on(
                             speed: c.speed,
                             effects: c.effects.clone(),
                         };
-                        tail.rebase_crop_keys(off);
+                        tail.rebase_crop_keys(off, c.duration());
                         Some(Segment::Clip(tail))
                     }
                 }
@@ -531,7 +531,7 @@ pub fn insert_gap_on(
                     speed: c.speed,
                     effects: c.effects.clone(),
                 };
-                tail.rebase_crop_keys(off);
+                tail.rebase_crop_keys(off, c.duration());
                 pieces.push(Segment::Clip(tail));
             }
             Ok(Batch {
@@ -629,7 +629,7 @@ pub fn paste_ripple_on(
                     speed: c.speed,
                     effects: c.effects.clone(),
                 };
-                tail.rebase_crop_keys(head_len);
+                tail.rebase_crop_keys(head_len, c.duration());
                 pieces.push(Segment::Clip(tail));
             }
             (pieces, payload_id)
@@ -1005,7 +1005,7 @@ fn split_segment_at(
                 speed: c.speed,
                 effects: c.effects.clone(),
             };
-            left.truncate_crop_keys(offset);
+            left.truncate_crop_keys(offset, c.duration());
             let mut right = Clip {
                 id: take_id(next_id)?,
                 asset: c.asset,
@@ -1014,7 +1014,7 @@ fn split_segment_at(
                 speed: c.speed,
                 effects: c.effects.clone(),
             };
-            right.rebase_crop_keys(offset);
+            right.rebase_crop_keys(offset, c.duration());
             Ok((Segment::Clip(left), Segment::Clip(right)))
         }
         Segment::Gap(g) => {

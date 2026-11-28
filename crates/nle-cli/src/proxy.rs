@@ -507,8 +507,18 @@ fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
             };
             // The slice's head is clip-relative timeline `offset`, so re-base
             // crop keys onto it exactly like a trim-in; otherwise the proxy
-            // animates from the old head.
-            piece.rebase_crop_keys(offset);
+            // animates from the old head. Pass the *pre-slice* duration:
+            // `piece` has already lost both the head and the tail, so
+            // `piece.duration()` would compress the pass that ended at the
+            // original clip end.
+            piece.rebase_crop_keys(offset, c.duration());
+            // Only a slice that ends before the clip's tail cuts the crop:
+            // then end the pass at the sampled value instead of stretching the
+            // next key's window to the slice end. A slice that reaches the
+            // clip end keeps the normal stretched-tail semantics.
+            if offset + len < c.duration() {
+                piece.truncate_crop_keys(len, c.duration());
+            }
             Segment::Clip(piece)
         }
         Segment::Transition(t) => {
@@ -776,6 +786,40 @@ mod tests {
             "the window at the trim offset becomes the head key"
         );
         assert_eq!(keys[1].at, secs(1), "later keys shift with the head");
+
+        // A slice cuts both ends before re-basing. Re-base against the
+        // original 10 s duration, not the 1 s piece: keys 0 (x10) and 3
+        // (x40) put x at 20 at 1 s and 30 at the slice end.
+        let mut long = Clip::new(2, a, secs(0), secs(10));
+        long.effects = vec![Effect::Crop {
+            x: 10.0,
+            y: 0.0,
+            w: 50.0,
+            h: 50.0,
+            keys: vec![key(secs(0), 10.0), key(secs(3), 40.0)],
+        }];
+        p.timeline.tracks[0].segments = vec![Segment::Clip(long)];
+        let slice = slice_tracks(&p, secs(1), secs(2));
+        let Some(Segment::Clip(clipped)) = slice[0]
+            .segments
+            .iter()
+            .find(|s| matches!(s, Segment::Clip(_)))
+        else {
+            panic!("the clip is in the slice: {:?}", slice[0].segments);
+        };
+        let Effect::Crop { keys, .. } = &clipped.effects[0] else {
+            panic!("the slice keeps the keyed crop");
+        };
+        assert_eq!(keys[0].x, 20.0, "the head samples the original pass");
+        assert_eq!(
+            nle_core::timeline::crop_passes(&clipped.effects[0], clipped.duration())
+                .last()
+                .expect("the slice has a pass")
+                .window_at(clipped.duration())
+                .x,
+            30.0,
+            "the slice end samples the original pass, not a compressed one"
+        );
     }
 
     /// A static crop in a sliced span must stay static. Re-basing used to push

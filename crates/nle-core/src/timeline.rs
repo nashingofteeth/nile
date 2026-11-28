@@ -856,6 +856,19 @@ fn keyed_passes(base: CropWindow, keys: &[&CropKey], duration: Seconds) -> Vec<C
     passes
 }
 
+/// Pull a sampled window inside the frame on both axes. A pass keeps the
+/// starting key's size while x/y interpolate toward a differently sized next
+/// key, so the sampled rectangle can overhang the canvas; writing that window
+/// back as a key would make `Effect::validation_error` reject the edit.
+fn clamp_crop_window(window: CropWindow) -> CropWindow {
+    CropWindow {
+        x: window.x.clamp(0.0, (100.0 - window.w).max(0.0)),
+        y: window.y.clamp(0.0, (100.0 - window.h).max(0.0)),
+        w: window.w,
+        h: window.h,
+    }
+}
+
 impl Clip {
     /// Re-base crop keys after `removed` timeline seconds disappear from the
     /// head (negative grows it). The value at the new head becomes the key at
@@ -863,14 +876,14 @@ impl Clip {
     /// A static crop (no keys) stays static: turning its base window into a
     /// key would make it keyed, and a keyed crop cannot share a clip with
     /// another effect.
-    pub fn rebase_crop_keys(&mut self, removed: Seconds) {
+    ///
+    /// `duration` is the *pre-cut* clip duration: callers have already
+    /// adjusted `asset_in`, so `self.duration()` alone is too short and would
+    /// compress a pass that ended at the old end.
+    pub fn rebase_crop_keys(&mut self, removed: Seconds, duration: Seconds) {
         if removed == Seconds::from_integer(0) {
             return;
         }
-        // The callers have already applied the head trim to `asset_in`, so
-        // this clip's duration is the *post-trim* length. The renderer showed
-        // the value against the pre-trim duration: duration + removed.
-        let duration = self.duration() + removed;
         for effect in &mut self.effects {
             if matches!(effect, Effect::Crop { keys, .. } if keys.is_empty()) {
                 continue;
@@ -878,6 +891,7 @@ impl Clip {
             let Some(value) = effect.crop_window_at(removed, duration) else {
                 continue;
             };
+            let value = clamp_crop_window(value);
             let Effect::Crop { keys, .. } = effect else {
                 continue;
             };
@@ -896,12 +910,39 @@ impl Clip {
         }
     }
 
-    /// Drop keys at/after `at` (the left half of a split has no time there).
-    pub fn truncate_crop_keys(&mut self, at: Seconds) {
+    /// End the crop at `at` for the left half of a split/slice. `duration` is
+    /// the *pre-cut* length. The cut's sampled window is appended as a key
+    /// when no key sits exactly there, so the left half's last pass ends on
+    /// the same window the right half re-bases to; keys after the cut are then
+    /// dropped. Without the endpoint the final pass would hold the previous
+    /// key and pop at the seam.
+    pub fn truncate_crop_keys(&mut self, at: Seconds, duration: Seconds) {
         for effect in &mut self.effects {
-            if let Effect::Crop { keys, .. } = effect {
-                keys.retain(|key| key.at < at);
+            let Effect::Crop { keys, .. } = effect else {
+                continue;
+            };
+            if keys.is_empty() {
+                continue;
             }
+            let endpoint = if keys.iter().any(|key| key.at == at) {
+                None
+            } else {
+                effect.crop_window_at(at, duration).map(clamp_crop_window)
+            };
+            let Effect::Crop { keys, .. } = effect else {
+                continue;
+            };
+            if let Some(value) = endpoint {
+                keys.push(CropKey {
+                    at,
+                    x: value.x,
+                    y: value.y,
+                    w: value.w,
+                    h: value.h,
+                });
+            }
+            keys.retain(|key| key.at <= at);
+            keys.sort_by_key(|key| key.at);
         }
     }
 
@@ -1495,8 +1536,8 @@ mod tests {
                     at: Seconds::new(1, 2),
                     x: 0.0,
                     y: 0.0,
-                    w: 100.0,
-                    h: 100.0,
+                    w: 50.0,
+                    h: 50.0,
                 },
                 CropKey {
                     at: Seconds::new(3, 2),
@@ -1507,13 +1548,13 @@ mod tests {
                 },
             ],
         }];
-        c.rebase_crop_keys(Seconds::from_integer(1));
+        c.rebase_crop_keys(Seconds::from_integer(1), Seconds::from_integer(2));
         let Effect::Crop { keys, .. } = &c.effects[0] else {
             panic!("crop");
         };
         assert_eq!(keys[0].at, Seconds::from_integer(0));
         assert_eq!(keys[0].x, 25.0, "the cut value becomes the new head");
-        assert_eq!(keys[0].w, 100.0);
+        assert_eq!(keys[0].w, 50.0);
         assert_eq!(keys[1].at, Seconds::new(1, 2));
         assert_eq!(keys[1].x, 50.0);
 
@@ -1524,11 +1565,13 @@ mod tests {
         assert_eq!(keys[0].at, Seconds::from_integer(0));
         assert_eq!(keys[1].at, Seconds::new(1, 4));
 
-        c.truncate_crop_keys(Seconds::new(1, 8));
+        c.truncate_crop_keys(Seconds::new(1, 8), Seconds::from_integer(2));
         let Effect::Crop { keys, .. } = &c.effects[0] else {
             panic!("crop");
         };
-        assert_eq!(keys.len(), 1, "the tail key is gone");
+        assert_eq!(keys.len(), 2, "the old tail key became the cut endpoint");
+        assert_eq!(keys[1].at, Seconds::new(1, 8));
+        assert_eq!(keys[1].x, 37.5, "the endpoint samples the pass at the cut");
     }
 
     fn crop_key(at: i64, x: f64, y: f64, w: f64, h: f64) -> CropKey {
@@ -1775,7 +1818,7 @@ mod tests {
 
         let mut clip = Clip::new(1, 1, Seconds::from_integer(5), Seconds::from_integer(10));
         clip.effects = vec![effect.clone()];
-        clip.rebase_crop_keys(Seconds::from_integer(5));
+        clip.rebase_crop_keys(Seconds::from_integer(5), Seconds::from_integer(10));
         let Effect::Crop { keys, .. } = &clip.effects[0] else {
             panic!("crop");
         };
