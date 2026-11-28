@@ -112,6 +112,14 @@ fn sequence_derive_copies_without_switching() {
     );
     p.save(&path).unwrap();
     let mut app = App::new(p, path.clone());
+    app.loaded = true; // `:seek` waits for the monitor, as in a live session
+    // Give #1 a non-empty stack and a non-zero playhead, then derive it from
+    // behind #2: a fresh stack must not look like a clone of an empty one.
+    assert!(cmd(&mut app, "sequence 1").contains("Sequence 1"));
+    assert!(cmd(&mut app, "split --at 1").contains("split"));
+    assert_eq!(app.project.depth(), 1);
+    assert!(cmd(&mut app, "seek 2").contains("playhead"));
+    assert_eq!(app.project.playhead, Seconds::from_integer(2));
     // The source must not be the active sequence: #2 is.
     assert!(cmd(&mut app, &format!("sequence {second}")).contains("Vertical"));
     assert_eq!(app.project.active_id(), second);
@@ -157,7 +165,8 @@ fn sequence_derive_copies_without_switching() {
         "a copy starts at its own head"
     );
 
-    // Overrides change the copy only: the source keeps its settings.
+    // Overrides change the copy only: neither the source nor the active #2
+    // takes them.
     let source = app.project.sequence(1).unwrap();
     assert_eq!(source.fps, Some(Seconds::from_integer(30)));
     assert_eq!(
@@ -167,18 +176,47 @@ fn sequence_derive_copies_without_switching() {
             height: 480
         })
     );
+    assert_eq!(
+        source.playhead,
+        Seconds::from_integer(2),
+        "the copy did not take the source's playhead"
+    );
+    let active = app.project.sequence(second).unwrap();
+    assert_eq!(active.fps, Some(Seconds::from_integer(25)));
+    assert_eq!(
+        active.video,
+        Some(nle_core::VideoSettings {
+            width: 1080,
+            height: 1920
+        })
+    );
 
     // The derive is persisted, not just in the session.
     let saved = nle_core::Project::load(&path).unwrap();
     assert_eq!(saved.active_id(), second, "the active sequence persisted");
     assert!(saved.sequence(second).is_some(), "sequence #2 is on disk");
+    assert_eq!(
+        saved.sequence(1).unwrap().playhead,
+        Seconds::from_integer(2),
+        "the source playhead persisted"
+    );
     let saved_copy = saved.sequence(copy_id).expect("the copy is on disk");
     assert_eq!(saved_copy.name, "Copy");
+    assert_eq!(
+        saved_copy.playhead,
+        Seconds::from_integer(0),
+        "the copy starts at head on disk too"
+    );
     assert_eq!(
         saved_copy.timeline.tracks[0].segments.len(),
         source_segments
     );
     let histories = nle_core::Histories::load_project(&path).unwrap();
+    assert_eq!(
+        histories.get(1).map(|history| history.depth()),
+        Some(1),
+        "the source's split stack persisted"
+    );
     assert_eq!(
         histories.get(copy_id).map(|history| history.depth()),
         Some(0),
@@ -187,7 +225,8 @@ fn sequence_derive_copies_without_switching() {
 
     // A snapshot copy, not a live derivation: editing #1 leaves the copy be.
     assert!(cmd(&mut app, "sequence 1").contains("Sequence 1"));
-    assert!(cmd(&mut app, "split --at 1").contains("split"));
+    assert_eq!(app.project.depth(), 1, "switching restored #1's stack");
+    assert!(cmd(&mut app, "split --at 2.5").contains("split"));
     assert_eq!(
         app.project.timeline.tracks[0].segments.len(),
         source_segments + 1
