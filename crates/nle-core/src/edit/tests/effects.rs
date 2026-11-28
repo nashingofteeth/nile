@@ -1,7 +1,7 @@
 use super::super::*;
 use super::*;
 use crate::time::Seconds;
-use crate::timeline::{CropKey, Effect, Track};
+use crate::timeline::{CropKey, Effect, Track, crop_passes};
 
 // A transition renders its neighbours' material, so each side carries a
 // copy of that neighbour's effects; effect edits keep the copies in sync,
@@ -116,9 +116,21 @@ fn splitting_a_keyed_clip_rebases_the_right_half() {
     let batch = split_on(&p, 0, 1.5).unwrap();
     h.apply(&mut p, batch, 0).unwrap();
 
-    let Segment::Clip(right) = &p.timeline.video_track().unwrap().segments[1] else {
+    let track = p.timeline.video_track().unwrap();
+    let Segment::Clip(left) = &track.segments[0] else {
+        panic!("left clip");
+    };
+    let Segment::Clip(right) = &track.segments[1] else {
         panic!("right clip");
     };
+    // The left half must not hold the previous key: at 1.4 s the original
+    // pass had interpolated 45 % between keys, and the cut window is 50.
+    let left_at = crop_passes(&left.effects[0], left.duration())
+        .last()
+        .expect("the left half keeps its final pass")
+        .window_at(Seconds::new(7, 5));
+    assert_eq!(left_at.x, 45.0, "the left half renders the original ramp");
+
     let Effect::Crop { keys, .. } = &right.effects[0] else {
         panic!("crop");
     };
@@ -126,6 +138,129 @@ fn splitting_a_keyed_clip_rebases_the_right_half() {
     assert_eq!(keys[0].at, Seconds::from_integer(0));
     assert_eq!(keys[0].x, 50.0, "the right half starts at the cut value");
     assert_eq!(keys[0].w, 50.0);
+    let left_end = crop_passes(&left.effects[0], left.duration())
+        .last()
+        .expect("the left half keeps its final pass")
+        .window_at(left.duration());
+    assert_eq!(
+        (left_end.x, left_end.y),
+        (keys[0].x, keys[0].y),
+        "both halves meet at the same cut window"
+    );
+}
+
+#[test]
+fn splitting_between_keys_synthesizes_the_cut_window_on_the_left() {
+    let mut p = clip_pair();
+    if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+        c.effects = vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![
+                CropKey {
+                    at: Seconds::new(1, 2),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+                CropKey {
+                    at: Seconds::new(3, 2),
+                    x: 50.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+            ],
+        }];
+    }
+    let mut h = History::default();
+    let batch = split_on(&p, 0, 1.0).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let track = p.timeline.video_track().unwrap();
+    let Segment::Clip(left) = &track.segments[0] else {
+        panic!("left clip");
+    };
+    let Segment::Clip(right) = &track.segments[1] else {
+        panic!("right clip");
+    };
+    let Effect::Crop { keys, .. } = &left.effects[0] else {
+        panic!("crop");
+    };
+    assert_eq!(keys.len(), 2, "the cut gets a synthetic endpoint");
+    assert_eq!(keys[1].at, Seconds::from_integer(1));
+    assert_eq!(keys[1].x, 25.0, "the cut samples the original ramp");
+    assert!(
+        keys.iter()
+            .all(|key| key.x + key.w <= 100.0 && key.y + key.h <= 100.0),
+        "the synthetic window is in-frame: {keys:?}"
+    );
+    let Effect::Crop { keys, .. } = &right.effects[0] else {
+        panic!("crop");
+    };
+    assert_eq!(keys[0].x, 25.0, "the right half re-bases to the same cut");
+}
+
+#[test]
+fn trimming_the_head_clamps_a_rebased_key_into_the_frame() {
+    let mut p = clip_pair();
+    if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+        c.effects = vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![
+                CropKey {
+                    at: Seconds::from_integer(1),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                CropKey {
+                    at: Seconds::from_integer(2),
+                    x: 50.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+            ],
+        }];
+    }
+    let mut h = History::default();
+    // Cut inside the size-step pass: the pass keeps w/h 100 while x moves,
+    // so the sampled 25 % head would overhang the frame.
+    let batch = trim_in_on(&p, 0, 1.5).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let clip = p
+        .timeline
+        .video_track()
+        .unwrap()
+        .segments
+        .iter()
+        .find_map(|seg| match seg {
+            Segment::Clip(c) if c.id == 1 => Some(c),
+            _ => None,
+        })
+        .expect("trimmed clip");
+    let Effect::Crop { keys, .. } = &clip.effects[0] else {
+        panic!("crop");
+    };
+    assert_eq!(keys[0].at, Seconds::from_integer(0));
+    assert!(
+        keys[0].x + keys[0].w <= 100.0 && keys[0].y + keys[0].h <= 100.0,
+        "the rebased head is clamped into the frame: {keys:?}"
+    );
+    assert_eq!(
+        clip.effects[0].validation_error(),
+        None,
+        "the saved key is valid"
+    );
 }
 
 #[test]
