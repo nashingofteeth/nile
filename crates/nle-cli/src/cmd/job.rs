@@ -142,8 +142,9 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
                     }
                     Err(error) => {
                         // The server may refuse a path a live job owns even
-                        // though our `exists()` plan passed. If nothing was
-                        // queued, do not leave the components this batch made.
+                        // though our `symlink_metadata` plan passed. If nothing
+                        // was queued, do not leave the components this batch
+                        // made.
                         if queued.is_empty() {
                             discard_created_dirs(&created);
                         }

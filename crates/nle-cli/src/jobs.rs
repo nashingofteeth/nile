@@ -200,12 +200,12 @@ impl JobQueue {
     ///
     /// The queue lock covers both output guards and the record creation: two
     /// batches (or two clients) that picked the same path cannot both submit,
-    /// because the client's `exists()` check is only advisory. The first
-    /// guard refuses a path a live job owns (so a submit racing a just-
-    /// published record names that job); the second refuses a path already on
-    /// disk (a finished job's deliverable or any unrelated file). Both
-    /// compare [`output_identity`], not the literal `PathBuf`, so a `..` or
-    /// symlinked spelling cannot claim the same file twice.
+    /// because the client's preflight check is only advisory. The first guard
+    /// refuses a path a live job owns (so a submit racing a just-published
+    /// record names that job); the second refuses a path already on disk (a
+    /// finished job's deliverable or any unrelated file). Both compare
+    /// [`output_identity`], not the literal `PathBuf`, so a `..` or symlinked
+    /// spelling cannot claim the same file twice.
     pub(crate) fn submit(
         &self,
         project: &Project,
@@ -618,10 +618,8 @@ fn publish_no_replace(
         Err(link) => {
             let mut cancelled = || cancel.load(Ordering::Relaxed);
             match copy_no_replace(temp, copy_temp, output, &mut cancelled) {
-                Ok(()) => {
-                    remove_temp(temp);
-                    Ok(())
-                }
+                // The helper consumed both the stage and the source temp.
+                Ok(()) => Ok(()),
                 Err(PublishError::Cancelled) => {
                     remove_temp(temp);
                     Err(PublishError::Cancelled)
@@ -644,8 +642,10 @@ fn publish_no_replace(
 /// between them), syncs it, then checks the final name for an existing entry
 /// and renames the complete copy into place. The final path is never created
 /// before the bytes are there, so a crash or cancel leaves only the hidden
-/// staging file. A concurrent creator between the check and the rename is the
-/// residual race: `rename` replaces, and std exposes no no-replace rename.
+/// staging file. On success the source temp is consumed too, so the caller
+/// never has two complete renders. A concurrent creator between the check and
+/// the rename is the residual race: `rename` replaces, and std exposes no
+/// no-replace rename.
 fn copy_no_replace(
     temp: &Path,
     copy_temp: &Path,
@@ -705,13 +705,19 @@ fn copy_no_replace(
         remove_staging(copy_temp);
         return Err(PublishError::Io(error));
     }
+    remove_temp(temp);
     Ok(())
 }
 
 /// Drop the staging copy on a failed or cancelled publish. A removal failure
 /// is left to the startup sweep, which knows the terminal record's path.
 fn remove_staging(copy_temp: &Path) {
-    let _ = std::fs::remove_file(copy_temp);
+    if let Err(error) = std::fs::remove_file(copy_temp) {
+        log::line(&format!(
+            "job queue: could not remove publish stage {}: {error}",
+            copy_temp.display()
+        ));
+    }
 }
 
 /// Drop the temp after a publish attempt. A failure here does not undo the
@@ -1605,6 +1611,52 @@ mod tests {
             copy_no_replace(&source, &staging, &output, &mut never).expect_err("unreadable source");
         assert!(matches!(error, PublishError::Io(_)), "{error:?}");
         assert!(!output.exists(), "no deliverable from a failed copy");
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn the_copy_fallback_publishes_complete_bytes_on_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job6.mp4");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 6);
+        std::fs::write(&temp, b"complete render bytes").unwrap();
+
+        let mut never = || false;
+        copy_no_replace(&temp, &staging, &output, &mut never).expect("publish the copy");
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"complete render bytes",
+            "the final name holds the complete staged bytes"
+        );
+        assert!(!staging.exists(), "the staged copy became the output");
+        assert!(!temp.exists(), "the source temp is consumed on success");
+    }
+
+    #[test]
+    fn the_copy_fallback_cancels_after_the_copy_before_the_rename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job7.mp4");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 7);
+        std::fs::write(&temp, b"x").unwrap();
+
+        // Two loop checks see the file (one read, then EOF); the post-copy
+        // check cancels before the rename, so the commit point is never
+        // reached.
+        let mut calls = 0;
+        let mut cancel_after_copy = || {
+            calls += 1;
+            calls > 2
+        };
+        let error = copy_no_replace(&temp, &staging, &output, &mut cancel_after_copy)
+            .expect_err("cancelled after the copy");
+        assert!(matches!(error, PublishError::Cancelled));
+        assert_eq!(calls, 3, "the post-copy check ran");
+        assert!(
+            !output.exists(),
+            "no deliverable after the post-copy cancel"
+        );
         assert!(!staging.exists(), "the staged copy is removed");
     }
 

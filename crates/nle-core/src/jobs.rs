@@ -552,9 +552,10 @@ pub struct TempSweep {
 /// The hidden temp path the renderer writes before publishing.
 ///
 /// It keeps the output's extension (ffmpeg picks the muxer from it) and lives
-/// beside the output so the publish stays on one filesystem. This is the one
-/// spelling the executor and the startup sweep share; a different shape here
-/// would make a crash leftover invisible to the sweep.
+/// beside the output so the publish stays on one filesystem. This spelling and
+/// [`copy_path`] (derived from it) are the two the executor and the startup
+/// sweep share; a different shape here would make a crash leftover invisible to
+/// the sweep.
 pub fn partial_path(output: &Path, id: u64) -> PathBuf {
     let name = output
         .file_name()

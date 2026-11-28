@@ -1554,6 +1554,71 @@ mod tests {
     }
 
     #[test]
+    fn job_submit_names_a_live_job_that_already_published() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        let run: std::sync::Arc<crate::jobs::JobRunner> =
+            std::sync::Arc::new(move |_store, job, _cancel, _progress| {
+                // Publish early, then keep the record non-terminal: the
+                // live-owner scan must run before the existing-file check.
+                std::fs::write(&job.output, b"published").expect("write output");
+                let _ = started_tx.send(job.id);
+                let rx = release_rx.lock().unwrap();
+                let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+                Ok(None)
+            });
+        let (dir, mut handler) = handler_with_runner(run);
+        let output = dir.path().join("published.mp4");
+        let revision = handler.session.revision();
+        let active = handler.session.project().active_id();
+        let Reply::Job(first) = handler
+            .job_submit(
+                revision,
+                &output,
+                active,
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect("submit")
+        else {
+            panic!("expected a job");
+        };
+        assert_eq!(
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("job started"),
+            first.id
+        );
+        assert!(output.exists(), "the running job already published");
+
+        let error = handler
+            .job_submit(
+                revision,
+                &output,
+                active,
+                nle_core::jobs::JobExport::default(),
+            )
+            .expect_err("the live job owns the path");
+        assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
+        assert!(
+            error.message.contains(&format!("job #{}", first.id)),
+            "the live owner is named, not just the file: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("already exists"),
+            "guard order: live owner before the existing path: {}",
+            error.message
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            wait_done(&handler, first.id).state,
+            nle_core::JobState::Done
+        );
+    }
+
+    #[test]
     fn unknown_job_ids_are_invalid_params() {
         let (_dir, handler) = handler_with_runner(quick_runner());
         let error = handler.job_get(99).expect_err("unknown");

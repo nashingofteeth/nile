@@ -705,7 +705,8 @@ enum JobCmd {
     },
     /// Queue one export per sequence into a directory
     Batch {
-        /// Directory for the renders (created if missing)
+        /// Directory for the renders (created if missing; an existing render
+        /// file is refused)
         #[arg(long, value_name = "DIR")]
         output_dir: PathBuf,
         /// Render only these sequences, in this order (default: every sequence)
