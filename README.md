@@ -119,10 +119,11 @@ does not move the base. If the span crosses a transition on another track,
 that track stays local and the message says sync was skipped. There is no
 per-track sync-lock toggle yet: the first video track is always the master.
 
-Video tracks show a two-row filmstrip under the clip labels: raw source
-frames sampled across each clip's source span and cached under
+When enabled, video tracks show a two-row filmstrip under the clip labels: raw
+source frames sampled across each clip's source span and cached under
 `.nile/<stem>/cache/filmstrip/`. `Ctrl-t` or `:filmstrip` toggles the rows
-for this session; effects are not baked into the preview strip.
+for this session; they start off, and effects are not baked into the preview
+strip.
 
 A project can hold several **sequences** — separate timelines with their own
 frame rate, output size, playhead, audio post and undo stack, sharing one
@@ -263,7 +264,7 @@ The `:` line is the CLI grammar, flag for flag:
 :sequence [ls|N|use N]         :sequence add NAME [--width W --height H --fps RATE]
 :sequence audio [--normalize [BOOL]] [--fade-in S --fade-out S]
 :media ls|rm                  :cache prune [--days N] [--dry-run]
-:filmstrip [on|off]           # timeline strips (session-only)
+:filmstrip [on|off]           # timeline strips (session-only, default off)
 :import PATH|DIR …            :add FILE
 # Tab completes paths; quote paths with spaces, or use the yazi picker (`a`)
 :show / :seek T
