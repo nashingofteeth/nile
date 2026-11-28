@@ -34,10 +34,15 @@ checks); older files are rejected, never migrated.
 
 - `Project::validate` walks every sequence and checks unique ids, a valid
   `active`, a positive `fps`, a non-zero output canvas, and that every
-  `Derived` origin names an existing source. `parse_fps_arg` and
-  `Document::add_sequence` reject `--fps 0` before it can reach `grid_time`
-  (which divides by the rate); `Document::add_sequence`/`derive_sequence` and
-  the TUI also refuse a zero width/height before saving.
+  `Derived` origin names an existing source. It also refuses any sequence,
+  group, annotation, asset, clip or transition id at `u32::MAX`.
+  `u32::MAX` is reserved: allocators hand out at most `u32::MAX - 1`, then
+  return `ProjectError::IdExhausted`; the CLI import/detect counters and
+  `add_asset` follow the same rule.
+  `parse_fps_arg` and `Document::add_sequence` reject `--fps 0` before it can
+  reach `grid_time` (which divides by the rate);
+  `Document::add_sequence`/`derive_sequence` and the TUI also refuse a zero
+  width/height before saving.
   Loading rejects a project with no sequences.
 - `History::apply` clamps the edited sequence. `Document::save` uses
   `clamp_project_all`, so a sequence that is not active is still clamped

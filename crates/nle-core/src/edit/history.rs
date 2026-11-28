@@ -217,16 +217,17 @@ impl History {
 
     /// Add `path` to the pool and record it, so undo removes it again —
     /// refused, loudly, while a clip still uses it (`validate` catches
-    /// that). Returns the asset id and the description.
+    /// that) or when the asset id space is exhausted. Returns the asset id and
+    /// the description.
     pub fn add_asset(
         &mut self,
         project: &mut Project,
         path: PathBuf,
         probe: RawProbe,
         playhead: i64,
-    ) -> (u32, String) {
+    ) -> Result<(u32, String), EditError> {
         let before = project.media.clone();
-        let (id, _) = project.add_asset(path, probe);
+        let (id, _) = project.add_asset(path, probe)?;
         let after = project.media.clone();
         let desc = format!("import asset #{id}");
         // A path already in the pool changed nothing, so it records nothing:
@@ -234,7 +235,7 @@ impl History {
         // `add_assets` and `resolve_annotation` skip their no-ops the same way
         // — the rule belongs here, not in every caller's dedup.
         if before == after {
-            return (id, desc);
+            return Ok((id, desc));
         }
         self.push_change(Change::Assets(AssetChange {
             before,
@@ -244,28 +245,37 @@ impl History {
             provenance: self.provenance(),
         }));
         project.bump_revision();
-        (id, desc)
+        Ok((id, desc))
     }
 
     /// Add a batch of files to the pool as **one** undo step. An import often
     /// brings in several clips; undoing it should remove the whole batch, not
     /// require one `u` per file. Returns the new asset ids in insertion order.
+    ///
+    /// A failure mid-batch (an exhausted asset id space) restores the pool to
+    /// its pre-batch state and records nothing, so no half-import survives.
     pub fn add_assets(
         &mut self,
         project: &mut Project,
         assets: Vec<(PathBuf, RawProbe)>,
         playhead: i64,
-    ) -> Vec<u32> {
+    ) -> Result<Vec<u32>, EditError> {
         let before = project.media.clone();
         let mut ids = Vec::new();
         for (path, probe) in assets {
-            let (id, added) = project.add_asset(path, probe);
+            let (id, added) = match project.add_asset(path, probe) {
+                Ok(added) => added,
+                Err(error) => {
+                    project.media = before;
+                    return Err(error.into());
+                }
+            };
             if added {
                 ids.push(id);
             }
         }
         if ids.is_empty() {
-            return ids;
+            return Ok(ids);
         }
         let desc = match ids.as_slice() {
             [id] => format!("import asset #{id}"),
@@ -279,7 +289,7 @@ impl History {
             provenance: self.provenance(),
         }));
         project.bump_revision();
-        ids
+        Ok(ids)
     }
 
     /// Create a media group and record the group list so undo removes it.

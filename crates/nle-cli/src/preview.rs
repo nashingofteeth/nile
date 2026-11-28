@@ -1037,7 +1037,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        p.add_asset("/media/red.mp4".into(), probe);
+        p.add_asset("/media/red.mp4".into(), probe).expect("asset");
         p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 2)];
         p.timeline.tracks[0].muted = true;
         let windows = composite_windows(&p).unwrap();
@@ -1107,7 +1107,9 @@ mod tests {
     fn composite_plan_treats_a_transition_as_material_to_proxy() {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        let (low, _) = p.add_asset("/media/low.mp4".into(), probe_report("10"));
+        let (low, _) = p
+            .add_asset("/media/low.mp4".into(), probe_report("10"))
+            .expect("asset");
         p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 4)];
         let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
         p.timeline.tracks[ti].segments = vec![TimelineSegment::Transition(Transition {
@@ -1170,8 +1172,12 @@ mod tests {
             codec_name: Some("aac".into()),
             ..Default::default()
         });
-        let (low, _) = p.add_asset("/media/low.mp4".into(), with_audio.clone());
-        let (high, _) = p.add_asset("/media/high.mp4".into(), with_audio);
+        let (low, _) = p
+            .add_asset("/media/low.mp4".into(), with_audio.clone())
+            .expect("asset");
+        let (high, _) = p
+            .add_asset("/media/high.mp4".into(), with_audio)
+            .expect("asset");
         p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 4)];
         let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
         p.timeline.tracks[ti].segments = vec![
@@ -1226,7 +1232,9 @@ mod tests {
             codec_name: Some("aac".into()),
             ..Default::default()
         });
-        let (_a, _) = p.add_asset("/media/red.mp4".into(), with_audio);
+        let (_a, _) = p
+            .add_asset("/media/red.mp4".into(), with_audio)
+            .expect("asset");
         p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 4)];
         let ai = p.timeline.add_track(nle_core::timeline::TrackKind::Audio);
         p.timeline.tracks[ai].segments = vec![
@@ -1362,7 +1370,9 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let _ = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let _ = p
+            .add_asset("/media/red.mp4".into(), probe_report("10"))
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![seg_clip(1, 0, 2), seg_clip(2, 0, 2)];
         for seg in &mut p.timeline.video_track_mut().unwrap().segments {
             if let TimelineSegment::Clip(c) = seg {
@@ -1380,7 +1390,9 @@ mod tests {
         let mut q = Project::new();
         q.fps = p.fps;
         q.video = p.video.clone();
-        let _ = q.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let _ = q
+            .add_asset("/media/red.mp4".into(), probe_report("10"))
+            .expect("asset");
         q.timeline.video_track_mut().unwrap().segments = vec![seg_clip(1, 0, 2), seg_clip(2, 0, 2)];
         let steps = composite_steps(&q).unwrap();
         assert_eq!(steps.iter().filter(|s| step_needs_proxy(&q, s)).count(), 0);
@@ -1393,7 +1405,9 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (_a, _) = p.add_asset("/media/red.mp4".into(), probe_report("5"));
+        let (_a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_report("5"))
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![
             seg_clip(1, 1, 3), // [0..2) src 1..3
             TimelineSegment::Gap(TimelineGap {
@@ -1462,7 +1476,7 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (asset, _) = p.add_asset(media, probe);
+        let (asset, _) = p.add_asset(media, probe).expect("asset");
         p.timeline.tracks[0].segments = vec![
             TimelineSegment::Clip(TimelineClip {
                 id: 1,
@@ -1583,8 +1597,12 @@ mod tests {
     fn composite_project() -> Project {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        let (low, _) = p.add_asset("/media/low.mp4".into(), probe_report("10"));
-        let (high, _) = p.add_asset("/media/high.mp4".into(), probe_report("10"));
+        let (low, _) = p
+            .add_asset("/media/low.mp4".into(), probe_report("10"))
+            .expect("asset");
+        let (high, _) = p
+            .add_asset("/media/high.mp4".into(), probe_report("10"))
+            .expect("asset");
         p.timeline.tracks[0].segments = vec![TimelineSegment::Clip(TimelineClip {
             id: 1,
             asset: low,
@@ -1646,8 +1664,12 @@ mod tests {
     fn composite_top_clip_wins_over_a_lower_clip() {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        let _ = p.add_asset("/media/low.mp4".into(), probe_report("10"));
-        let (high, _) = p.add_asset("/media/high.mp4".into(), probe_report("10"));
+        let _ = p
+            .add_asset("/media/low.mp4".into(), probe_report("10"))
+            .expect("asset");
+        let (high, _) = p
+            .add_asset("/media/high.mp4".into(), probe_report("10"))
+            .expect("asset");
         p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 2)]; // asset 1 (low)
         let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
         p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(TimelineClip {
@@ -1673,7 +1695,9 @@ mod tests {
     fn composite_is_black_only_when_every_track_is_a_gap() {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        let _ = p.add_asset("/media/low.mp4".into(), probe_report("10"));
+        let _ = p
+            .add_asset("/media/low.mp4".into(), probe_report("10"))
+            .expect("asset");
         p.timeline.tracks[0].segments = vec![TimelineSegment::Gap(TimelineGap {
             duration: Seconds::from_integer(3),
         })];

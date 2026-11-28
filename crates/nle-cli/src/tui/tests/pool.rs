@@ -16,25 +16,27 @@ use nle_core::{Project, frame_of};
 #[test]
 fn media_pool_guarded_removal() {
     let mut p = asset_project();
-    let (spare, _) = p.add_asset(
-        "/media/spare.mp4".into(),
-        RawProbe {
-            streams: vec![RawStream {
-                index: 0,
-                codec_type: Some("video".into()),
-                codec_name: Some("h264".into()),
-                width: Some(320),
-                height: Some(240),
-                r_frame_rate: Some("30/1".into()),
-                ..Default::default()
-            }],
-            format: RawFormat {
-                format_name: "mp4".into(),
-                duration: Some("5".into()),
-                ..Default::default()
+    let (spare, _) = p
+        .add_asset(
+            "/media/spare.mp4".into(),
+            RawProbe {
+                streams: vec![RawStream {
+                    index: 0,
+                    codec_type: Some("video".into()),
+                    codec_name: Some("h264".into()),
+                    width: Some(320),
+                    height: Some(240),
+                    r_frame_rate: Some("30/1".into()),
+                    ..Default::default()
+                }],
+                format: RawFormat {
+                    format_name: "mp4".into(),
+                    duration: Some("5".into()),
+                    ..Default::default()
+                },
             },
-        },
-    );
+        )
+        .expect("asset");
     // Insert the spare as a clip (core path), then it's in use.
     let snapshot = TimelineSegment::Clip(Clip {
         id: 0,
@@ -54,10 +56,12 @@ fn media_pool_guarded_removal() {
     assert!(p.remove_asset(spare).is_err(), "in use → refused");
 
     // An unused import removes cleanly.
-    let (free, _) = p.add_asset(
-        "/media/free.mp4".into(),
-        p.asset(spare).unwrap().probe.clone(),
-    );
+    let (free, _) = p
+        .add_asset(
+            "/media/free.mp4".into(),
+            p.asset(spare).unwrap().probe.clone(),
+        )
+        .expect("asset");
     assert!(free != spare);
     assert!(p.remove_asset(free).is_ok());
 }
@@ -240,7 +244,8 @@ fn pool_insert_uses_whole_frames() {
                 ..Default::default()
             },
         },
-    );
+    )
+    .expect("asset");
     let mut app = App::new(p, temp_project_path("t"));
     // Mirror insert_from_pool's whole-frame math.
     let d = app.project.media[0].duration().unwrap();
@@ -418,7 +423,9 @@ fn pool_undo_keeps_the_pool_preview() {
 #[test]
 fn pool_remove_is_undoable() {
     let mut p = asset_project();
-    let (spare, _) = p.add_asset("/media/spare.mp4".into(), p.asset(1).unwrap().probe.clone());
+    let (spare, _) = p
+        .add_asset("/media/spare.mp4".into(), p.asset(1).unwrap().probe.clone())
+        .expect("asset");
     let mut app = App::new(p, temp_project_path("pool-remove"));
     app.loaded = true;
     open_pool_mode(&mut app, 1); // the spare row
@@ -575,7 +582,8 @@ fn pool_t_switches_the_insert_track() {
 #[test]
 fn pool_reopen_returns_to_the_last_row() {
     let mut p = asset_project();
-    p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+    p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone())
+        .expect("asset");
     // Drop the gap so close_pool's composite EDL needs no black file (ffmpeg).
     p.timeline.video_track_mut().unwrap().segments.remove(1);
     let mut app = App::new(p, temp_project_path("t"));
@@ -599,7 +607,8 @@ fn pool_reopen_returns_to_the_last_row() {
 #[test]
 fn pool_command_preserves_the_pool_state() {
     let mut p = asset_project();
-    p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+    p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone())
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments.remove(1); // no black file
     let mut app = App::new(p, temp_project_path("t"));
     app.loaded = true;
@@ -639,24 +648,26 @@ fn pool_a_requests_the_import_picker() {
 #[test]
 fn inserting_at_the_start_ripples_an_audio_track() {
     let mut p = asset_project();
-    let (audio_asset, _) = p.add_asset(
-        "/media/tone.m4a".into(),
-        RawProbe {
-            streams: vec![RawStream {
-                index: 0,
-                codec_type: Some("audio".into()),
-                codec_name: Some("aac".into()),
-                sample_rate: Some("48000".into()),
-                channels: Some(2),
-                ..Default::default()
-            }],
-            format: RawFormat {
-                format_name: "m4a".into(),
-                duration: Some("10".into()),
-                ..Default::default()
+    let (audio_asset, _) = p
+        .add_asset(
+            "/media/tone.m4a".into(),
+            RawProbe {
+                streams: vec![RawStream {
+                    index: 0,
+                    codec_type: Some("audio".into()),
+                    codec_name: Some("aac".into()),
+                    sample_rate: Some("48000".into()),
+                    channels: Some(2),
+                    ..Default::default()
+                }],
+                format: RawFormat {
+                    format_name: "m4a".into(),
+                    duration: Some("10".into()),
+                    ..Default::default()
+                },
             },
-        },
-    );
+        )
+        .expect("asset");
     let audio = p.timeline.add_track(TrackKind::Audio);
     p.timeline.track_mut(audio).unwrap().segments = vec![TimelineSegment::Clip(nle_core::Clip {
         id: 99,
@@ -666,7 +677,9 @@ fn inserting_at_the_start_ripples_an_audio_track() {
         speed: Seconds::from_integer(1),
         effects: Vec::new(),
     })];
-    let (spare, _) = p.add_asset("/media/spare.mp4".into(), p.asset(1).unwrap().probe.clone());
+    let (spare, _) = p
+        .add_asset("/media/spare.mp4".into(), p.asset(1).unwrap().probe.clone())
+        .expect("asset");
     let mut app = App::new(p, temp_project_path("insert-ripple"));
     app.loaded = true;
     app.active_track = 0;
@@ -758,7 +771,9 @@ fn pool_source_marks_reject_an_out_before_in_and_clear() {
 #[test]
 fn pool_source_marks_are_per_asset() {
     let mut p = asset_project();
-    let (other, _) = p.add_asset("/media/other.mp4".into(), p.asset(1).unwrap().probe.clone());
+    let (other, _) = p
+        .add_asset("/media/other.mp4".into(), p.asset(1).unwrap().probe.clone())
+        .expect("asset");
     let mut app = App::new(p, temp_project_path("pool-marks-assets"));
     app.loaded = true;
     open_pool_mode(&mut app, 0);
@@ -804,9 +819,9 @@ fn pool_jumps_to_source_marks() {
     assert_eq!(app.message, "no out mark");
 }
 
-// Asset ids are reused (`next_asset_id` is max + 1). Removing an asset must
-// drop its id-keyed caches, or a later import of a different file draws the
-// removed one's waveform and walks its keyframes.
+// A new asset takes the id one past the highest (`next_asset_id`). Removing
+// an asset must drop its id-keyed caches, or a later import of a different
+// file draws the removed one's waveform and walks its keyframes.
 #[test]
 fn removing_an_asset_prunes_its_cached_waveform() {
     use super::super::actions::run_action;
@@ -818,7 +833,8 @@ fn removing_an_asset_prunes_its_cached_waveform() {
         .project
         .document_mut()
         .expect("direct test session")
-        .add_asset("/media/spare.mp4".into(), probe, 0);
+        .add_asset("/media/spare.mp4".into(), probe, 0)
+        .expect("asset");
     app.waveforms.insert(
         id,
         crate::waveform::Waveform {

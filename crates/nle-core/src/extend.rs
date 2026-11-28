@@ -439,7 +439,9 @@ mod tests {
     fn fixture() -> Project {
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_report("10"))
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments =
             vec![gap(1), clip(1, a, 0, 3), gap(2), clip(2, a, 0, 2)];
         p

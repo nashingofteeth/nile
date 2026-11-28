@@ -60,6 +60,38 @@ fn insert_splits_a_clip_at_the_playhead() {
 }
 
 #[test]
+fn a_spent_last_id_is_never_reused_by_a_second_allocation() {
+    // The payload spends `u32::MAX - 1`, the last assignable id; the split
+    // right half then has no successor. Refuse the whole batch rather than
+    // alias the last id.
+    let last = u32::MAX - 1;
+    let mut p = Project::new();
+    p.fps = Some(Seconds::new(30, 1));
+    let (asset, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
+    p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+        last - 1,
+        asset,
+        Seconds::from_integer(0),
+        Seconds::from_integer(4),
+    ))];
+    let payload = Segment::Clip(Clip::new(
+        0,
+        asset,
+        Seconds::from_integer(4),
+        Seconds::from_integer(5),
+    ));
+    let before = p.clone();
+    let err = insert_segments_on(&p, 0, 1.0, &[payload]).unwrap_err();
+    assert!(matches!(
+        err,
+        EditError::Project(ProjectError::IdExhausted("clip", id)) if id == last
+    ));
+    assert_eq!(p, before, "the planner mutated nothing");
+}
+
+#[test]
 fn insert_splits_a_gap_at_the_playhead() {
     let mut p = fixture();
     let a = p.media[0].id;
@@ -291,7 +323,9 @@ fn d_on_gap_between_matching_clips_rejoins_them() {
     // contiguous halves of one source range.
     let mut p = Project::new();
     p.fps = Some(Seconds::new(30, 1));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![
         Segment::Clip(Clip {
             id: 1,
@@ -346,7 +380,9 @@ fn dd_clip_between_gaps_merges_into_one() {
     // [Gap 2] [Clip #1 dur 2] [Gap 3]: dd the clip.
     let mut p = Project::new();
     p.fps = Some(Seconds::new(30, 1));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![
         Segment::Gap(Gap {
             duration: Seconds::from_integer(2),
@@ -382,7 +418,9 @@ fn dd_clip_between_gaps_merges_into_one() {
 fn d_on_clip_between_gaps_merges_the_gaps() {
     let mut p = Project::new();
     p.fps = Some(Seconds::new(30, 1));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![
         Segment::Gap(Gap {
             duration: Seconds::from_integer(1),
@@ -698,7 +736,9 @@ fn appending_past_the_end_coalesces_gaps() {
 fn a_ripple_paste_in_an_off_grid_gap_leaves_no_slivers() {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let clip = |id, out: Seconds| {
         Segment::Clip(Clip {
             id,
@@ -808,6 +848,126 @@ fn paste_gap_payloads() {
     assert_eq!(segs.len(), 2, "clip #2 overwritten, no extra gap");
     assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
     assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
+}
+
+#[test]
+fn a_gap_paste_that_splits_a_clip_takes_the_last_id_then_refuses() {
+    let last = u32::MAX - 1;
+    let payload = Segment::Gap(Gap {
+        duration: Seconds::new(1, 2),
+    });
+    for ripple in [false, true] {
+        // A gap payload spends no id itself; the split tail takes the one
+        // fresh id, which is the last legal one.
+        let mut p = fixture();
+        set_first_clip_id(&mut p, last - 1);
+        let batch = if ripple {
+            paste_ripple_on(&p, 0, &payload, 0.5)
+        } else {
+            paste_on(&p, 0, &payload, 0.5)
+        }
+        .expect("the split tail fits at the last legal id");
+        let mut q = p.clone();
+        let mut h = History::default();
+        h.apply(&mut q, batch, 0).unwrap();
+        let ids = clip_ids(&q);
+        assert!(ids.contains(&last), "{ids:?}");
+        assert!(!ids.contains(&u32::MAX), "{ids:?}");
+
+        // With that last id already in use, the tail has no successor.
+        let mut p = fixture();
+        set_first_clip_id(&mut p, last);
+        let before = p.clone();
+        let err = if ripple {
+            paste_ripple_on(&p, 0, &payload, 0.5)
+        } else {
+            paste_on(&p, 0, &payload, 0.5)
+        }
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            EditError::Project(ProjectError::IdExhausted("clip", id)) if id == last
+        ));
+        assert_eq!(p, before, "the planner mutated nothing");
+    }
+}
+
+#[test]
+fn a_gap_paste_past_the_end_allocates_no_id_at_the_ceiling() {
+    let last = u32::MAX - 1;
+    let payload = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    for ripple in [false, true] {
+        let mut p = fixture();
+        set_first_clip_id(&mut p, last);
+        let batch = if ripple {
+            paste_ripple_on(&p, 0, &payload, 5.0)
+        } else {
+            paste_on(&p, 0, &payload, 5.0)
+        }
+        .expect("a gap payload needs no clip id");
+        let mut q = p.clone();
+        let mut h = History::default();
+        h.apply(&mut q, batch, 0).unwrap();
+        let ids = clip_ids(&q);
+        assert!(ids.contains(&last), "{ids:?}");
+        assert!(!ids.contains(&u32::MAX), "{ids:?}");
+    }
+}
+
+#[test]
+fn a_ripple_paste_desc_names_the_id_it_spent() {
+    let last = u32::MAX - 1;
+    let mut p = fixture();
+    set_first_clip_id(&mut p, last - 1);
+    let payload = Segment::Clip(Clip::new(
+        0,
+        1,
+        Seconds::from_integer(0),
+        Seconds::from_integer(1),
+    ));
+    let batch = paste_ripple_on(&p, 0, &payload, 5.0).expect("one fresh id fits");
+    assert!(
+        batch.desc.contains(&format!("clip #{last} inserted")),
+        "{}",
+        batch.desc
+    );
+}
+
+fn set_first_clip_id(project: &mut Project, id: u32) {
+    if let Segment::Clip(clip) = &mut project.timeline.video_track_mut().unwrap().segments[0] {
+        clip.id = id;
+    } else {
+        panic!("the fixture starts with a clip");
+    }
+}
+
+#[test]
+fn inserting_a_gap_at_a_clip_head_needs_no_id() {
+    let last = u32::MAX - 1;
+    let mut p = fixture();
+    set_first_clip_id(&mut p, last);
+    let batch = insert_gap_on(&p, 0, 0.0, 15).expect("insert-before keeps the original clip id");
+    let mut q = p.clone();
+    let mut h = History::default();
+    h.apply(&mut q, batch, 0).unwrap();
+    assert_eq!(clip_ids(&q), vec![last, 2]);
+}
+
+#[test]
+fn a_gap_only_range_insert_needs_no_clip_id() {
+    let last = u32::MAX - 1;
+    let mut p = fixture();
+    set_first_clip_id(&mut p, last);
+    let gap = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    let batch = insert_segments_on(&p, 0, 3.0, &[gap]).expect("a gap payload takes no id");
+    let mut q = p.clone();
+    let mut h = History::default();
+    h.apply(&mut q, batch, 0).unwrap();
+    assert_eq!(clip_ids(&q), vec![last, 2]);
 }
 
 #[test]
@@ -1037,7 +1197,9 @@ fn ripple_deleting_a_clip_beside_a_transition_restores_the_other_side() {
 fn deleting_a_gap_beside_a_transition_restores_the_clip_side() {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![
         Segment::Clip(Clip {
             id: 1,
@@ -1153,7 +1315,7 @@ fn a_lookup_at_the_end_of_a_clip_ending_timeline_finds_no_transition() {
 #[test]
 fn remove_span_cuts_a_clip_and_allocates_a_fresh_id() {
     let p = fixture();
-    let mut next = 50;
+    let mut next = Some(50);
     let batch = remove_span_on(&p, 0, Seconds::new(1, 2), Seconds::new(7, 2), &mut next).unwrap();
     let mut q = p.clone();
     let mut h = History::default();
@@ -1174,7 +1336,9 @@ fn remove_span_cuts_a_clip_and_allocates_a_fresh_id() {
 fn remove_span_merges_the_gap_ends() {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,
@@ -1187,7 +1351,7 @@ fn remove_span_merges_the_gap_ends() {
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Gap(Gap {
         duration: Seconds::from_integer(4),
     })];
-    let mut next = 50;
+    let mut next = Some(50);
     let batch = remove_span_on(
         &p,
         0,
@@ -1208,7 +1372,9 @@ fn remove_span_merges_the_gap_ends() {
 fn remove_span_refuses_a_transition_edge() {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let clip = |id, ain: i64, aout: i64| {
         Segment::Clip(Clip {
             id,
@@ -1238,7 +1404,7 @@ fn remove_span_refuses_a_transition_edge() {
         .unwrap();
     let start = tr.start_of(ti);
     let end = start + tr.segments[ti].duration();
-    let mut next = 50;
+    let mut next = Some(50);
     assert!(matches!(
         remove_span_on(&p, 0, start + Seconds::new(1, 30), end, &mut next),
         Err(EditError::Transition)

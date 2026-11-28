@@ -51,7 +51,7 @@ fn asset_project() -> Project {
             ..Default::default()
         },
     };
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe);
+    let (a, _) = p.add_asset("/media/red.mp4".into(), probe).expect("asset");
     p.timeline = Timeline {
         tracks: vec![Track {
             kind: TrackKind::Video,

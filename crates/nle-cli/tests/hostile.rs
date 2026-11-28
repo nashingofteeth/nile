@@ -3,9 +3,11 @@
 //! - exit 0 (accepted), 1 (refused with a message) or 2 (usage error),
 //! - leave a project that still loads with a finite, non-negative length.
 //!
-//! These are the old `scripts/fuzz.sh` cases. Nothing here asserts *what* a
-//! command said — only that it held the invariant — so a deliberate wording
-//! change never touches this file.
+//! These are the old `scripts/fuzz.sh` cases. The invariant cases are
+//! wording-agnostic — only whether the command held the invariant matters, so a
+//! deliberate message change never touches this file. The two typed-refusal
+//! cause checks for exhausted ids are the exception: they pin the error text so
+//! a missing file/probe cannot make the case pass by accident.
 
 mod common;
 
@@ -1947,4 +1949,75 @@ fn an_unwritable_tmpdir_cannot_panic_the_dump() {
         "a diagnostic must not panic: {}",
         merged(&out)
     );
+}
+
+// The last legal id is `u32::MAX - 1`; `u32::MAX` is reserved. Both the
+// detect and import paths mirror the project allocator, so a hand-edited
+// project at the ceiling must refuse in the ordinary 0/1/2 range, never panic
+// the process (101) or wrap an id to 0.
+fn set_first_clip_id(project: &mut nle_core::Project, id: u32) {
+    for track in &mut project.timeline.tracks {
+        for segment in &mut track.segments {
+            if let nle_core::timeline::Segment::Clip(clip) = segment {
+                clip.id = id;
+                return;
+            }
+        }
+    }
+    panic!("the fixture has no clip");
+}
+
+#[test]
+fn an_exhausted_clip_id_refuses_detect_append_without_panicking() {
+    let s = Sandbox::new();
+    let last = u32::MAX - 1;
+    s.hostile_base();
+    let path = s.file(P);
+    let mut project = nle_core::Project::load(&path).expect("the hostile base loads");
+    set_first_clip_id(&mut project, last);
+    project
+        .save(&path)
+        .expect("the last legal clip id still saves");
+
+    let out = s.run(&["detect-edits", "red.mp4", "--append"]);
+    let text = merged(&out);
+    let code = out.status.code().expect("an exit code");
+    assert!(
+        (0..=2).contains(&code),
+        "an exhausted clip id must be a clean refusal, got {code}:\n{text}"
+    );
+    assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        text.contains(&format!("no clip id left at #{last}")),
+        "the refusal must name the exhausted clip id, not a missing probe: {text}"
+    );
+    s.assert_loads("detect-edits append at the last clip id", &text);
+}
+
+#[test]
+fn an_exhausted_asset_pool_refuses_import_without_panicking() {
+    let s = Sandbox::new();
+    let last = u32::MAX - 1;
+    s.ok(&["init"]);
+    s.ok(&["import", "red.mp4"]);
+    let path = s.file(P);
+    let mut project = nle_core::Project::load(&path).expect("the pool loads");
+    project.media[0].id = last;
+    project
+        .save(&path)
+        .expect("the last legal asset id still saves");
+
+    let out = s.run(&["import", "green.mp4", "blue.mp4"]);
+    let text = merged(&out);
+    let code = out.status.code().expect("an exit code");
+    assert!(
+        (0..=2).contains(&code),
+        "an exhausted asset pool must be a clean refusal, got {code}:\n{text}"
+    );
+    assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        text.contains(&format!("no asset id left at #{last}")),
+        "the refusal must name the exhausted asset id, not a missing file: {text}"
+    );
+    s.assert_loads("import at the last asset id", &text);
 }

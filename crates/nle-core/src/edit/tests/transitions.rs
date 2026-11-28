@@ -52,7 +52,9 @@ fn add_transition_at_a_clip_clip_seam() {
     // [A src 0..3] [B src 0..3]: a 1 s dissolve at the 3.0 cut.
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let clip = |id, in_, out| {
         Segment::Clip(Clip {
             id,
@@ -161,7 +163,9 @@ fn retime_transition_keeps_each_sides_rate() {
     // 2 s takes another second from each side, to 0.5 s gives it back.
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let clip = |id, in_, out| {
         Segment::Clip(Clip {
             id,
@@ -279,7 +283,9 @@ fn retime_a_trailing_fade_at_its_far_edge() {
     // where `index_at` finds no segment.
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,

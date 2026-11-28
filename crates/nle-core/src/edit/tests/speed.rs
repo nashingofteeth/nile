@@ -39,7 +39,9 @@ fn split_maps_timeline_to_source_at_speed() {
     // A 2x clip reading source [0,4) occupies timeline [0,2).
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,
@@ -68,7 +70,9 @@ fn trim_scales_timeline_delta_into_source() {
     // A 0.5x clip reading source [0,4) occupies timeline [0,8).
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,
@@ -123,7 +127,9 @@ fn set_speed_refuses_a_sub_frame_span() {
     // trims and splits enforce. 2× (1 frame exactly) is allowed.
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,
@@ -148,7 +154,9 @@ fn set_speed_refuses_a_sub_frame_span() {
     // 3 s of source at 100× is 0.03 s = 0.9 frames at 30 fps.
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,
@@ -199,7 +207,9 @@ fn set_speed_lands_the_duration_on_the_frame_grid() {
     // to the end of its asset slows down as-is (the span does not grow).
     let mut p = Project::new();
     p.fps = Some(fps);
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("3"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("3"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,

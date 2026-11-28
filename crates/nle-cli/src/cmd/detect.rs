@@ -178,7 +178,7 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
                 .size()
                 .map(|(width, height)| VideoSettings { width, height });
         }
-        let (asset_id, _) = project.add_asset(canonical, report);
+        let (asset_id, _) = project.add_asset(canonical, report)?;
 
         let start = project.timeline.end();
         let video_ti = match track {
@@ -201,8 +201,8 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
                 .context("project has no video track")?,
         };
 
-        let mut next_id = next_clip_id(&project);
-        let video_segments = span_segments(&spans, asset_id, &mut next_id);
+        let mut next_id = project.next_clip_id().ok();
+        let video_segments = span_segments(&spans, asset_id, &mut next_id)?;
         append_spans(&mut project, video_ti, start, video_segments);
 
         if has_audio && !video_only {
@@ -215,7 +215,7 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
                 Some(i) => i,
                 None => project.timeline.add_track(TrackKind::Audio),
             };
-            let audio_segments = span_segments(&spans, asset_id, &mut next_id);
+            let audio_segments = span_segments(&spans, asset_id, &mut next_id)?;
             append_spans(&mut project, audio_ti, start, audio_segments);
         }
 
@@ -242,7 +242,7 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
     }
 
     let mut project = Project::new();
-    let (asset_id, _) = project.add_asset(canonical, report);
+    let (asset_id, _) = project.add_asset(canonical, report)?;
     project.fps = Some(fps);
     project.video = project
         .asset(asset_id)
@@ -253,17 +253,17 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
     // + silence, and splitting audio at the video cuts keeps each shot a
     // movable pair. (No a/v linking yet, so reordering only the video still
     // desyncs — a model limit, not a detector bug.)
-    let mut next_id = 1u32;
+    let mut next_id = project.next_clip_id().ok();
     let mut tracks = vec![Track {
         kind: TrackKind::Video,
         muted: false,
-        segments: span_segments(&spans, asset_id, &mut next_id),
+        segments: span_segments(&spans, asset_id, &mut next_id)?,
     }];
     if has_audio && !video_only {
         tracks.push(Track {
             kind: TrackKind::Audio,
             muted: false,
-            segments: span_segments(&spans, asset_id, &mut next_id),
+            segments: span_segments(&spans, asset_id, &mut next_id)?,
         });
     }
     project.timeline = Timeline { tracks };
@@ -285,8 +285,14 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
 }
 
 /// Build the clip/gap segments for a run of spans, allocating clip ids from
-/// `next_id` (unique across tracks).
-pub(crate) fn span_segments(spans: &[Span], asset: u32, next_id: &mut u32) -> Vec<Segment> {
+/// `next_id` (unique across tracks). The cursor reserves `u32::MAX`: an
+/// all-gap run allocates nothing, and the first clip it must allocate refuses
+/// once `u32::MAX - 1` is in use.
+pub(crate) fn span_segments(
+    spans: &[Span],
+    asset: u32,
+    next_id: &mut Option<u32>,
+) -> Result<Vec<Segment>> {
     let mut segments = Vec::with_capacity(spans.len());
     for span in spans {
         match span {
@@ -294,12 +300,12 @@ pub(crate) fn span_segments(spans: &[Span], asset: u32, next_id: &mut u32) -> Ve
                 duration: *duration,
             })),
             Span::Media { start, end } => {
-                segments.push(Segment::Clip(Clip::new(*next_id, asset, *start, *end)));
-                *next_id += 1;
+                let id = Project::take_clip_id(next_id)?;
+                segments.push(Segment::Clip(Clip::new(id, asset, *start, *end)));
             }
         }
     }
-    segments
+    Ok(segments)
 }
 
 /// Append `segments` to track `ti`, padding with a gap up to `start` so the
@@ -334,21 +340,4 @@ pub(crate) fn append_spans(
 /// (the timeline can only cut on its frames), else the source's.
 pub(crate) fn snap_fps_for(append_project: Option<&Project>, file_fps: Seconds) -> Seconds {
     append_project.and_then(|p| p.fps).unwrap_or(file_fps)
-}
-
-/// The next free clip id: one past the highest in use. Mirrors
-/// `Project::next_clip_id`, which is crate-private (this is a separate crate).
-pub(crate) fn next_clip_id(project: &Project) -> u32 {
-    project
-        .timeline
-        .tracks
-        .iter()
-        .flat_map(|t| &t.segments)
-        .filter_map(|s| match s {
-            Segment::Clip(c) => Some(c.id),
-            Segment::Transition(t) => Some(t.id),
-            Segment::Gap(_) => None,
-        })
-        .max()
-        .map_or(1, |m| m + 1)
 }

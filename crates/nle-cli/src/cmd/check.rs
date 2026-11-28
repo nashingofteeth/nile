@@ -260,8 +260,12 @@ mod tests {
             width: 1920,
             height: 1080,
         });
-        project.add_asset("/media/a.mp4".into(), probe(audio));
-        project.add_asset("/media/b.mp4".into(), probe(audio));
+        project
+            .add_asset("/media/a.mp4".into(), probe(audio))
+            .expect("asset");
+        project
+            .add_asset("/media/b.mp4".into(), probe(audio))
+            .expect("asset");
         project.timeline.tracks = vec![Track {
             kind: TrackKind::Video,
             muted: false,
@@ -576,7 +580,9 @@ mod tests {
         let rendered = project(2);
         let mut expected = project(1);
         let id = add(&mut expected, cam(1));
-        let second = expected.add_sequence("Second", Some(Seconds::from_integer(30)), None);
+        let second = expected
+            .add_sequence("Second", Some(Seconds::from_integer(30)), None)
+            .unwrap();
         assert_eq!(second, 2);
         expected.select_sequence(second).expect("switch");
         let out = write_report(&rendered, dir.path());

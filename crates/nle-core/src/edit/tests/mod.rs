@@ -72,7 +72,9 @@ fn fixture() -> Project {
         width: 320,
         height: 240,
     });
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![
         Segment::Clip(Clip {
             id: 1,
@@ -129,7 +131,9 @@ fn clip_ids(p: &Project) -> Vec<u32> {
 fn two_track_fixture() -> Project {
     let mut p = Project::new();
     p.fps = Some(Seconds::new(30, 1));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.tracks[0].segments = vec![Segment::Clip(Clip {
         id: 1,
         asset: a,
@@ -185,7 +189,9 @@ fn transition_seg(id: u32, dur: Seconds, a_out: Seconds) -> Segment {
 fn clip_pair() -> Project {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let clip = |id, in_, out| {
         Segment::Clip(Clip {
             id,

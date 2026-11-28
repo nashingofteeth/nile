@@ -647,7 +647,7 @@ mod tests {
         let (_dir, store) = store();
         let mut project = project();
         project.revision = 7;
-        project.add_sequence("Second", None, None);
+        project.add_sequence("Second", None, None).unwrap();
         let job = store
             .create(
                 &project,

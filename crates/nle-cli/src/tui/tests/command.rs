@@ -34,14 +34,16 @@ fn track_command_adds_mutes_and_removes() {
 fn sequence_command_switches_undo_and_adds() {
     let path = temp_project_path("sequence-command");
     let mut p = asset_project();
-    let second = p.add_sequence(
-        "Vertical",
-        Some(Seconds::new(30, 1)),
-        Some(nle_core::VideoSettings {
-            width: 1080,
-            height: 1920,
-        }),
-    );
+    let second = p
+        .add_sequence(
+            "Vertical",
+            Some(Seconds::new(30, 1)),
+            Some(nle_core::VideoSettings {
+                width: 1080,
+                height: 1920,
+            }),
+        )
+        .unwrap();
     p.save(&path).unwrap();
     let mut app = App::new(p, path.clone());
 
@@ -134,14 +136,16 @@ fn sequence_audio_command_sets_prints_and_undoes() {
 fn switching_flushes_the_outgoing_playhead_and_follows_the_new_one() {
     let path = temp_project_path("sequence-switch-cursor");
     let mut p = asset_project();
-    let second = p.add_sequence(
-        "Vertical",
-        Some(Seconds::new(30, 1)),
-        Some(nle_core::VideoSettings {
-            width: 1080,
-            height: 1920,
-        }),
-    );
+    let second = p
+        .add_sequence(
+            "Vertical",
+            Some(Seconds::new(30, 1)),
+            Some(nle_core::VideoSettings {
+                width: 1080,
+                height: 1920,
+            }),
+        )
+        .unwrap();
     p.save(&path).unwrap();
     let mut app = App::new(p, path.clone());
     app.playhead = 2.0; // moved, but not yet flushed by the idle timer
@@ -172,7 +176,7 @@ fn switching_flushes_the_outgoing_playhead_and_follows_the_new_one() {
 fn a_foreign_write_is_not_hidden_by_a_switch_notice() {
     let path = temp_project_path("sequence-switch-guard");
     let mut p = asset_project();
-    let second = p.add_sequence("Vertical", None, None);
+    let second = p.add_sequence("Vertical", None, None).unwrap();
     p.save(&path).unwrap();
     let mut app = App::new(p, path.clone());
     app.playhead = 1.0;
@@ -370,6 +374,24 @@ fn track_rm_deletes_a_nonempty_track_with_its_clips() {
         std::process::id()
     ));
     let mut p = asset_project();
+    let audio_probe = RawProbe {
+        streams: vec![RawStream {
+            index: 0,
+            codec_type: Some("audio".into()),
+            codec_name: Some("aac".into()),
+            sample_rate: Some("48000".into()),
+            channels: Some(2),
+            ..Default::default()
+        }],
+        format: RawFormat {
+            format_name: "m4a".into(),
+            duration: Some("10".into()),
+            ..Default::default()
+        },
+    };
+    let (audio, _) = p
+        .add_asset("/media/mic.m4a".into(), audio_probe)
+        .expect("audio asset");
     let ai = p.timeline.add_track(TrackKind::Audio);
     p.timeline
         .track_mut(ai)
@@ -377,7 +399,7 @@ fn track_rm_deletes_a_nonempty_track_with_its_clips() {
         .segments
         .push(TimelineSegment::Clip(nle_core::Clip::new(
             9,
-            1,
+            audio,
             Seconds::from_integer(0),
             Seconds::from_integer(2),
         )));
@@ -647,7 +669,9 @@ fn note_anchors_the_clip_under_the_playhead() {
 fn annotation_ls_reads_the_requested_sequence() {
     let path = temp_project_path("annotation-ls-sequence");
     let mut p = asset_project();
-    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    let second = p
+        .add_sequence("Second", Some(Seconds::new(30, 1)), None)
+        .unwrap();
     p.add_annotation(
         second,
         nle_core::AnnotationKind::Note {
@@ -680,7 +704,9 @@ fn annotation_check_reports_verdicts_and_keeps_them_per_sequence() {
     let path = temp_project_path("annotation-check");
     let dir = tempfile::tempdir().unwrap();
     let mut p = asset_project();
-    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    let second = p
+        .add_sequence("Second", Some(Seconds::new(30, 1)), None)
+        .unwrap();
     // Both spans sit on clip #1, which the report shows: a `cam` for asset 1
     // passes, an `absent` for the same asset fails.
     let anchor = || nle_core::Anchor::Timeline {
@@ -801,7 +827,9 @@ fn annotation_check_reports_verdicts_and_keeps_them_per_sequence() {
 fn check_verdicts_survive_a_switch_and_drop_on_an_edit() {
     let path = temp_project_path("annotation-check-clear");
     let mut p = asset_project();
-    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    let second = p
+        .add_sequence("Second", Some(Seconds::new(30, 1)), None)
+        .unwrap();
     p.save(&path).unwrap();
     let mut app = App::new(p, path.clone());
     let fake = FakeMpv::new();

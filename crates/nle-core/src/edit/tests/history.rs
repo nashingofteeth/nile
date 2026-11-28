@@ -306,7 +306,9 @@ fn asset_addition_is_undoable() {
     let before = p.media.clone();
 
     let mut h = History::default();
-    let (id, desc) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 42);
+    let (id, desc) = h
+        .add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 42)
+        .expect("asset");
     assert!(desc.contains(&format!("#{id}")), "{desc}");
     assert!(p.asset(id).is_some(), "pooled");
     assert_eq!(p.media.len(), before.len() + 1);
@@ -320,6 +322,55 @@ fn asset_addition_is_undoable() {
     assert!(p.asset(id).is_some(), "and redoes");
 }
 
+// The asset id space is reserved at `u32::MAX`; a batch that would spill
+// into it restores the whole pool and records nothing, so no half-import
+// survives and `u` has nothing bogus to undo.
+#[test]
+fn a_mid_batch_asset_exhaustion_restores_the_pool_and_records_nothing() {
+    let last = u32::MAX - 1;
+    let mut p = Project::new();
+    p.add_asset("/media/a.mp4".into(), probe_report("5"))
+        .expect("asset");
+    p.media[0].id = last - 1;
+    let before = p.clone();
+    let mut h = History::default();
+    let err = h
+        .add_assets(
+            &mut p,
+            vec![
+                ("/media/b.mp4".into(), probe_report("5")),
+                ("/media/c.mp4".into(), probe_report("5")),
+            ],
+            0,
+        )
+        .expect_err("the second asset would take the reserved id");
+    assert!(matches!(
+        err,
+        EditError::Project(ProjectError::IdExhausted("asset", id)) if id == last
+    ));
+    assert_eq!(p, before, "the first half of the batch is rolled back");
+    assert_eq!(h.depth(), 0, "no history entry for a refused batch");
+    assert_eq!(p.revision, 0, "a refused batch is not a model write");
+}
+
+// A single asset at the last legal id refuses before the pool changes.
+#[test]
+fn an_exhausted_asset_id_refuses_before_recording() {
+    let last = u32::MAX - 1;
+    let mut p = Project::new();
+    p.add_asset("/media/a.mp4".into(), probe_report("5"))
+        .expect("asset");
+    p.media[0].id = last;
+    let before = p.clone();
+    let mut h = History::default();
+    assert!(matches!(
+        h.add_asset(&mut p, "/media/b.mp4".into(), probe_report("5"), 0),
+        Err(EditError::Project(ProjectError::IdExhausted("asset", id))) if id == last
+    ));
+    assert_eq!(p, before);
+    assert_eq!(h.depth(), 0);
+}
+
 // Importing a path the pool already holds changed nothing, so it must record
 // nothing: an entry would consume an undo step and clear the redo stack. The
 // front-ends dedup first, but the rule is the model's.
@@ -327,11 +378,15 @@ fn asset_addition_is_undoable() {
 fn reimporting_a_pooled_asset_records_nothing() {
     let mut p = fixture();
     let mut h = History::default();
-    let (first, _) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 0);
+    let (first, _) = h
+        .add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 0)
+        .expect("asset");
     let depth = h.depth();
     let revision = p.revision;
 
-    let (second, _) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 7);
+    let (second, _) = h
+        .add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 7)
+        .expect("asset");
     assert_eq!(second, first, "the pooled id comes back");
     assert_eq!(h.depth(), depth, "no entry for a no-op");
     assert_eq!(p.revision, revision, "no model write");
@@ -372,14 +427,16 @@ fn batch_asset_additions_are_one_undo_step() {
     let mut p = fixture();
     let before = p.media.clone();
     let mut h = History::default();
-    let ids = h.add_assets(
-        &mut p,
-        vec![
-            ("/media/one.mp4".into(), probe_report("5")),
-            ("/media/two.mp4".into(), probe_report("6")),
-        ],
-        42,
-    );
+    let ids = h
+        .add_assets(
+            &mut p,
+            vec![
+                ("/media/one.mp4".into(), probe_report("5")),
+                ("/media/two.mp4".into(), probe_report("6")),
+            ],
+            42,
+        )
+        .expect("assets");
     assert_eq!(ids.len(), 2);
     assert_eq!(p.media.len(), before.len() + 2);
     assert_eq!(h.depth(), 1, "the batch is one history entry");
@@ -397,7 +454,9 @@ fn batch_asset_additions_are_one_undo_step() {
 fn undoing_an_import_in_use_refuses() {
     let mut p = fixture();
     let mut h = History::default();
-    let (id, _) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 0);
+    let (id, _) = h
+        .add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 0)
+        .expect("asset");
     // A clip of the new asset lands on the timeline — outside the stack,
     // as if an out-of-band write put it there.
     let clip = Segment::Clip(Clip::new(
@@ -417,7 +476,9 @@ fn undoing_an_import_in_use_refuses() {
 #[test]
 fn asset_removal_is_undoable() {
     let mut p = fixture();
-    let (spare, _) = p.add_asset("/media/spare.mp4".into(), probe_report("5"));
+    let (spare, _) = p
+        .add_asset("/media/spare.mp4".into(), probe_report("5"))
+        .expect("asset");
     let before = p.media.clone();
 
     let mut h = History::default();
@@ -440,10 +501,14 @@ fn asset_removal_is_undoable() {
 #[test]
 fn asset_history_refuses_when_pool_changed_outside() {
     let mut p = fixture();
-    let (spare, _) = p.add_asset("/media/spare.mp4".into(), probe_report("5"));
+    let (spare, _) = p
+        .add_asset("/media/spare.mp4".into(), probe_report("5"))
+        .expect("asset");
     let mut h = History::default();
     h.remove_asset(&mut p, spare, 0).unwrap();
-    let _ = p.add_asset("/media/extra.mp4".into(), probe_report("5"));
+    let _ = p
+        .add_asset("/media/extra.mp4".into(), probe_report("5"))
+        .expect("asset");
     let live = p.media.clone();
 
     assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
@@ -474,7 +539,9 @@ fn group_history_refuses_when_groups_changed_outside() {
 #[test]
 fn asset_removal_sidecar_round_trips() {
     let mut p = fixture();
-    let (spare, _) = p.add_asset("/media/spare.mp4".into(), probe_report("5"));
+    let (spare, _) = p
+        .add_asset("/media/spare.mp4".into(), probe_report("5"))
+        .expect("asset");
     let mut h = History::default();
     h.remove_asset(&mut p, spare, 0).unwrap();
 

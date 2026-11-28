@@ -409,7 +409,7 @@ impl Session {
         playhead: i64,
     ) -> Result<Vec<u32>, SessionError> {
         match &mut self.backend {
-            Backend::Direct { document, .. } => Ok(document.add_assets(assets, playhead)),
+            Backend::Direct { document, .. } => Ok(document.add_assets(assets, playhead)?),
             Backend::Remote(remote) => {
                 let paths: Vec<PathBuf> = assets.iter().map(|(path, _)| path.clone()).collect();
                 let _ = playhead;
@@ -852,10 +852,12 @@ mod remote_tests {
     fn project_with_clip() -> Project {
         let mut project = Project::new();
         project.fps = Some(nle_core::Seconds::from_integer(30));
-        let (asset, _) = project.add_asset(
-            "/media/red.mp4".into(),
-            nle_core::media::RawProbe::default(),
-        );
+        let (asset, _) = project
+            .add_asset(
+                "/media/red.mp4".into(),
+                nle_core::media::RawProbe::default(),
+            )
+            .expect("asset");
         project.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             asset,
             asset,
