@@ -524,10 +524,10 @@ fn video_tracks_get_filmstrip_rows() {
     );
 }
 
-// A preference recorded while the preview is off (`--dump`) keeps the layout
-// compact, even if a strip was cached: nothing would extract to fill it.
+// Strips are only laid out while the preview can extract them; `--dump`
+// stays compact even if a strip was cached.
 #[test]
-fn filmstrip_rows_wait_for_the_preview() {
+fn filmstrip_rows_need_the_live_preview() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     let mut app = App::new(asset_project(), temp_project_path("filmstrip-preview-off"));
@@ -541,16 +541,16 @@ fn filmstrip_rows_wait_for_the_preview() {
         term.draw(|f| render(f, app)).unwrap();
         term.backend().buffer().clone()
     };
-    let waiting = draw(&app);
+    let no_preview = draw(&app);
     app.filmstrip_enabled = false;
     let compact = draw(&app);
     for y in 0..24u16 {
         for x in 0..80u16 {
-            let (a, b) = (&waiting[(x, y)], &compact[(x, y)]);
+            let (a, b) = (&no_preview[(x, y)], &compact[(x, y)]);
             assert_eq!(
                 (a.symbol(), a.fg, a.bg),
                 (b.symbol(), b.fg, b.bg),
-                "({x},{y}) stays compact until the preview runs"
+                "({x},{y}) stays compact without the preview"
             );
         }
     }
