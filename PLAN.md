@@ -648,7 +648,9 @@ shared by the TUI and agents — with no clipgen code present.
   [--size WxH] [--fps RATE]`; expectations copied, origin records overrides)
   and batch render jobs landed (`nile job batch --output-dir DIR
   [--sequence ID]...` queues one `job.submit` per sequence at one revision,
-  deterministic `sequence-<id>.mp4`, refusals before any side effect).
+  deterministic `sequence-<id>.mp4`; duplicates/unknown ids/existing files
+  refuse before any submit, a server-side live-output guard closes the
+  two-batch race, and a zero-queued failure removes the directory it created).
   Presets/regeneration and per-sequence export presets remain.
 - Marker/chapter annotations in the TUI; transcript and text-based editing
   build on annotations + time maps later.

@@ -195,9 +195,13 @@ success; a cancelled job leaves no half-written deliverable.
 not a model write — the project revision, history and playhead do not move —
 but its snapshot is project data, so the read-only latch gates it like a
 model write: after a save failure or a handler panic the submit is refused
-rather than rendering a half-applied state. `job.list` returns `{revision:
-<live>, jobs}` (the revision is context, not a CAS token); `job.get`/
-`job.cancel` return the same record shape as submit.
+rather than rendering a half-applied state. A submit is also invalid params
+(`-32602`, naming it) while a non-terminal job already targets the same output
+path; the queue checks and creates the record under its lock, so two clients
+cannot both claim one deliverable even when both passed their own `exists()`
+check. `job.list` returns `{revision: <live>, jobs}` (the revision is context,
+not a CAS token); `job.get`/`job.cancel` return the same record shape as
+submit.
 `job.remove {id}` deletes a **terminal** job's `job.json` and snapshot and
 returns the removed record; a queued or running job is invalid params (cancel
 it first), as is an unknown id.
@@ -214,10 +218,12 @@ Additive, so `PROTOCOL_VERSION` stays at 5.
 
 `nile job batch` adds no method: it is a client-side loop over `job.submit`.
 It reads `hello` and `sequence.list` once, refuses duplicate or unknown ids and
-an existing `sequence-<id>.mp4` before creating the directory, then submits
-every target with that one `base_revision`. A concurrent model write makes the
-remaining submits fail (the batch names the jobs already queued); it does not
-switch revisions midway.
+an existing `sequence-<id>.mp4` before submitting, then submits every target
+with that one `base_revision`. A concurrent model write makes the remaining
+submits fail (the batch names the jobs already queued); it does not switch
+revisions midway. The per-submit live-output guard above closes the two-batch
+race: a batch that queues nothing after a submit failure removes the directory
+it created, but only if it was empty.
 
 Job ids are never recycled: `.nile/<stem>/jobs/.next-id` keeps the high-water
 mark, because a pruned or removed highest id would otherwise let the next
