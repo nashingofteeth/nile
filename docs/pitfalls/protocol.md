@@ -188,10 +188,16 @@ export's ffmpeg poll loop checks (the child is killed and the hidden temp
 output removed). It returns the record as of the call: a running job may still
 read `running` until its child is reaped and the terminal event fires. An
 unknown id or a terminal job is invalid params (`-32602`), never a silent
-no-op. The render writes to a hidden temp beside `output` and publishes it by
-no-replace hard link (with a `create_new` copy fallback), never a replacing
-rename; a file that appears after submit is left untouched and the job fails,
-and a cancelled job leaves no half-written deliverable.
+no-op. The render writes to a hidden temp beside `output` and publishes it
+without replacing an existing file. The primary publish is an atomic hard link
+(the temp and output share one inode until the temp is removed). Where a link
+is impossible, it copies into a second hidden `.copy` temp in bounded chunks
+(checking cancellation between them), syncs it, checks the final name one last
+time and renames the complete copy into place. A crash or cancel therefore
+leaves only a sweepable hidden file, never a truncated deliverable; a file that
+appears after submit is left untouched and the job fails. A concurrent creator
+that lands between the final check and the rename is the documented residual
+(std does not expose a no-replace rename).
 
 `job.submit` is compare-and-swap: a stale `base_revision` is `-32001`. It is
 not a model write — the project revision, history and playhead do not move —
@@ -239,12 +245,13 @@ mark, because a pruned or removed highest id would otherwise let the next
 submit reuse it. Removal advances the marker before the directory disappears,
 which also covers a project written before the file existed; an unreadable or
 non-positive marker is an error, not a directory-scan rebuild. A server start
-also sweeps crash leftovers: a hidden `.name.jobN.ext` temp is deleted only
-when it is exactly the `nle_core::jobs::partial_path` of a **terminal** record
-(the executor publishes or removes it before the terminal write); a
+also sweeps crash leftovers: a hidden `.name.jobN.ext` render temp and its
+`.name.jobN.ext.copy` publish stage are deleted only when they are exactly the
+`nle_core::jobs::partial_path`/`copy_path` of a **terminal** record (the
+executor publishes or removes them before the terminal write); a
 queued/running temp, another record's output, or an unexplained file is left
 for a human. The executor and
-the sweep share `partial_path`, so their naming cannot drift.
+the sweep share those functions, so their naming cannot drift.
 
 `JobRecord` ignores unknown fields so a record from a newer build still parses
 far enough to hit the `version` check; startup logs and skips a corrupt or

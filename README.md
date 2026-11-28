@@ -540,9 +540,12 @@ file aliases its target) and otherwise a canonical parent plus the file name,
 so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` are one deliverable.
 Two overlapping batches therefore cannot both claim a path even when both
 passed their own existence check, and publishing is no-replace: the finished
-render is hard-linked (or copied with `create_new`) into place, so a file that
-appeared during the render is left untouched and the job fails instead of
-overwriting it. If a submit fails before anything was queued, the batch removes
+render is hard-linked into place atomically, or, where hard links are not
+available, staged as a complete hidden `.copy` temp and renamed into place only
+after a last-moment existence check. A file that appeared during the render is
+left untouched and the job fails instead of overwriting it; a concurrent
+creator landing between that final check and the rename is the documented
+residual. If a submit fails before anything was queued, the batch removes
 exactly the directory components it created (innermost first, and only while
 empty; pre-existing parents stay).
 Every submit uses the revision read at the start (`job.submit` is not a model
