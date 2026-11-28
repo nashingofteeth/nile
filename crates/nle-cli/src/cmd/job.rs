@@ -197,7 +197,10 @@ fn plan_outputs(dir: &Path, sequences: &[u32]) -> Result<Vec<(u32, PathBuf)>> {
     let mut plan = Vec::with_capacity(sequences.len());
     for &sequence in sequences {
         let output = dir.join(batch_name(sequence));
-        if output.exists() {
+        // `symlink_metadata` sees a dangling symlink (and a directory), which
+        // `Path::exists` would miss: the publish would refuse it later, but
+        // the batch should refuse before any submit.
+        if std::fs::symlink_metadata(&output).is_ok() {
             bail!(
                 "{} already exists; the batch refuses to overwrite a render",
                 output.display()

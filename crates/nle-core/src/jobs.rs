@@ -23,9 +23,9 @@
 //!
 //! [`prune_plan`] is a pure plan over **terminal** records (the queue executes
 //! it, so `nile serve` stays the one writer). [`JobStore::sweep_temps`] runs
-//! at startup: it deletes only the exact [`partial_path`] a terminal record
-//! names, never a glob, so a live export's temp and an unexplained file are
-//! both left alone.
+//! at startup: it deletes only the exact [`partial_path`]/[`copy_path`] temps a
+//! terminal record names, never a glob, so a live export's temp and an
+//! unexplained file are both left alone.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -510,24 +510,30 @@ impl JobStore {
 
     /// Startup sweep: delete hidden render temps a crash left behind.
     ///
-    /// A temp is only deleted when it is exactly [`partial_path`] of a
-    /// **terminal** record. The renderer publishes or removes that path before
-    /// the terminal record is written, so one still on disk cannot belong to a
-    /// live export; a queued/running record is never considered. The path set
-    /// comes from the records, not a glob, so no unexplained file is removed
-    /// (a temp whose record was already deleted stays for a human). A path that
-    /// is also some record's deliverable is skipped even if the names collide.
+    /// A temp is only deleted when it is exactly [`partial_path`] (the render
+    /// temp) or [`copy_path`] (the link-less publish staging file) of a
+    /// **terminal** record. The renderer publishes or removes either path
+    /// before the terminal record is written, so one still on disk cannot
+    /// belong to a live export; a queued/running record is never considered.
+    /// The path set comes from the records, not a glob, so no unexplained file
+    /// is removed (a temp whose record was already deleted stays for a human).
+    /// A path that is also some record's deliverable is skipped even if the
+    /// names collide.
     pub fn sweep_temps(&self, jobs: &[JobRecord]) -> TempSweep {
         let mut sweep = TempSweep::default();
         for job in jobs.iter().filter(|job| job.state.is_terminal()) {
-            let temp = partial_path(&job.output, job.id);
-            if jobs.iter().any(|other| other.output == temp) {
-                continue;
-            }
-            match std::fs::remove_file(&temp) {
-                Ok(()) => sweep.removed.push(temp),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => sweep.failed.push((temp, e)),
+            for temp in [
+                partial_path(&job.output, job.id),
+                copy_path(&job.output, job.id),
+            ] {
+                if jobs.iter().any(|other| other.output == temp) {
+                    continue;
+                }
+                match std::fs::remove_file(&temp) {
+                    Ok(()) => sweep.removed.push(temp),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => sweep.failed.push((temp, e)),
+                }
             }
         }
         sweep
@@ -559,6 +565,22 @@ pub fn partial_path(output: &Path, id: u64) -> PathBuf {
         _ => (name.as_str(), "mp4"),
     };
     output.with_file_name(format!(".{stem}.job{id}.{ext}"))
+}
+
+/// The staging path the link-less publish copies into before its final rename.
+///
+/// Deriving it from [`partial_path`] keeps both names in the same directory and
+/// hidden, so a crash mid-copy leaves a file the startup sweep knows to remove
+/// and never a truncated deliverable. The executor and the sweep share this
+/// function; a different shape here would strand the staged copy.
+pub fn copy_path(output: &Path, id: u64) -> PathBuf {
+    let temp = partial_path(output, id);
+    let mut name = temp
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".copy");
+    temp.with_file_name(name)
 }
 
 /// Which terminal jobs a retention pass removes, oldest first.

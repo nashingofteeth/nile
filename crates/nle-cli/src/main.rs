@@ -686,7 +686,8 @@ enum JobCmd {
     },
     /// Snapshot the project and queue an export
     Submit {
-        /// Output file (relative paths resolve against the current directory)
+        /// Output file (relative paths resolve against the current directory;
+        /// an existing file is refused)
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
         /// Sequence to render (default: the server's active sequence)
