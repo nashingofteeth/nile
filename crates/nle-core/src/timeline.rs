@@ -205,16 +205,33 @@ impl Effect {
     /// lower track shows through (black when none does — the classic
     /// single-track graph drops alpha at the end).
     pub fn chain(effects: &[Effect], canvas: (u32, u32)) -> String {
-        let mut content = Content::full(canvas);
+        let mut picture = Picture::full(canvas);
         let mut parts: Vec<String> = Vec::new();
         for effect in effects {
-            let (filter, next) = effect.apply(canvas, content);
+            let (filter, next) = effect.apply(canvas, picture);
             if !filter.is_empty() {
                 parts.push(filter);
             }
-            content = next;
+            picture = next;
         }
         parts.join(",")
+    }
+
+    /// The picture geometry a whole chain leaves on `canvas`: the visible box
+    /// and the projection from the source frame's normalized `[0, 1]`
+    /// coordinates. This is the same tracker [`Effect::chain`] builds its
+    /// filters from, so a check can never drift from the rendered picture.
+    ///
+    /// A keyed crop renders through its own pass graph: the exporter's
+    /// `effect_chain` refuses it, and this models the static chain only (the
+    /// crop's static fields). Callers that see keyframes must use the keyed
+    /// window at the sampled time, not this result.
+    pub fn geometry(effects: &[Effect], canvas: (u32, u32)) -> EffectGeometry {
+        let mut picture = Picture::full(canvas);
+        for effect in effects {
+            picture = effect.apply(canvas, picture).1;
+        }
+        EffectGeometry { picture }
     }
 
     /// Does the chain leave any transparent canvas? The monitor composites the
@@ -231,25 +248,25 @@ impl Effect {
         }) {
             return true;
         }
-        let mut content = Content::full(canvas);
+        let mut picture = Picture::full(canvas);
         for effect in effects {
-            content = effect.apply(canvas, content).1;
+            picture = effect.apply(canvas, picture).1;
         }
-        !content.is_full(canvas)
+        !picture.content.is_full(canvas)
     }
 
     /// One effect: its filter and the picture box it leaves behind. Computing
     /// both together keeps the emitted geometry and the tracked box from
     /// drifting apart.
-    fn apply(&self, canvas: (u32, u32), content: Content) -> (String, Content) {
+    fn apply(&self, canvas: (u32, u32), picture: Picture) -> (String, Picture) {
         match self {
             Effect::Crop { x, y, w, h, .. } => {
-                if content.is_empty() {
-                    return (String::new(), content); // already invisible
+                if picture.content.is_empty() {
+                    return (String::new(), picture); // already invisible
                 }
-                let next = crop_content(*x, *y, *w, *h, content);
-                if next == content {
-                    return (String::new(), content); // no inset: nothing to mask
+                let next = crop_content(*x, *y, *w, *h, picture.content);
+                if next == picture.content {
+                    return (String::new(), picture); // no inset: nothing to mask
                 }
                 let (fw, fh) = canvas;
                 let (x, y) = (next.x, next.y);
@@ -259,24 +276,28 @@ impl Effect {
                          pad={fw}:{fh}:{x}:{y}:color=black@0",
                         next.w, next.h,
                     ),
-                    next,
+                    Picture {
+                        content: next,
+                        changed: true,
+                        ..picture
+                    },
                 )
             }
             Effect::Scale { w, h } => {
-                if content.is_empty() {
-                    (String::new(), content) // already invisible
+                if picture.content.is_empty() {
+                    (String::new(), picture) // already invisible
                 } else {
-                    scale_content(*w, *h, canvas, content)
+                    scale_content(*w, *h, canvas, picture)
                 }
             }
-            Effect::Offset { x, y } => offset_content(*x, *y, canvas, content),
+            Effect::Offset { x, y } => offset_content(*x, *y, canvas, picture),
             Effect::Eq {
                 brightness,
                 contrast,
                 saturation,
             } => (
                 format!("eq=brightness={brightness}:contrast={contrast}:saturation={saturation}"),
-                content,
+                picture,
             ),
             // The path crosses two parsers, so it takes two escapes in this
             // order: the option parser reads `\` as an escape (so `\`, `:` and
@@ -292,8 +313,89 @@ impl Effect {
                     option.push(ch);
                 }
                 let quoted = option.replace('\'', r"'\''");
-                (format!("lut3d=file='{quoted}'"), content)
+                (format!("lut3d=file='{quoted}'"), picture)
             }
+        }
+    }
+}
+
+/// The visible picture and its source projection after an effect chain; see
+/// [`Effect::geometry`]. Rectangle positions are canvas pixels, and projection
+/// inputs are fractions of the source frame (`0.0..=1.0`). The source frame is
+/// the same size as the canvas: effects run before the output normalize scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectGeometry {
+    picture: Picture,
+}
+
+impl EffectGeometry {
+    /// The visible picture box on the canvas: `(x, y, w, h)` in pixels.
+    pub fn visible(&self) -> (i64, i64, i64, i64) {
+        let content = self.picture.content;
+        (content.x, content.y, content.w, content.h)
+    }
+
+    /// No picture pixels reach the canvas; the layer is fully transparent.
+    pub fn is_empty(&self) -> bool {
+        self.picture.content.is_empty()
+    }
+
+    /// Did a geometry effect actually rewrite the picture? A no-op scale or a
+    /// full-window crop leaves the frame untouched, exactly like no effect.
+    pub fn changes_picture(&self) -> bool {
+        self.picture.changed
+    }
+
+    /// Map a source-frame rectangle (fractions, `0.0..=1.0`) to canvas pixels:
+    /// `(x, y, w, h)`.
+    pub fn project(&self, x: f64, y: f64, w: f64, h: f64) -> (f64, f64, f64, f64) {
+        let map = self.picture.map;
+        let x0 = map.scale_x * x + map.offset_x;
+        let y0 = map.scale_y * y + map.offset_y;
+        let x1 = map.scale_x * (x + w) + map.offset_x;
+        let y1 = map.scale_y * (y + h) + map.offset_y;
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+}
+
+/// The chain's source-frame → canvas projection, per axis:
+/// `canvas = scale × source + offset`. `source` is a normalized `[0, 1]`
+/// coordinate, so the identity over a `W`-wide canvas has `scale = W`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Map {
+    scale_x: f64,
+    offset_x: f64,
+    scale_y: f64,
+    offset_y: f64,
+}
+
+impl Map {
+    fn full((w, h): (u32, u32)) -> Self {
+        Self {
+            scale_x: f64::from(w),
+            offset_x: 0.0,
+            scale_y: f64::from(h),
+            offset_y: 0.0,
+        }
+    }
+}
+
+/// The chain's working state: the visible box and the projection that put it
+/// there. `changed` separates a no-op chain (full frame, identity projection)
+/// from a zoom that was clipped back to the full canvas.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Picture {
+    content: Content,
+    map: Map,
+    changed: bool,
+}
+
+impl Picture {
+    fn full(canvas: (u32, u32)) -> Self {
+        Self {
+            content: Content::full(canvas),
+            map: Map::full(canvas),
+            changed: false,
         }
     }
 }
@@ -373,9 +475,10 @@ fn crop_content(x: f64, y: f64, w: f64, h: f64, content: Content) -> Content {
 /// Resize the current box to `w`/`h` percent of itself, about its centre. The
 /// scaled picture is clipped to the canvas and padded transparently around it,
 /// so a lower track shows through; above 100% it is a centre zoom.
-fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> (String, Content) {
+fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), picture: Picture) -> (String, Picture) {
+    let content = picture.content;
     if content.is_empty() {
-        return (String::new(), content);
+        return (String::new(), picture);
     }
     let (fw, fh) = (i64::from(canvas.0), i64::from(canvas.1));
     let size = |base: i64, pct: f64| {
@@ -391,7 +494,14 @@ fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> 
     let w = (sx + sw).min(fw) - ix;
     let h = (sy + sh).min(fh) - iy;
     if w < 2 || h < 2 {
-        return (transparent_filter(), Content::empty());
+        return (
+            transparent_filter(),
+            Picture {
+                content: Content::empty(),
+                changed: true,
+                ..picture
+            },
+        );
     }
     let next = Content {
         x: ix.min(fw - w),
@@ -401,8 +511,18 @@ fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> 
     };
     // 100% (or a rounding no-op) renders nothing.
     if sw == content.w && sh == content.h && next == content {
-        return (String::new(), content);
+        return (String::new(), picture);
     }
+    // Extend the projection by the same resize: the scaled box starts at
+    // `sx`, and a source point already on the canvas moves with it.
+    let kx = sw as f64 / content.w as f64;
+    let ky = sh as f64 / content.h as f64;
+    let map = Map {
+        scale_x: picture.map.scale_x * kx,
+        offset_x: sx as f64 + (picture.map.offset_x - content.x as f64) * kx,
+        scale_y: picture.map.scale_y * ky,
+        offset_y: sy as f64 + (picture.map.offset_y - content.y as f64) * ky,
+    };
     let mut chain = String::from("format=yuva420p");
     if !content.is_full(canvas) {
         chain += &format!(
@@ -424,15 +544,23 @@ fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> 
     if !next.is_full(canvas) {
         chain += &format!(",pad={fw}:{fh}:{}:{}:color=black@0", next.x, next.y);
     }
-    (chain, next)
+    (
+        chain,
+        Picture {
+            content: next,
+            map,
+            changed: true,
+        },
+    )
 }
 
 /// Move the current box toward an edge by `x`/`y` percent of the distance to
 /// it. 0 is no move, ±100 puts the picture fully off-canvas (a transparent
 /// frame); intermediate values leave the rest of the picture on screen.
-fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) -> (String, Content) {
+fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), picture: Picture) -> (String, Picture) {
+    let content = picture.content;
     if content.is_empty() {
-        return (String::new(), content);
+        return (String::new(), picture);
     }
     let (fw, fh) = (i64::from(canvas.0), i64::from(canvas.1));
     // Right/up use the room to that edge; left/down use the room to the
@@ -448,7 +576,7 @@ fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) ->
         -(((content.y + content.h) as f64) * -ypct / 100.0).round() as i64
     };
     if dx == 0 && dy == 0 {
-        return (String::new(), content);
+        return (String::new(), picture);
     }
     // The casts saturate (a hand-edited `1e300` percent becomes
     // `i64::MAX`), so the i64 adds must not assume the add stays in range:
@@ -466,7 +594,14 @@ fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) ->
     if vw < 2 || vh < 2 {
         // Fully (or within a pixel) off canvas: a transparent layer. At
         // ±100% of the canvas the picture is entirely outside.
-        return (transparent_filter(), Content::empty());
+        return (
+            transparent_filter(),
+            Picture {
+                content: Content::empty(),
+                changed: true,
+                ..picture
+            },
+        );
     }
     // Source offset inside the picture and destination on the canvas.
     let sx = ix.saturating_sub(nx);
@@ -476,6 +611,11 @@ fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) ->
         y: iy,
         w: vw,
         h: vh,
+    };
+    let map = Map {
+        offset_x: picture.map.offset_x + dx as f64,
+        offset_y: picture.map.offset_y + dy as f64,
+        ..picture.map
     };
     let mut chain = String::from("format=yuva420p");
     if !content.is_full(canvas) {
@@ -488,7 +628,14 @@ fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) ->
         chain += &format!(",crop={vw}:{vh}:{sx}:{sy}");
     }
     chain += &format!(",pad={fw}:{fh}:{}:{}:color=black@0", next.x, next.y);
-    (chain, next)
+    (
+        chain,
+        Picture {
+            content: next,
+            map,
+            changed: true,
+        },
+    )
 }
 
 /// One piece of media on a track. Its timeline position is derived from
@@ -1540,5 +1687,102 @@ mod tests {
             r"lut3d=file='C\:\\luts\\'",
             "a trailing backslash cannot escape the quote"
         );
+    }
+
+    // The geometry a check reads and the filters the exporter renders are the
+    // same tracker: the final `pad` must place the picture exactly where
+    // `visible`/`project` say it is.
+    #[test]
+    fn effect_geometry_agrees_with_the_chain_it_renders() {
+        let effects = vec![
+            Effect::Crop {
+                x: 10.0,
+                y: 10.0,
+                w: 80.0,
+                h: 80.0,
+                keys: Vec::new(),
+            },
+            Effect::Scale { w: 50.0, h: 50.0 },
+            Effect::Offset { x: 10.0, y: 0.0 },
+        ];
+        let canvas = (1920, 1080);
+        let geometry = Effect::geometry(&effects, canvas);
+        assert_eq!(geometry.visible(), (710, 324, 768, 432));
+        // The crop's source rect (10..90% each axis) lands on that same box.
+        assert_eq!(
+            geometry.project(0.1, 0.1, 0.8, 0.8),
+            (710.0, 324.0, 768.0, 432.0)
+        );
+        assert!(geometry.changes_picture());
+        let chain = Effect::chain(&effects, canvas);
+        assert!(
+            chain.ends_with("pad=1920:1080:710:324:color=black@0"),
+            "the export pads the visible box it reports: {chain}"
+        );
+    }
+
+    #[test]
+    fn keyed_crop_geometry_is_only_its_static_base() {
+        // `Effect::geometry` models the static chain; `Effect::chain` itself
+        // does not refuse keys (the exporter's `effect_chain` does). Pin that
+        // so a caller cannot mistake the static base for the keyed window.
+        let effects = vec![Effect::Crop {
+            x: 10.0,
+            y: 10.0,
+            w: 80.0,
+            h: 80.0,
+            keys: vec![CropKey {
+                at: Seconds::from_integer(0),
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            }],
+        }];
+        let geometry = Effect::geometry(&effects, (1920, 1080));
+        assert_eq!(geometry.visible(), (192, 108, 1536, 864));
+        assert!(geometry.changes_picture());
+    }
+
+    #[test]
+    fn no_op_geometry_stays_identity() {
+        let canvas = (1920, 1080);
+        for effects in [
+            Vec::new(),
+            vec![Effect::Scale { w: 100.0, h: 100.0 }],
+            vec![Effect::Crop {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+                keys: Vec::new(),
+            }],
+        ] {
+            let geometry = Effect::geometry(&effects, canvas);
+            assert_eq!(geometry.visible(), (0, 0, 1920, 1080));
+            assert!(!geometry.changes_picture(), "{effects:?}");
+            assert_eq!(
+                geometry.project(0.25, 0.5, 0.5, 0.5),
+                (480.0, 540.0, 960.0, 540.0)
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_and_offset_clip_the_visible_box_to_the_canvas() {
+        let canvas = (1920, 1080);
+        // A 200% centre zoom keeps the full canvas but maps the source wider
+        // than it: the picture is cut on both sides.
+        let zoom = Effect::geometry(&[Effect::Scale { w: 200.0, h: 200.0 }], canvas);
+        assert_eq!(zoom.visible(), (0, 0, 1920, 1080));
+        assert!(zoom.changes_picture());
+        assert_eq!(
+            zoom.project(0.0, 0.0, 1.0, 1.0),
+            (-960.0, -540.0, 3840.0, 2160.0)
+        );
+
+        let off = Effect::geometry(&[Effect::Offset { x: 100.0, y: 0.0 }], canvas);
+        assert!(off.is_empty());
+        assert!(off.changes_picture());
     }
 }
