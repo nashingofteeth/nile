@@ -226,8 +226,10 @@ plainly; never claim a pass you did not observe.
 
 - **CV products are source products.** `subject-in-frame` maps each output
   frame through the report to `(clip, source)`, then the product grid and the
-  clip's crop. Never sample the composited render; `Scale`/`Offset` and blend
-  frames are unverifiable (`nle-core/src/expect.rs`, `analysis.rs`).
+  clip's visible window (`Effect::geometry`: static crop/scale/offset).
+- **Keys and blends are unverifiable.** A keyed crop uses its key window; a
+  keyed crop mixed with another effect is unverifiable, as is a blend frame.
+  Never sample the composited render (`expect.rs`, `timeline.rs`).
 
 ## Editing and TUI conventions
 
