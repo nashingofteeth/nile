@@ -49,7 +49,7 @@ checks); older files are rejected, never migrated.
   none. `Project::validate` refuses a duplicate as
   `ProjectError::SegmentDuplicate(sequence, segment)`, so a hand-edited
   `nile.json` cannot make `--clip` ambiguous; `Project::load`,
-  `Document::save` and `History::apply` all run that check.
+  `Project::save`, `Document::save` and `History::apply` all run that check.
 - `History::apply` clamps the edited sequence. `Document::save` uses
   `clamp_project_all`, so a sequence that is not active is still clamped
   before the file is written: its clips to their media and its stored
