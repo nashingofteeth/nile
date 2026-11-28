@@ -434,22 +434,35 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
         assert_eq!(derived.sequence.id, 2);
     }
 
+    let before = {
+        let mut client = connect();
+        client.hello().expect("hello").revision
+    };
+
+    fn run_batch(sandbox: &Sandbox, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_nile"))
+            .current_dir(sandbox.path())
+            .args(["--project", P, "job", "batch"])
+            .args(args)
+            .output()
+            .expect("nile job batch")
+    }
+
+    fn cancel_live(client: &mut nle_protocol::Client<std::io::BufReader<UnixStream>, UnixStream>) {
+        for job in client.jobs().expect("job.list").jobs {
+            if !job.state.is_terminal() {
+                let _ = client.cancel_job(job.id);
+            }
+        }
+    }
+
     // A bad selection refuses before the output directory exists.
     let refused = sandbox.file("batch-refused");
-    let bad = Command::new(env!("CARGO_BIN_EXE_nile"))
-        .current_dir(sandbox.path())
-        .args([
-            "--project",
-            P,
-            "job",
-            "batch",
-            "--output-dir",
-            &refused.display().to_string(),
-            "--sequence",
-            "99",
-        ])
-        .output()
-        .expect("job batch with an unknown sequence");
+    let refused_arg = refused.display().to_string();
+    let bad = run_batch(
+        &sandbox,
+        &["--output-dir", &refused_arg, "--sequence", "99"],
+    );
     assert!(!bad.status.success(), "{bad:?}");
     assert!(
         String::from_utf8_lossy(&bad.stderr).contains("no sequence #99"),
@@ -460,24 +473,46 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
         "a selection refusal creates no directory"
     );
 
+    // An existing render refuses the batch before any submit: no job appears
+    // and the directory keeps only the file the user already had.
+    let existing = sandbox.file("batch-existing");
+    std::fs::create_dir(&existing).expect("mkdir");
+    std::fs::write(existing.join("sequence-1.mp4"), b"an old render").expect("write");
+    let existing_arg = existing.display().to_string();
+    let collision = run_batch(&sandbox, &["--output-dir", &existing_arg]);
+    assert!(!collision.status.success(), "{collision:?}");
+    assert!(
+        String::from_utf8_lossy(&collision.stderr).contains("already exists"),
+        "{collision:?}"
+    );
+    {
+        let mut client = connect();
+        let jobs = client.jobs().expect("job.list");
+        assert!(
+            jobs.jobs.is_empty(),
+            "the existing-file refusal queued nothing: {jobs:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(&existing).expect("read_dir").count(),
+        1,
+        "the refusal wrote no second output"
+    );
+
     // No `--sequence`: every sequence, in listing order, into sequence-<id>.mp4.
     let dir = sandbox.file("batch");
-    let batch = Command::new(env!("CARGO_BIN_EXE_nile"))
-        .current_dir(sandbox.path())
-        .args([
-            "--project",
-            P,
-            "job",
-            "batch",
+    let dir_arg = dir.display().to_string();
+    let batch = run_batch(
+        &sandbox,
+        &[
             "--output-dir",
-            &dir.display().to_string(),
+            &dir_arg,
             "--preset",
             "preview",
             "--crf",
             "30",
-        ])
-        .output()
-        .expect("job batch");
+        ],
+    );
     assert!(batch.status.success(), "{batch:?}");
     let stdout = String::from_utf8_lossy(&batch.stdout);
     for (id, sequence) in [(1, 1), (2, 2)] {
@@ -497,18 +532,83 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
         assert_eq!(job.output, dir.join(format!("sequence-{sequence}.mp4")));
     }
     assert!(dir.exists(), "the output directory was created");
-    let before = client.hello().expect("hello").revision;
 
     // Stop the renders instead of waiting for two full exports.
-    for job in &queued.jobs {
-        let live = client.job(job.id).expect("job.get");
-        if !live.state.is_terminal() {
-            let _ = client.cancel_job(job.id);
-        }
+    cancel_live(&mut client);
+
+    // A relative `--output-dir` resolves against the client's cwd.
+    let relative = run_batch(
+        &sandbox,
+        &["--output-dir", "renders", "--preset", "preview"],
+    );
+    assert!(relative.status.success(), "{relative:?}");
+    let relative_dir = sandbox.path().join("renders");
+    assert!(
+        relative_dir.is_dir(),
+        "the relative directory resolved against the client cwd"
+    );
+    let relative_jobs = client.jobs().expect("job.list").jobs;
+    assert_eq!(relative_jobs.len(), 4, "{relative_jobs:?}");
+    for (job, (id, sequence)) in relative_jobs[2..].iter().zip([(3u64, 1u32), (4, 2)]) {
+        assert_eq!(job.id, id);
+        assert_eq!(job.sequence, sequence);
+        assert_eq!(
+            job.output,
+            relative_dir.join(format!("sequence-{sequence}.mp4"))
+        );
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
+    cancel_live(&mut client);
+
+    // Explicit ids keep the command-line order, not the listing order.
+    let ordered_dir = sandbox.file("batch-ordered");
+    let ordered_arg = ordered_dir.display().to_string();
+    let ordered = run_batch(
+        &sandbox,
+        &[
+            "--output-dir",
+            &ordered_arg,
+            "--preset",
+            "preview",
+            "--sequence",
+            "2",
+            "--sequence",
+            "1",
+        ],
+    );
+    assert!(ordered.status.success(), "{ordered:?}");
+    let stdout = String::from_utf8_lossy(&ordered.stdout);
+    for (id, sequence) in [(5, 2), (6, 1)] {
+        let output = ordered_dir.join(format!("sequence-{sequence}.mp4"));
+        let line = format!(
+            "queued job #{id} for sequence #{sequence} → {}",
+            output.display()
+        );
+        assert!(stdout.contains(&line), "missing {line:?} in {stdout}");
+    }
+    assert!(
+        stdout.find("queued job #5").expect("#5") < stdout.find("queued job #6").expect("#6"),
+        "sequence 2 was queued before sequence 1: {stdout}"
+    );
+    let ordered_jobs = client.jobs().expect("job.list").jobs;
+    assert_eq!(ordered_jobs.len(), 6, "{ordered_jobs:?}");
+    assert_eq!(
+        (ordered_jobs[4].id, ordered_jobs[4].sequence),
+        (5, 2),
+        "the explicit order drives ids"
+    );
+    assert_eq!(
+        (ordered_jobs[5].id, ordered_jobs[5].sequence),
+        (6, 1),
+        "the explicit order drives ids"
+    );
+    assert_eq!(ordered_jobs[4].output, ordered_dir.join("sequence-2.mp4"));
+    assert_eq!(ordered_jobs[5].output, ordered_dir.join("sequence-1.mp4"));
+    cancel_live(&mut client);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let jobs = client.jobs().expect("job.list").jobs;
+        assert_eq!(jobs.len(), 6, "{jobs:?}");
         if jobs.iter().all(|job| job.state.is_terminal()) {
             break;
         }
