@@ -649,9 +649,10 @@ shared by the TUI and agents — with no clipgen code present.
   and batch render jobs landed (`nile job batch --output-dir DIR
   [--sequence ID]...` queues one `job.submit` per sequence at one revision,
   deterministic `sequence-<id>.mp4`; duplicates/unknown ids/existing files
-  refuse before any submit, a server-side live-output guard closes the
-  two-batch race, and a zero-queued failure removes the directory it created).
-  Presets/regeneration and per-sequence export presets remain.
+  refuse before any submit, `job.submit` refuses an output a non-terminal job
+  owns by canonical parent + name, and a zero-queued failure removes only the
+  directory components it created). Presets/regeneration and per-sequence
+  export presets remain.
 - Marker/chapter annotations in the TUI; transcript and text-based editing
   build on annotations + time maps later.
 - `nile mcp` as a thin protocol adapter; a review/log view that shows

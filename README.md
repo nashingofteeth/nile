@@ -529,15 +529,20 @@ sequence into `DIR`: with no `--sequence` it takes every sequence, otherwise
 the given ids in that order. Each output is named `sequence-<id>.mp4`.
 Duplicate ids, unknown ids and an existing file refuse the batch before any
 job is submitted; a bad selection or an existing file also leaves no new
-directory. The server refuses a submit whose output path a non-terminal job
-already targets (`-32602`, naming that job), so two overlapping batches cannot
-race into one file even when both passed their own existence check. If a
-submit fails before anything was queued, the batch removes the directory it
-created. Every submit uses the revision read at the start (`job.submit` is not
-a model write), so a concurrent edit makes the remaining submits refuse
-instead of mixing revisions. The queued lines print the job id, sequence and
-output; a mid-batch failure names the jobs already queued and exits nonzero.
-It is a client-side loop over `job.submit`: no queue or protocol change.
+directory. `job.submit` refuses an output another **non-terminal** job owns
+(`-32602`, naming that job), comparing a canonical parent plus the file name,
+so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` are one deliverable,
+and two overlapping batches cannot both claim it even when both passed their
+own existence check. A finished job's existing file is not newly claimed:
+terminal-file overwrite is a separate open item. If a submit fails before
+anything was queued, the batch removes exactly the directory components it
+created (innermost first, and only while empty; pre-existing parents stay).
+Every submit uses the revision read at the start (`job.submit` is not a model
+write), so a concurrent edit makes the remaining submits refuse instead of
+mixing revisions. The queued lines print the job id, sequence and output; a
+mid-batch failure names the jobs already queued and exits nonzero. There is no
+new wire method: the loop is a client-side sequence of `job.submit`, which now
+refuses an output a live job owns.
 
 ### One-shot tools and logging
 
