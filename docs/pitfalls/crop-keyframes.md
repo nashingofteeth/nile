@@ -16,7 +16,8 @@ Read before touching `CropKey`, the keyframe action, or the keyed-crop graph.
   travel (the window never pre-shrinks); after the last key it holds.
 - **One planner.** `timeline::crop_passes` owns the ranges and windows: the
   exporter only formats its passes, the CV checks sample
-  `CropPass::window_at`, and `crop_window_at` (rebase) samples it too.
+  `CropPass::window_at`, `crop_stable` takes its movement/rate from the passes
+  (not raw key spacing), and `crop_window_at` (rebase) samples it too.
   Validation rejects negative/non-increasing keys at load/save **and** the
   effect edit boundary (`InvalidEffect`); the planner asserts that order
   before sorting and skips a negative start defensively in release.
@@ -25,6 +26,13 @@ Read before touching `CropKey`, the keyframe action, or the keyed-crop graph.
   the same source frame keeps its key. A tail trim keeps a key after the new
   end as the final pass's endpoint (interpolation runs to the clip end); a
   lone past-end key leaves the base held.
+- **Tail cuts synthesize the endpoint.** Split/slice/left-tail uses the
+  planner at the cut (against the **pre-cut duration**), clamps the sampled
+  window into the frame (`x+w ≤ 100`, `y+h ≤ 100`) and appends it as a key at
+  the cut when none sits exactly there, then drops later keys. Both halves
+  therefore meet on the same cut window. Every window `rebase_crop_keys`
+  writes back is clamped the same way, because a pass keeps the earlier key's
+  size while x/y move toward a differently sized next key.
 - **A keyed crop is alone.** Adding another effect to the clip is refused
   (`KeyedCropExclusive`), and so is a transition beside it
   (`KeyedCropTransition`); the renderer repeats the refusal as a backstop.
