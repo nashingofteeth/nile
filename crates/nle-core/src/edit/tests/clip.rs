@@ -60,6 +60,34 @@ fn insert_splits_a_clip_at_the_playhead() {
 }
 
 #[test]
+fn a_spent_max_id_is_never_reused_by_a_second_allocation() {
+    // The payload spends the last representable id; the split right half then
+    // has no successor. Refuse the whole batch rather than alias the max id.
+    let mut p = Project::new();
+    p.fps = Some(Seconds::new(30, 1));
+    let (asset, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+        u32::MAX - 1,
+        asset,
+        Seconds::from_integer(0),
+        Seconds::from_integer(4),
+    ))];
+    let payload = Segment::Clip(Clip::new(
+        0,
+        asset,
+        Seconds::from_integer(4),
+        Seconds::from_integer(5),
+    ));
+    let before = p.clone();
+    let err = insert_segments_on(&p, 0, 1.0, &[payload]).unwrap_err();
+    assert!(matches!(
+        err,
+        EditError::Project(ProjectError::IdExhausted("clip", u32::MAX))
+    ));
+    assert_eq!(p, before, "the planner mutated nothing");
+}
+
+#[test]
 fn insert_splits_a_gap_at_the_playhead() {
     let mut p = fixture();
     let a = p.media[0].id;
@@ -1153,7 +1181,7 @@ fn a_lookup_at_the_end_of_a_clip_ending_timeline_finds_no_transition() {
 #[test]
 fn remove_span_cuts_a_clip_and_allocates_a_fresh_id() {
     let p = fixture();
-    let mut next = 50;
+    let mut next = Some(50);
     let batch = remove_span_on(&p, 0, Seconds::new(1, 2), Seconds::new(7, 2), &mut next).unwrap();
     let mut q = p.clone();
     let mut h = History::default();
@@ -1187,7 +1215,7 @@ fn remove_span_merges_the_gap_ends() {
     p.timeline.video_track_mut().unwrap().segments = vec![Segment::Gap(Gap {
         duration: Seconds::from_integer(4),
     })];
-    let mut next = 50;
+    let mut next = Some(50);
     let batch = remove_span_on(
         &p,
         0,
@@ -1238,7 +1266,7 @@ fn remove_span_refuses_a_transition_edge() {
         .unwrap();
     let start = tr.start_of(ti);
     let end = start + tr.segments[ti].duration();
-    let mut next = 50;
+    let mut next = Some(50);
     assert!(matches!(
         remove_span_on(&p, 0, start + Seconds::new(1, 30), end, &mut next),
         Err(EditError::Transition)

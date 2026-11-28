@@ -576,7 +576,9 @@ mod tests {
         let rendered = project(2);
         let mut expected = project(1);
         let id = add(&mut expected, cam(1));
-        let second = expected.add_sequence("Second", Some(Seconds::from_integer(30)), None);
+        let second = expected
+            .add_sequence("Second", Some(Seconds::from_integer(30)), None)
+            .unwrap();
         assert_eq!(second, 2);
         expected.select_sequence(second).expect("switch");
         let out = write_report(&rendered, dir.path());

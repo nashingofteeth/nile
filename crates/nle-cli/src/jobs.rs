@@ -797,7 +797,9 @@ mod tests {
         let (_dir, path) = seeded();
         let store = JobStore::at(&path);
         let mut project = Project::load(&path).unwrap();
-        let second = project.add_sequence("Second", Some(Seconds::from_integer(24)), None);
+        let second = project
+            .add_sequence("Second", Some(Seconds::from_integer(24)), None)
+            .unwrap();
         let sequence = project.sequence_mut(second).unwrap();
         sequence.timeline.video_track_mut().unwrap().segments =
             vec![nle_core::timeline::Segment::Gap(nle_core::timeline::Gap {

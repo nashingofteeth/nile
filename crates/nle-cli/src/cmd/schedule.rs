@@ -916,7 +916,9 @@ mod tests {
             post: Seconds::from_integer(2),
         };
         let mut other = p.clone();
-        let id = other.add_sequence("Second", Some(Seconds::from_integer(24)), None);
+        let id = other
+            .add_sequence("Second", Some(Seconds::from_integer(24)), None)
+            .unwrap();
         let sequence = other.sequence_mut(id).unwrap();
         sequence.playhead = Seconds::from_integer(3);
         sequence.timeline.video_track_mut().unwrap().segments = vec![Segment::Gap(Gap {

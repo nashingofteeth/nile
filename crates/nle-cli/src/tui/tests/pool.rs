@@ -804,9 +804,9 @@ fn pool_jumps_to_source_marks() {
     assert_eq!(app.message, "no out mark");
 }
 
-// Asset ids are reused (`next_asset_id` is max + 1). Removing an asset must
-// drop its id-keyed caches, or a later import of a different file draws the
-// removed one's waveform and walks its keyframes.
+// A new asset takes the id one past the highest (`next_asset_id`). Removing
+// an asset must drop its id-keyed caches, or a later import of a different
+// file draws the removed one's waveform and walks its keyframes.
 #[test]
 fn removing_an_asset_prunes_its_cached_waveform() {
     use super::super::actions::run_action;

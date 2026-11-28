@@ -524,7 +524,7 @@ pub fn run_action(
                 let dur = transition_frames(requested, &fps)?;
                 // `add_transition` ids the blend with the next segment id;
                 // keep it so the playhead can land in the new blend below.
-                let blend_id = project.next_clip_id();
+                let blend_id = project.next_clip_id()?;
                 let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
                 let mut out = apply_synced(project, history, *track, batch, from, None)?;
                 land_on_blend(project, *track, blend_id, &mut out);
@@ -685,7 +685,7 @@ pub fn run_action(
                     // The base batch already took ids from the project
                     // counter; start the sync above them so no two tracks
                     // share a split-half id.
-                    let mut next = next_id_after(project, &batch)?;
+                    let mut next = Some(next_id_after(project, &batch)?);
                     batch.ops.extend(edit::ripple_other_tracks(
                         project,
                         *track,
@@ -738,7 +738,7 @@ pub fn run_action(
                     .fold(Seconds::from_integer(0), |acc, s| acc + s.duration());
                 // The range insert already took ids from the project counter;
                 // start the sync above them (see the Paste branch).
-                let mut next = next_id_after(project, &batch)?;
+                let mut next = Some(next_id_after(project, &batch)?);
                 batch.ops.extend(edit::ripple_other_tracks(
                     project, *track, *at, dur, &mut next,
                 )?);
@@ -981,7 +981,7 @@ fn shift_other_tracks(
     except: usize,
     at: Seconds,
     delta: Seconds,
-    next_id: &mut u32,
+    next_id: &mut Option<u32>,
 ) -> Result<Vec<EditOp>, String> {
     if delta > Seconds::from_integer(0) {
         return edit::ripple_other_tracks(project, except, secs_f64(&at), delta, next_id)
@@ -1014,7 +1014,7 @@ fn next_id_after(project: &Project, batch: &edit::Batch) -> Result<u32, EditErro
     for op in &batch.ops {
         op.apply(&mut after)?;
     }
-    Ok(after.next_clip_id())
+    Ok(after.next_clip_id()?)
 }
 
 /// Why the base edit's sync ripple could not be planned. `Skip` is the
@@ -1058,7 +1058,11 @@ fn sync_ops(
     } else {
         at
     };
-    let mut next = after.next_clip_id();
+    let mut next = Some(
+        after
+            .next_clip_id()
+            .map_err(|e| SyncError::Fatal(EditError::Project(e)))?,
+    );
     shift_other_tracks(project, track, at, delta, &mut next).map_err(SyncError::Skip)
 }
 

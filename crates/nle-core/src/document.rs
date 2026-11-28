@@ -146,16 +146,16 @@ impl Document {
     ) -> Result<u32, ProjectError> {
         if fps.is_some_and(|fps| fps <= Seconds::from_integer(0)) {
             return Err(ProjectError::NonPositiveFps(
-                self.project.next_sequence_id(),
+                self.project.next_sequence_id()?,
             ));
         }
         if video
             .as_ref()
             .is_some_and(|video| video.width == 0 || video.height == 0)
         {
-            return Err(ProjectError::ZeroCanvas(self.project.next_sequence_id()));
+            return Err(ProjectError::ZeroCanvas(self.project.next_sequence_id()?));
         }
-        let id = self.project.add_sequence(name, fps, video);
+        let id = self.project.add_sequence(name, fps, video)?;
         self.histories.ensure(id);
         self.project.bump_revision();
         Ok(id)
@@ -176,7 +176,7 @@ impl Document {
     ) -> Result<u32, ProjectError> {
         if fps.is_some_and(|fps| fps <= Seconds::from_integer(0)) {
             return Err(ProjectError::NonPositiveFps(
-                self.project.next_sequence_id(),
+                self.project.next_sequence_id()?,
             ));
         }
         let id = self.project.derive_sequence(from, name, fps, video)?;
@@ -1007,7 +1007,8 @@ mod tests {
         let second = second_sequence(&mut doc);
         let empty = doc
             .project
-            .add_sequence("Short", Some(Seconds::new(30, 1)), None);
+            .add_sequence("Short", Some(Seconds::new(30, 1)), None)
+            .unwrap();
         // Stale cursors on both inactive timelines: one with media, one empty
         // (whose only representable position is 0).
         doc.project.sequence_mut(second).unwrap().playhead = Seconds::from_integer(99);
@@ -1190,7 +1191,8 @@ mod tests {
     fn second_sequence(doc: &mut Document) -> u32 {
         let id = doc
             .project
-            .add_sequence("Second", Some(Seconds::new(30, 1)), None);
+            .add_sequence("Second", Some(Seconds::new(30, 1)), None)
+            .unwrap();
         doc.select_sequence(id).unwrap();
         doc.project.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
             id: 2,
@@ -1221,6 +1223,27 @@ mod tests {
         ));
         assert_eq!(doc.project.sequences.len(), before);
         assert_eq!(doc.revision(), 0, "a refused add is not a model write");
+    }
+
+    #[test]
+    fn an_exhausted_sequence_id_refuses_before_mutating() {
+        let mut doc = document();
+        doc.project.sequences[0].id = u32::MAX;
+        doc.select_sequence(u32::MAX).unwrap();
+        let before = doc.project.clone();
+        let revision = doc.revision();
+        assert!(matches!(
+            doc.add_sequence("Next", None, None),
+            Err(ProjectError::IdExhausted("sequence", u32::MAX))
+        ));
+        assert_eq!(doc.project.sequences.len(), before.sequences.len());
+        assert_eq!(doc.project.active_id(), u32::MAX);
+        assert_eq!(
+            doc.revision(),
+            revision,
+            "a refused add is not a model write"
+        );
+        assert_eq!(doc.depth(), 0, "the history gained no entry");
     }
 
     #[test]

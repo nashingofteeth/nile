@@ -159,7 +159,7 @@ pub fn add_transition(
         track,
         index: left_i.map(|i| i + 1).unwrap_or(0),
         segment: Segment::Transition(Transition {
-            id: project.next_clip_id(),
+            id: project.next_clip_id()?,
             dur,
             kind,
             a,

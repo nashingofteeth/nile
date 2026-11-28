@@ -12,7 +12,7 @@ pub use delete::{
     delete_under_on, trim_consume_target, trim_consume_target_on,
 };
 
-use crate::project::Project;
+use crate::project::{Project, ProjectError};
 use crate::time::{Seconds, checked_add, checked_frames_to_seconds, checked_mul, checked_sub};
 use crate::timeline::{
     Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Track, Transition, TransitionSource,
@@ -72,7 +72,7 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
     };
     left.truncate_crop_keys(left_len);
     let mut right = Clip {
-        id: project.next_clip_id(),
+        id: project.next_clip_id()?,
         asset: c.asset,
         asset_in: c.asset_in + source_span(&c, t - seg_start),
         asset_out: c.asset_out,
@@ -223,7 +223,8 @@ pub fn paste_on(
         return Ok(batch);
     }
     let dur = snapshot.duration();
-    let pasted = pasted_piece(snapshot, project.next_clip_id());
+    let next = project.next_clip_id()?;
+    let pasted = pasted_piece(snapshot, next);
 
     // At/past the end (or an empty track): nothing to overwrite — append,
     // bridging the void with a gap when there's distance to cover.
@@ -284,7 +285,8 @@ pub fn paste_on(
                         // tail needs a fresh id only when the same clip
                         // supplied both pieces.
                         let id = if ei == si && left_ok {
-                            project.next_clip_id() + 1
+                            next.checked_add(1)
+                                .ok_or(ProjectError::IdExhausted("clip", next))?
                         } else {
                             c.id
                         };
@@ -443,7 +445,7 @@ pub fn insert_gap_on(
         Segment::Clip(c) => {
             // A split within a frame of either edge is that edge: no slivers.
             let (head_ok, tail_ok) = split_sides(project, c.duration(), off);
-            let pid = project.next_clip_id();
+            let pid = project.next_clip_id()?;
             let mut pieces: Vec<Segment> = Vec::new();
             if head_ok {
                 pieces.push(Segment::Clip(Clip {
@@ -500,7 +502,7 @@ pub fn paste_ripple_on(
         return Ok(batch);
     }
     let what = match snapshot {
-        Segment::Clip(_) => format!("clip #{}", project.next_clip_id()),
+        Segment::Clip(_) => format!("clip #{}", project.next_clip_id()?),
         Segment::Gap(_) => "gap".to_string(),
         Segment::Transition(_) => "transition".to_string(),
     };
@@ -514,7 +516,7 @@ pub fn paste_ripple_on(
                 ti,
                 track,
                 void,
-                pasted_piece(snapshot, project.next_clip_id()),
+                pasted_piece(snapshot, project.next_clip_id()?),
             )?,
             desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
         });
@@ -544,7 +546,7 @@ pub fn paste_ripple_on(
             let head_len =
                 checked_sub(&t, &seg_start).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
             let (head_ok, tail_ok) = split_sides(project, c.duration(), head_len);
-            let pid = project.next_clip_id();
+            let pid = project.next_clip_id()?;
             let mut pieces = Vec::new();
             if head_ok {
                 pieces.push(Segment::Clip(Clip {
@@ -560,7 +562,12 @@ pub fn paste_ripple_on(
             if tail_ok {
                 // The right half is a new clip on a split, or keeps the
                 // original's identity on an insert-before.
-                let id = if head_ok { pid + 1 } else { c.id };
+                let id = if head_ok {
+                    pid.checked_add(1)
+                        .ok_or(ProjectError::IdExhausted("clip", pid))?
+                } else {
+                    c.id
+                };
                 let mut tail = Clip {
                     id,
                     asset: c.asset,
@@ -585,7 +592,7 @@ pub fn paste_ripple_on(
             if head > Seconds::from_integer(0) && at_least_a_frame(project, &head).is_ok() {
                 pieces.push(Segment::Gap(Gap { duration: head }));
             }
-            pieces.push(pasted_piece(snapshot, project.next_clip_id()));
+            pieces.push(pasted_piece(snapshot, project.next_clip_id()?));
             if tail > Seconds::from_integer(0) && at_least_a_frame(project, &tail).is_ok() {
                 pieces.push(Segment::Gap(Gap { duration: tail }));
             }
@@ -802,7 +809,7 @@ pub fn ripple_other_tracks(
     except: usize,
     at: f64,
     dur: Seconds,
-    next: &mut u32,
+    next: &mut Option<u32>,
 ) -> Result<Vec<EditOp>, EditError> {
     if dur <= Seconds::from_integer(0) {
         return Ok(Vec::new());
@@ -839,7 +846,7 @@ pub fn remove_span_on(
     track: usize,
     start: Seconds,
     end: Seconds,
-    next_id: &mut u32,
+    next_id: &mut Option<u32>,
 ) -> Result<Batch, EditError> {
     let tr = track_at(project, track)?;
     let total = tr.end();
@@ -910,13 +917,26 @@ pub fn remove_span_on(
     ))
 }
 
+/// Take the next segment id from a shared counter.
+///
+/// `Some(id)` is the next free id; `None` records that the last take spent
+/// `u32::MAX`, so there is no successor and reusing the max id would alias two
+/// clips. The batch is refused before anything is applied.
+fn take_id(next: &mut Option<u32>) -> Result<u32, EditError> {
+    let id = next
+        .take()
+        .ok_or(ProjectError::IdExhausted("clip", u32::MAX))?;
+    *next = id.checked_add(1);
+    Ok(id)
+}
+
 /// Split one segment at a timeline offset. Transitions cannot be split; the
 /// caller guards those boundaries before calling.
 fn split_segment_at(
     project: &Project,
     seg: &Segment,
     offset: Seconds,
-    next_id: &mut u32,
+    next_id: &mut Option<u32>,
 ) -> Result<(Segment, Segment), EditError> {
     match seg {
         Segment::Clip(c) => {
@@ -933,7 +953,7 @@ fn split_segment_at(
             };
             left.truncate_crop_keys(offset);
             let mut right = Clip {
-                id: *next_id,
+                id: take_id(next_id)?,
                 asset: c.asset,
                 asset_in: split,
                 asset_out: c.asset_out,
@@ -941,7 +961,6 @@ fn split_segment_at(
                 effects: c.effects.clone(),
             };
             right.rebase_crop_keys(offset);
-            *next_id = next_id.saturating_add(1);
             Ok((Segment::Clip(left), Segment::Clip(right)))
         }
         Segment::Gap(g) => {
@@ -967,7 +986,7 @@ pub fn insert_segments_on(
     at: f64,
     segments: &[Segment],
 ) -> Result<Batch, EditError> {
-    let mut next = project.next_clip_id();
+    let mut next = Some(project.next_clip_id()?);
     insert_segments_on_with(project, track, at, segments, &mut next)
 }
 
@@ -980,14 +999,14 @@ pub(super) fn insert_segments_on_with(
     track: usize,
     at: f64,
     segments: &[Segment],
-    next: &mut u32,
+    next: &mut Option<u32>,
 ) -> Result<Batch, EditError> {
     if segments.is_empty() {
         return Err(EditError::NoSegment);
     }
     let t = snap(project, at)?;
     let tr = track_at(project, track)?;
-    let payload = fresh_payload(segments, next);
+    let payload = fresh_payload(segments, next)?;
     let desc = format!(
         "pasted {} segment(s) at {}",
         payload.len(),
@@ -1044,14 +1063,13 @@ pub(super) fn insert_segments_on_with(
                 effects: c.effects.clone(),
             });
             let right = Segment::Clip(Clip {
-                id: *next,
+                id: take_id(next)?,
                 asset: c.asset,
                 asset_in: split_at,
                 asset_out: c.asset_out,
                 speed: c.speed,
                 effects: c.effects.clone(),
             });
-            *next = next.saturating_add(1);
             let mut pieces = vec![left];
             pieces.extend(payload);
             pieces.push(right);
@@ -1154,25 +1172,18 @@ fn plain_insert(
     }
 }
 
-fn fresh_payload(segments: &[Segment], next: &mut u32) -> Vec<Segment> {
-    segments
-        .iter()
-        .map(|segment| {
-            let mut segment = segment.clone();
-            match &mut segment {
-                Segment::Clip(c) => {
-                    c.id = *next;
-                    *next += 1;
-                }
-                Segment::Transition(t) => {
-                    t.id = *next;
-                    *next += 1;
-                }
-                Segment::Gap(_) => {}
-            }
-            segment
-        })
-        .collect()
+fn fresh_payload(segments: &[Segment], next: &mut Option<u32>) -> Result<Vec<Segment>, EditError> {
+    let mut out = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let mut segment = segment.clone();
+        match &mut segment {
+            Segment::Clip(c) => c.id = take_id(next)?,
+            Segment::Transition(t) => t.id = take_id(next)?,
+            Segment::Gap(_) => {}
+        }
+        out.push(segment);
+    }
+    Ok(out)
 }
 
 /// Keep the "never two adjacent gaps" invariant after splitting a gap and

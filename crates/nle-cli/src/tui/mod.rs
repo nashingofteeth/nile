@@ -1252,9 +1252,10 @@ fn persist_playhead(app: &mut App) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Drop cache entries for assets no longer in the pool. Asset ids are reused
-/// (`next_asset_id` is max + 1), so without this a newly imported asset draws
-/// the removed one's waveform / thumbnail, and `J`/`K` walk its keyframes.
+/// Drop cache entries for assets no longer in the pool. A new asset takes the
+/// id one past the highest (`next_asset_id`), so without this a newly imported
+/// asset draws the removed one's waveform / thumbnail, and `J`/`K` walk its
+/// keyframes.
 /// `reload_project` clears the maps outright (the media may have changed on
 /// disk); an in-app edit only needs the dead ids gone.
 fn forget_missing_assets(app: &mut App) {

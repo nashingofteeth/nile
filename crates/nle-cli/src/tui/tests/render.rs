@@ -73,7 +73,9 @@ fn check_verdicts_mark_the_marker_row() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     let mut p = asset_project();
-    let second = p.add_sequence("Second", Some(Seconds::new(30, 1)), None);
+    let second = p
+        .add_sequence("Second", Some(Seconds::new(30, 1)), None)
+        .unwrap();
     // Sequence 2 needs material for an expectation's anchor to resolve; it is
     // only used to prove the row reads the *active* sequence's map.
     p.sequence_mut(second).unwrap().timeline.tracks = vec![Track {
