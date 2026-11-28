@@ -44,6 +44,12 @@ checks); older files are rejected, never migrated.
   `Document::add_sequence`/`derive_sequence` and the TUI also refuse a zero
   width/height before saving.
   Loading rejects a project with no sequences.
+- Segment ids are unique **within a sequence, across every track**: clips and
+  transitions share the space (`next_clip_id` spans tracks) and gaps have
+  none. `Project::validate` refuses a duplicate as
+  `ProjectError::SegmentDuplicate(sequence, segment)`, so a hand-edited
+  `nile.json` cannot make `--clip` ambiguous; `Project::load`,
+  `Project::save`, `Document::save` and `History::apply` all run that check.
 - `History::apply` clamps the edited sequence. `Document::save` uses
   `clamp_project_all`, so a sequence that is not active is still clamped
   before the file is written: its clips to their media and its stored

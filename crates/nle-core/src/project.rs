@@ -67,6 +67,8 @@ pub enum ProjectError {
     SequenceNotFound(u32),
     #[error("sequence #{0} is duplicated")]
     SequenceDuplicate(u32),
+    #[error("sequence #{0}: segment #{1} is duplicated")]
+    SegmentDuplicate(u32, u32),
     #[error("sequence #{0} has a non-positive frame rate")]
     NonPositiveFps(u32),
     #[error("sequence #{0} has a zero output canvas")]
@@ -848,12 +850,20 @@ impl Project {
                 .validate()
                 .map_err(|why| ProjectError::SequenceAudio(sequence.id, why))?;
             sequence.timeline.validate()?;
+            // Clip and transition ids share one space per sequence
+            // (`next_clip_id`); a duplicate would make `--clip` and every
+            // id-addressed action ambiguous. One inserting pass keeps
+            // validation O(segments) on load, save and every history apply.
+            let mut segment_ids = HashSet::new();
             for track in &sequence.timeline.tracks {
                 for seg in &track.segments {
                     match seg {
                         Segment::Gap(_) => {}
                         Segment::Clip(clip) => {
                             id_has_room("clip", clip.id)?;
+                            if !segment_ids.insert(clip.id) {
+                                return Err(ProjectError::SegmentDuplicate(sequence.id, clip.id));
+                            }
                             let asset = self.pooled(clip.asset)?;
                             // A clip must carry the track's kind of stream, or
                             // export can't build the graph (an audio-only asset on
@@ -872,6 +882,9 @@ impl Project {
                             // Clips and transitions share one segment id
                             // space (`next_clip_id`), so both report `clip`.
                             id_has_room("clip", tr.id)?;
+                            if !segment_ids.insert(tr.id) {
+                                return Err(ProjectError::SegmentDuplicate(sequence.id, tr.id));
+                            }
                             for side in [&tr.a, &tr.b] {
                                 if let Some(asset_id) = side.asset() {
                                     let asset = self.pooled(asset_id)?;
@@ -1470,7 +1483,7 @@ mod tests {
     use crate::media::{RawFormat, RawStream};
     use crate::time::Seconds;
     use crate::timeline::{
-        Effect, Gap, Segment, TrackKind, Transition, TransitionKind, TransitionSource,
+        Effect, Gap, Segment, Track, TrackKind, Transition, TransitionKind, TransitionSource,
     };
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
@@ -1548,6 +1561,23 @@ mod tests {
         println!("second batch: {batch:?}");
         h.apply(&mut p, batch, 0).unwrap();
         p
+    }
+
+    /// An audio track holding one clip of `asset` under `id`. `sample_project`
+    /// pools a/v asset #1, so it can sit on either track kind.
+    fn audio_track_clip(id: u32) -> Track {
+        Track {
+            kind: TrackKind::Audio,
+            muted: false,
+            segments: vec![Segment::Clip(Clip {
+                id,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            })],
+        }
     }
 
     #[test]
@@ -3117,6 +3147,89 @@ mod tests {
         assert!(matches!(
             p.validate(),
             Err(ProjectError::SequenceNotFound(99))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_a_segment_id_shared_across_tracks() {
+        // Ids are sequence-wide (`next_clip_id` spans every track), so the
+        // same id on two tracks would make `--clip` ambiguous.
+        let mut p = sample_project();
+        p.timeline.tracks.push(audio_track_clip(1));
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::SegmentDuplicate(1, 1))
+        ));
+    }
+
+    #[test]
+    fn validate_reports_id_exhausted_before_a_segment_duplicate_at_the_ceiling() {
+        // The reserved ceiling is refused before the duplicate set sees it,
+        // even when two tracks share it. Moving the duplicate insert above
+        // `id_has_room` would report `SegmentDuplicate` instead.
+        let mut p = sample_project();
+        if let Segment::Clip(clip) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            clip.id = u32::MAX;
+        }
+        p.timeline.tracks.push(audio_track_clip(u32::MAX));
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::IdExhausted("clip", u32::MAX))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_a_clip_and_transition_sharing_an_id() {
+        // Clips and transitions share one id space.
+        let mut p = sample_project();
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(Segment::Transition(Transition {
+                id: 1,
+                dur: Seconds::from_integer(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: 1,
+                    src_in: Seconds::from_integer(0),
+                    src_out: Seconds::from_integer(1),
+                    effects: Vec::new(),
+                },
+                b: TransitionSource::Black,
+            }));
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::SegmentDuplicate(1, 1))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_unique_segment_ids_across_tracks() {
+        let mut p = sample_project();
+        p.timeline.tracks.push(audio_track_clip(3));
+        assert!(p.validate().is_ok(), "{:?}", p.validate());
+    }
+
+    #[test]
+    fn duplicate_segment_ids_refuse_save_and_load() {
+        let mut p = sample_project();
+        p.timeline.tracks.push(audio_track_clip(1));
+        let dir = tempfile::tempdir().unwrap();
+
+        let fresh = dir.path().join("fresh.json");
+        assert!(matches!(
+            p.save(&fresh),
+            Err(ProjectError::SegmentDuplicate(1, 1))
+        ));
+        assert!(!fresh.exists(), "a refused save creates no file");
+
+        // A hand-written file bypasses `save`, so `load` repeats the check.
+        let path = dir.path().join("nile.json");
+        std::fs::write(&path, serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(matches!(
+            Project::load(&path),
+            Err(ProjectError::SegmentDuplicate(1, 1))
         ));
     }
 

@@ -675,6 +675,39 @@ fn failed_apply_restores_project_and_keeps_history_empty() {
 }
 
 #[test]
+fn a_batch_that_reintroduces_a_duplicate_segment_id_rolls_back() {
+    let mut p = fixture();
+    let mut h = History::default();
+    let before = p.clone();
+    // Replace the gap with a clip that reuses clip #1's id. The op is
+    // structurally applicable; the sequence-wide uniqueness check must
+    // refuse it and restore the pre-batch track.
+    let duplicate = Segment::Clip(Clip {
+        id: 1,
+        asset: 1,
+        asset_in: Seconds::from_integer(0),
+        asset_out: Seconds::from_integer(1),
+        speed: Seconds::from_integer(1),
+        effects: Vec::new(),
+    });
+    let batch = Batch {
+        ops: vec![EditOp::Replace {
+            track: 0,
+            index: 1,
+            before: p.timeline.video_track().unwrap().segments[1].clone(),
+            after: duplicate,
+        }],
+        desc: "duplicate segment id".into(),
+    };
+    assert!(matches!(
+        h.apply(&mut p, batch, 0),
+        Err(EditError::Project(ProjectError::SegmentDuplicate(SEQ, 1)))
+    ));
+    assert_eq!(p, before, "the duplicate-id edit is rolled back");
+    assert_eq!(h.depth(), 0, "nothing pushed");
+}
+
+#[test]
 fn failed_undo_keeps_its_history_entry() {
     let mut p = fixture();
     let mut h = History::default();
