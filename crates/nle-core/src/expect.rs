@@ -1156,9 +1156,19 @@ fn check_work_in_frame(ctx: &Ctx<'_>, mut out: CheckOutcome, margin: f64) -> Che
             out.detail = Some(format!("clip #{id} is not in sequence #{}", ctx.sequence));
             return out;
         };
+        let keyed_crop = clip.effects.iter().find(|effect| effect.is_keyed_crop());
+        // A keyed crop is the only effect its pass graph can carry; mixing it
+        // with another effect has no single render path to judge (the export's
+        // `effect_chain` refuses it, matching `subject-in-frame`).
+        if keyed_crop.is_some() && clip.effects.len() > 1 {
+            out.detail = Some(format!(
+                "clip #{id}: keyed crop shares the clip with another effect"
+            ));
+            return out;
+        }
         // A keyed crop renders through its own pass graph, so its window is a
         // percentage of the picture at each key (the exporter's crop window).
-        if let Some(crop) = clip.effects.iter().find(|effect| effect.is_keyed_crop()) {
+        if let Some(crop) = keyed_crop {
             let Some((from, to)) = run_window(&run, ctx.span, start) else {
                 continue;
             };
@@ -2394,6 +2404,28 @@ mod tests {
     }
 
     #[test]
+    fn work_in_frame_judges_only_a_clip_that_constrains_the_picture() {
+        let report = report(&[(150, shot(1, 1))]);
+        let expect = range(Expectation::WorkInFrame { margin_pct: 5.0 }, 0, 5);
+
+        // No crop/scale/offset: the source fills the frame by definition, so
+        // the margin rule has nothing to judge.
+        let plain = project_with(vec![track(vec![clip(1, 1, 10)])]);
+        let outcome = evaluate(&plain, &report, &expect);
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+
+        // A 200% zoom clips back to the full canvas: the picture touches
+        // every edge.
+        let zoomed = project_with(vec![track(vec![clip_with(vec![Effect::Scale {
+            w: 200.0,
+            h: 200.0,
+        }])])]);
+        let outcome = evaluate(&zoomed, &report, &expect);
+        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("margin"));
+    }
+
+    #[test]
     fn work_in_frame_composes_static_scale_and_offset() {
         let report = report(&[(150, shot(1, 1))]);
         let expect = |margin| range(Expectation::WorkInFrame { margin_pct: margin }, 0, 5);
@@ -2415,16 +2447,6 @@ mod tests {
         let outcome = evaluate(&shifted, &report, &expect(5.0));
         assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
 
-        // A 200% zoom clips back to the full canvas: the picture touches
-        // every edge.
-        let zoomed = project_with(vec![track(vec![clip_with(vec![Effect::Scale {
-            w: 200.0,
-            h: 200.0,
-        }])])]);
-        let outcome = evaluate(&zoomed, &report, &expect(5.0));
-        assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
-        assert!(outcome.detail.unwrap().contains("margin"));
-
         // An offset that pushes the picture to the edge loses its margin.
         let pushed = project_with(vec![track(vec![clip_with(vec![Effect::Offset {
             x: 50.0,
@@ -2432,6 +2454,25 @@ mod tests {
         }])])]);
         let outcome = evaluate(&pushed, &report, &expect(5.0));
         assert_eq!(outcome.result, CheckResult::Fail, "{outcome:?}");
+    }
+
+    #[test]
+    fn work_in_frame_refuses_a_keyed_crop_mixed_with_another_effect() {
+        // The exporter's `effect_chain` refuses this mix, so the check cannot
+        // pick one render path; it must agree with `subject-in-frame`, not
+        // silently judge the keyed window alone.
+        let project = project_with(vec![track(vec![clip_with(vec![
+            crop(vec![key(0, 10.0, 10.0, 80.0, 80.0)]),
+            Effect::Scale { w: 50.0, h: 50.0 },
+        ])])]);
+        let report = report(&[(150, shot(1, 1))]);
+        let outcome = evaluate(
+            &project,
+            &report,
+            &range(Expectation::WorkInFrame { margin_pct: 5.0 }, 0, 5),
+        );
+        assert_eq!(outcome.result, CheckResult::Unverifiable, "{outcome:?}");
+        assert!(outcome.detail.unwrap().contains("keyed crop"));
     }
 
     #[test]

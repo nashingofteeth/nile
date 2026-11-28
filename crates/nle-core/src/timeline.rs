@@ -222,9 +222,10 @@ impl Effect {
     /// coordinates. This is the same tracker [`Effect::chain`] builds its
     /// filters from, so a check can never drift from the rendered picture.
     ///
-    /// A keyed crop renders through its own pass graph ([`Effect::chain`]
-    /// refuses it), so this models the static chain only; callers that see
-    /// keyframes must use the crop's window at the sampled time.
+    /// A keyed crop renders through its own pass graph: the exporter's
+    /// `effect_chain` refuses it, and this models the static chain only (the
+    /// crop's static fields). Callers that see keyframes must use the keyed
+    /// window at the sampled time, not this result.
     pub fn geometry(effects: &[Effect], canvas: (u32, u32)) -> EffectGeometry {
         let mut picture = Picture::full(canvas);
         for effect in effects {
@@ -1718,6 +1719,29 @@ mod tests {
             chain.ends_with("pad=1920:1080:710:324:color=black@0"),
             "the export pads the visible box it reports: {chain}"
         );
+    }
+
+    #[test]
+    fn keyed_crop_geometry_is_only_its_static_base() {
+        // `Effect::geometry` models the static chain; `Effect::chain` itself
+        // does not refuse keys (the exporter's `effect_chain` does). Pin that
+        // so a caller cannot mistake the static base for the keyed window.
+        let effects = vec![Effect::Crop {
+            x: 10.0,
+            y: 10.0,
+            w: 80.0,
+            h: 80.0,
+            keys: vec![CropKey {
+                at: Seconds::from_integer(0),
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            }],
+        }];
+        let geometry = Effect::geometry(&effects, (1920, 1080));
+        assert_eq!(geometry.visible(), (192, 108, 1536, 864));
+        assert!(geometry.changes_picture());
     }
 
     #[test]
