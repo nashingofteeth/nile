@@ -64,9 +64,11 @@ mpv blocks `lavfi://` inside EDL (hence black-file cache).
 - **No backward compatibility** (detail in AGENTS.md): format bumps reject
   old files; never migrate — rebuild via `./demo.sh`.
 - **Media pool** shared by id: `add_asset` / `asset_usage` / guarded `remove_asset`.
-- **Id allocation** is checked: `Project::validate` refuses any id at
-  `u32::MAX`, and allocators return `ProjectError::IdExhausted` instead of
-  wrapping (`add_asset` stays infallible behind validation).
+- **Id allocation** is checked: legal ids are `1..=u32::MAX - 1`
+  (`u32::MAX` is reserved). `Project::validate` refuses any id at
+  `u32::MAX`, and allocators — including the CLI import/detect counters and
+  `add_asset` — return `ProjectError::IdExhausted` once `u32::MAX - 1` is in
+  use.
 - **Playhead anchoring:** normal edits follow the *media frame*; extend
   commits land on the *edge*; undo restores the *pre-edit* position; delete
   lands at the seam (ripple) or the same offset in the resulting gap (plain).
