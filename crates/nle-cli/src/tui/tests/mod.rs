@@ -264,6 +264,18 @@ impl FakeMpv {
     }
 }
 
+#[test]
+fn live_monitor_defaults_keep_filmstrips_off() {
+    let mut app = App::new(asset_project(), temp_project_path("live-defaults"));
+    assert!(!app.preview_enabled, "App::new is the test/dump path");
+    enable_live_monitor(&mut app);
+    assert!(app.preview_enabled, "the live path enables the monitor");
+    assert!(
+        !app.filmstrip_enabled,
+        "the live default stays off until Ctrl-t/:filmstrip"
+    );
+}
+
 impl Mpv for FakeMpv {
     fn state(&self) -> PlaybackState {
         self.state.borrow().clone()

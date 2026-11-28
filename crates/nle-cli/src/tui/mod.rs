@@ -339,7 +339,8 @@ pub struct App {
     pub(crate) filmstrip_failed: std::collections::HashSet<FilmstripKey>,
     /// The filmstrip extractor, if one is running.
     filmstrip_job: Option<FilmstripJob>,
-    /// Two-row timeline strips; on in the real TUI, off in tests/`--dump`.
+    /// Two-row timeline strips; off by default in the real TUI, tests and
+    /// `--dump` until the user enables them.
     pub(crate) filmstrip_enabled: bool,
     /// The monitor's EDL being built off-thread (proxy renders); `None` when
     /// idle.
@@ -1048,6 +1049,13 @@ fn dump_with_dir(
     Ok(out)
 }
 
+/// The live TUI's non-session defaults. Filmstrips stay off until the user
+/// asks for them; keeping this in one testable place stops `run` from quietly
+/// re-enabling the extractor.
+fn enable_live_monitor(app: &mut App) {
+    app.preview_enabled = true;
+}
+
 pub fn run<P: Mpv>(session: Session, player: P) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
     let mut app = App::with_session(session);
@@ -1059,8 +1067,7 @@ pub fn run<P: Mpv>(session: Session, player: P) -> anyhow::Result<()> {
     apply_session_state(&mut app, session);
     // Build the monitor off-thread before the first frame: a cold proxy can
     // take seconds and the status row will show it.
-    app.preview_enabled = true;
-    app.filmstrip_enabled = true;
+    enable_live_monitor(&mut app);
     start_preview(&mut app);
     // Media title (MPRIS "Now playing") follows the clip under the playhead.
     let mut last_media_title: Option<String> = None;
