@@ -5,9 +5,13 @@
 //!
 //! These are the old `scripts/fuzz.sh` cases. The invariant cases are
 //! wording-agnostic — only whether the command held the invariant matters, so a
-//! deliberate message change never touches this file. The two typed-refusal
-//! cause checks for exhausted ids are the exception: they pin the error text so
-//! a missing file/probe cannot make the case pass by accident.
+//! deliberate message change never touches this file. Three cases are
+//! exceptions, each pinning typed text: the two exhausted-id refusals
+//! (`no clip id left…`, `no asset id left…`), and
+//! `a_duplicate_clip_id_across_tracks_refuses_load_before_any_edit`, which
+//! deliberately hands in an invalid project: it pins `sequence #N: segment #M
+//! is duplicated` and asserts the refused load leaves the file byte-identical
+//! (so that case leaves a project that does not load, by design).
 
 mod common;
 

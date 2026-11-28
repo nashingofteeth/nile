@@ -3163,6 +3163,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_reports_id_exhausted_before_a_segment_duplicate_at_the_ceiling() {
+        // The reserved ceiling is refused before the duplicate set sees it,
+        // even when two tracks share it. Moving the duplicate insert above
+        // `id_has_room` would report `SegmentDuplicate` instead.
+        let mut p = sample_project();
+        if let Segment::Clip(clip) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            clip.id = u32::MAX;
+        }
+        p.timeline.tracks.push(audio_track_clip(u32::MAX));
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::IdExhausted("clip", u32::MAX))
+        ));
+    }
+
+    #[test]
     fn validate_rejects_a_clip_and_transition_sharing_an_id() {
         // Clips and transitions share one id space.
         let mut p = sample_project();
