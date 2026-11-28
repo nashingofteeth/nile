@@ -6,7 +6,7 @@
 //! background. These commands never open the project directly: with no server
 //! there is no queue to talk to, so the error says to start one. `batch` adds
 //! no wire method: it is a client-side loop over `job.submit`, which refuses
-//! an output a live job owns.
+//! an output that already exists or that a live job owns.
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;

@@ -511,7 +511,7 @@ impl JobStore {
     /// Startup sweep: delete hidden render temps a crash left behind.
     ///
     /// A temp is only deleted when it is exactly [`partial_path`] of a
-    /// **terminal** record. The renderer renames or removes that path before
+    /// **terminal** record. The renderer publishes or removes that path before
     /// the terminal record is written, so one still on disk cannot belong to a
     /// live export; a queued/running record is never considered. The path set
     /// comes from the records, not a glob, so no unexplained file is removed
@@ -543,12 +543,12 @@ pub struct TempSweep {
     pub failed: Vec<(PathBuf, std::io::Error)>,
 }
 
-/// The hidden temp path the renderer writes before the atomic rename.
+/// The hidden temp path the renderer writes before publishing.
 ///
 /// It keeps the output's extension (ffmpeg picks the muxer from it) and lives
-/// beside the output so the final rename stays on one filesystem. This is the
-/// one spelling the executor and the startup sweep share; a different shape
-/// here would make a crash leftover invisible to the sweep.
+/// beside the output so the publish stays on one filesystem. This is the one
+/// spelling the executor and the startup sweep share; a different shape here
+/// would make a crash leftover invisible to the sweep.
 pub fn partial_path(output: &Path, id: u64) -> PathBuf {
     let name = output
         .file_name()
