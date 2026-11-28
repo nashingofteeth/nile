@@ -168,6 +168,10 @@ impl JobQueue {
 
     /// Queue a snapshot and wake the dispatcher. The snapshot is captured
     /// before the record, so a record always names a complete project.
+    ///
+    /// The queue lock covers the live-output check and the record creation:
+    /// two batches (or two clients) that picked the same path cannot both
+    /// submit, because the client's `exists()` check is only advisory.
     pub(crate) fn submit(
         &self,
         project: &Project,
@@ -175,7 +179,21 @@ impl JobQueue {
         output: PathBuf,
         export: JobExport,
     ) -> Result<JobRecord, QueueError> {
+        let state = self.lock();
+        if let Some(live) = self
+            .store
+            .list()?
+            .into_iter()
+            .find(|job| !job.state.is_terminal() && job.output == output)
+        {
+            return Err(QueueError::Invalid(format!(
+                "job #{} already renders to {}; cancel it or pick another output",
+                live.id,
+                output.display()
+            )));
+        }
         let job = self.store.create(project, sequence, output, export)?;
+        drop(state);
         let _ = self.wake.send(());
         Ok(job)
     }
