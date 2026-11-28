@@ -68,7 +68,10 @@ mpv blocks `lavfi://` inside EDL (hence black-file cache).
   `u32::MAX`, and their last assignable id is `u32::MAX - 1`.
   `Project::validate` refuses any id at `u32::MAX`, and allocators — including
   the CLI import/detect counters and `add_asset` — return
-  `ProjectError::IdExhausted` once `u32::MAX - 1` is in use.
+  `ProjectError::IdExhausted` once `u32::MAX - 1` is in use. Clip and
+  transition ids are also unique across every track of a sequence
+  (`ProjectError::SegmentDuplicate`), because `next_clip_id` and `--clip`
+  address one sequence-wide space.
 - **Playhead anchoring:** normal edits follow the *media frame*; extend
   commits land on the *edge*; undo restores the *pre-edit* position; delete
   lands at the seam (ripple) or the same offset in the resulting gap (plain).
