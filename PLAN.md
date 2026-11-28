@@ -659,9 +659,10 @@ shared by the TUI and agents — with no clipgen code present.
   (`nile job batch --output-dir DIR [--sequence ID]...` queues one
   `job.submit` per sequence at one revision, deterministic
   `sequence-<id>.mp4`; duplicates/unknown ids/existing files refuse before
-  any submit, `job.submit` refuses an output a non-terminal job owns by
-  canonical parent + name, and a zero-queued failure removes only the
-  directory components it created). Presets/regeneration and per-sequence
+  any submit, `job.submit` refuses an existing output or one a non-terminal
+  job owns by canonical whole path when present (else parent + name), publish
+  is no-replace, and a zero-queued failure removes only the directory
+  components it created). Presets/regeneration and per-sequence
   export presets remain.
 - Marker/chapter annotations in the TUI; transcript and text-based editing
   build on annotations + time maps later.

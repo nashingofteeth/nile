@@ -188,20 +188,25 @@ export's ffmpeg poll loop checks (the child is killed and the hidden temp
 output removed). It returns the record as of the call: a running job may still
 read `running` until its child is reaped and the terminal event fires. An
 unknown id or a terminal job is invalid params (`-32602`), never a silent
-no-op. The render writes to a hidden temp beside `output` and renames only on
-success; a cancelled job leaves no half-written deliverable.
+no-op. The render writes to a hidden temp beside `output` and publishes it by
+no-replace hard link (with a `create_new` copy fallback), never a replacing
+rename; a file that appears after submit is left untouched and the job fails,
+and a cancelled job leaves no half-written deliverable.
 
 `job.submit` is compare-and-swap: a stale `base_revision` is `-32001`. It is
 not a model write — the project revision, history and playhead do not move —
 but its snapshot is project data, so the read-only latch gates it like a
 model write: after a save failure or a handler panic the submit is refused
-rather than rendering a half-applied state. A submit is also invalid params
-(`-32602`, naming it) while a **non-terminal** job already owns the same output
-path; identity is the canonical parent plus the file name, so `..` and
-symlinked spellings do not bypass it. The queue checks and creates the record
-under its lock, so two clients cannot both claim one deliverable even when
-both passed their own `exists()` check. A terminal job's existing file is not
-claimed again: terminal-file overwrite stays a separate open item. `job.list`
+rather than rendering a half-applied state. A submit is invalid params
+(`-32602`, naming it) when the output already exists on disk (a finished job's
+deliverable or any unrelated file/directory) or while a **non-terminal** job
+already owns the same output path; identity is the canonical whole path when
+the file exists (so a symlinked final file aliases its target), else the
+canonical parent plus the file name, so `..`, a symlinked parent and a
+symlinked final file do not bypass either guard. The queue checks existence,
+scans for a live owner and creates the record under its lock, so two clients
+cannot both claim one deliverable even when both passed their own `exists()`
+check. `job.list`
 returns `{revision: <live>, jobs}` (the revision is context, not a CAS token);
 `job.get`/`job.cancel` return the same record shape as submit.
 `job.remove {id}` deletes a **terminal** job's `job.json` and snapshot and
@@ -223,8 +228,9 @@ It reads `hello` and `sequence.list` once, refuses duplicate or unknown ids and
 an existing `sequence-<id>.mp4` before submitting, then submits every target
 with that one `base_revision`. A concurrent model write makes the remaining
 submits fail (the batch names the jobs already queued); it does not switch
-revisions midway. The per-submit live-output guard above is what refuses a
-second batch's path; a batch that queues nothing after a submit failure removes
+revisions midway. The per-submit output guard above (existing file or a live
+owner) is what refuses a second batch's path; a batch that queues nothing after
+a submit failure removes
 exactly the directory components it created (innermost first, only while
 empty).
 
@@ -235,7 +241,7 @@ which also covers a project written before the file existed; an unreadable or
 non-positive marker is an error, not a directory-scan rebuild. A server start
 also sweeps crash leftovers: a hidden `.name.jobN.ext` temp is deleted only
 when it is exactly the `nle_core::jobs::partial_path` of a **terminal** record
-(the executor renames or removes it before the terminal write); a
+(the executor publishes or removes it before the terminal write); a
 queued/running temp, another record's output, or an unexplained file is left
 for a human. The executor and
 the sweep share `partial_path`, so their naming cannot drift.

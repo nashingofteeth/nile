@@ -532,20 +532,25 @@ sequence into `DIR`: with no `--sequence` it takes every sequence, otherwise
 the given ids in that order. Each output is named `sequence-<id>.mp4`.
 Duplicate ids, unknown ids and an existing file refuse the batch before any
 job is submitted; a bad selection or an existing file also leaves no new
-directory. `job.submit` refuses an output another **non-terminal** job owns
-(`-32602`, naming that job), comparing a canonical parent plus the file name,
-so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` are one deliverable,
-and two overlapping batches cannot both claim it even when both passed their
-own existence check. A finished job's existing file is not newly claimed:
-terminal-file overwrite is a separate open item. If a submit fails before
-anything was queued, the batch removes exactly the directory components it
-created (innermost first, and only while empty; pre-existing parents stay).
+directory. `job.submit` refuses an output that already exists on disk
+(`-32602`, naming the path; a finished job's deliverable never gets a second
+job) or that another **non-terminal** job owns (`-32602`, naming that job),
+comparing the canonical whole path when the file exists (so a symlinked final
+file aliases its target) and otherwise a canonical parent plus the file name,
+so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` are one deliverable.
+Two overlapping batches therefore cannot both claim a path even when both
+passed their own existence check, and publishing is no-replace: the finished
+render is hard-linked (or copied with `create_new`) into place, so a file that
+appeared during the render is left untouched and the job fails instead of
+overwriting it. If a submit fails before anything was queued, the batch removes
+exactly the directory components it created (innermost first, and only while
+empty; pre-existing parents stay).
 Every submit uses the revision read at the start (`job.submit` is not a model
 write), so a concurrent edit makes the remaining submits refuse instead of
 mixing revisions. The queued lines print the job id, sequence and output; a
 mid-batch failure names the jobs already queued and exits nonzero. There is no
-new wire method: the loop is a client-side sequence of `job.submit`, which now
-refuses an output a live job owns.
+new wire method: the loop is a client-side sequence of `job.submit`, which
+refuses an existing output or one a live job owns.
 
 ### One-shot tools and logging
 
