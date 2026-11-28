@@ -521,9 +521,10 @@ terminal job; queued or running jobs must be cancelled first.
 never started) to be older than that window; the newest N are always kept.
 Queued and running jobs are never pruned. A directory that cannot be deleted
 does not stop the pass: the removed ids are printed and the failures are named,
-then the command exits nonzero. A server start also removes hidden render temps
-(`.name.jobN.ext`) left by a crash, but only when the temp is exactly the one a
-terminal record names; a queued or running temp is live and is left alone. Job
+then the command exits nonzero. A server start also removes hidden crash
+leftovers, but only when they are exactly the paths a terminal record names:
+the render temp (`.name.jobN.ext`) and its `.name.jobN.ext.copy` publish stage.
+A queued or running temp/stage is live and is left alone. Job
 ids are never recycled, even after a prune: `jobs/.next-id` is the high-water
 mark and is advanced on removal too.
 
@@ -545,9 +546,10 @@ available, staged as a complete hidden `.copy` temp and renamed into place only
 after a last-moment existence check. A file that appeared during the render is
 left untouched and the job fails instead of overwriting it; a concurrent
 creator landing between that final check and the rename is the documented
-residual. If a submit fails before anything was queued, the batch removes
-exactly the directory components it created (innermost first, and only while
-empty; pre-existing parents stay).
+residual. A cancel racing that final rename can still lose: the rename is the
+commit point, so the job may land `done`. If a submit fails before anything was
+queued, the batch removes exactly the directory components it created (innermost
+first, and only while empty; pre-existing parents stay).
 Every submit uses the revision read at the start (`job.submit` is not a model
 write), so a concurrent edit makes the remaining submits refuse instead of
 mixing revisions. The queued lines print the job id, sequence and output; a

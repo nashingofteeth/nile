@@ -197,7 +197,8 @@ time and renames the complete copy into place. A crash or cancel therefore
 leaves only a sweepable hidden file, never a truncated deliverable; a file that
 appears after submit is left untouched and the job fails. A concurrent creator
 that lands between the final check and the rename is the documented residual
-(std does not expose a no-replace rename).
+(std does not expose a no-replace rename). A cancel racing that final rename
+can still lose: the rename is the commit point, so the job may land `done`.
 
 `job.submit` is compare-and-swap: a stale `base_revision` is `-32001`. It is
 not a model write — the project revision, history and playhead do not move —
@@ -206,13 +207,16 @@ model write: after a save failure or a handler panic the submit is refused
 rather than rendering a half-applied state. A submit is invalid params
 (`-32602`, naming it) when the output already exists on disk (a finished job's
 deliverable or any unrelated file/directory) or while a **non-terminal** job
-already owns the same output path; identity is the canonical whole path when
-the file exists (so a symlinked final file aliases its target), else the
-canonical parent plus the file name, so `..`, a symlinked parent and a
-symlinked final file do not bypass either guard. The queue checks existence,
-scans for a live owner and creates the record under its lock, so two clients
-cannot both claim one deliverable even when both passed their own `exists()`
-check. `job.list`
+already owns the same output path. The live-owner scan runs first, so a submit
+racing a published-but-not-yet-terminal job names that job instead of the file.
+Identity is the canonical whole path when the file exists (so a symlinked final
+file aliases its target), else the canonical parent plus the file name, so `..`,
+a symlinked parent and a symlinked final file do not bypass either guard. The
+queue checks existence, scans for a live owner and creates the record under its
+lock, so two clients cannot both claim one deliverable even when both passed
+their own preflight check. The client batch plan uses `symlink_metadata`, not
+`exists()`, so a dangling symlink or directory refuses before any submit.
+`job.list`
 returns `{revision: <live>, jobs}` (the revision is context, not a CAS token);
 `job.get`/`job.cancel` return the same record shape as submit.
 `job.remove {id}` deletes a **terminal** job's `job.json` and snapshot and
