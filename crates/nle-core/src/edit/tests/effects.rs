@@ -264,6 +264,60 @@ fn trimming_the_head_clamps_a_rebased_key_into_the_frame() {
 }
 
 #[test]
+fn inserting_into_a_keyed_clip_cuts_both_remainders() {
+    let mut p = clip_pair();
+    if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+        c.asset_out = Seconds::from_integer(4);
+        c.effects = vec![Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 50.0,
+            h: 50.0,
+            keys: vec![
+                CropKey {
+                    at: Seconds::from_integer(0),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+                CropKey {
+                    at: Seconds::from_integer(4),
+                    x: 50.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+            ],
+        }];
+    }
+    let payload = [Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    })];
+    let mut h = History::default();
+    let batch = insert_segments_on(&p, 0, 2.0, &payload).unwrap();
+    h.apply(&mut p, batch, 0).unwrap();
+
+    let track = p.timeline.video_track().unwrap();
+    let Segment::Clip(left) = &track.segments[0] else {
+        panic!("left clip");
+    };
+    let Segment::Clip(right) = &track.segments[2] else {
+        panic!("right clip after the inserted gap");
+    };
+    let left_at = crop_passes(&left.effects[0], left.duration())
+        .last()
+        .expect("left half keeps its final pass")
+        .window_at(Seconds::new(19, 10));
+    assert_eq!(left_at.x, 23.75, "the left half keeps the original ramp");
+    let Effect::Crop { keys, .. } = &right.effects[0] else {
+        panic!("crop");
+    };
+    assert_eq!(keys[0].at, Seconds::from_integer(0));
+    assert_eq!(keys[0].x, 25.0, "the insert right head samples the cut");
+}
+
+#[test]
 fn trimming_the_head_rebases_crop_keys() {
     let mut p = clip_pair();
     if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
