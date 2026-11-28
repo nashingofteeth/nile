@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use nle_core::project::Asset;
 use nle_core::timeline::{
-    Clip, CropKey, Effect, Segment, TrackKind, TransitionKind, TransitionSource,
+    Clip, Effect, Segment, TrackKind, TransitionKind, TransitionSource, crop_passes,
 };
 use nle_core::{AudioSettings, Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
@@ -295,78 +295,6 @@ fn keyed_crop(clip: &Clip) -> Option<&Effect> {
     })
 }
 
-struct CropPass {
-    start: Seconds,
-    end: Seconds,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-    w: f64,
-    h: f64,
-}
-
-fn crop_passes(effect: &Effect, duration: Seconds) -> Vec<CropPass> {
-    let Effect::Crop { x, y, w, h, keys } = effect else {
-        return Vec::new();
-    };
-    let mut keys: Vec<CropKey> = keys.clone();
-    keys.sort_by_key(|key| key.at);
-    let mut passes = Vec::new();
-    if keys.is_empty() {
-        return passes;
-    }
-    let first = keys[0].at;
-    if first > Seconds::from_integer(0) {
-        let end = first.min(duration);
-        if end > Seconds::from_integer(0) {
-            let (x1, y1) = if first <= duration {
-                (keys[0].x, keys[0].y)
-            } else {
-                (*x, *y)
-            };
-            passes.push(CropPass {
-                start: Seconds::from_integer(0),
-                end,
-                x0: *x,
-                y0: *y,
-                x1,
-                y1,
-                w: *w,
-                h: *h,
-            });
-        }
-    }
-    for (i, key) in keys.iter().enumerate() {
-        let start = key.at;
-        if start < Seconds::from_integer(0) || start >= duration {
-            continue;
-        }
-        let end = keys
-            .get(i + 1)
-            .map(|next| next.at.min(duration))
-            .unwrap_or(duration);
-        if end <= start {
-            continue;
-        }
-        let (x1, y1) = keys
-            .get(i + 1)
-            .map(|next| (next.x, next.y))
-            .unwrap_or((key.x, key.y));
-        passes.push(CropPass {
-            start,
-            end,
-            x0: key.x,
-            y0: key.y,
-            x1,
-            y1,
-            w: key.w,
-            h: key.h,
-        });
-    }
-    passes
-}
-
 fn even(value: i64, max: i64) -> i64 {
     let value = value.clamp(2, max.max(2));
     let even = value & !1;
@@ -404,6 +332,9 @@ fn keyed_crop_video(
     fps: &str,
     label: &str,
 ) -> Result<String, CompileError> {
+    // The pass plan is nle-core's: the CV checks sample the same ranges and
+    // windows, so a head ramp or size step cannot drift between render and
+    // verification.
     let passes = crop_passes(effect, duration);
     if passes.is_empty() {
         return Err(CompileError::KeyedCropEffects);
@@ -1337,6 +1268,74 @@ mod tests {
             graph.contains("*t/1") || graph.contains("*t/1.0"),
             "the x/y expression moves between keys:\n{graph}"
         );
+    }
+
+    #[test]
+    fn keyed_crop_filters_follow_the_shared_pass_planner() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        p.video = Some(VideoSettings {
+            width: 320,
+            height: 180,
+        });
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("4", 320, 180, "30/1", false),
+            )
+            .expect("asset");
+        let effect = Effect::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            keys: vec![
+                CropKey {
+                    at: Seconds::from_integer(1),
+                    x: 10.0,
+                    y: 10.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+                CropKey {
+                    at: Seconds::from_integer(3),
+                    x: 30.0,
+                    y: 20.0,
+                    w: 40.0,
+                    h: 30.0,
+                },
+            ],
+        };
+        let mut clip = Clip::new(1, asset, Seconds::from_integer(0), Seconds::from_integer(4));
+        clip.effects = vec![effect.clone()];
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(clip)];
+
+        // The graph's pass boundaries, sizes and x/y expressions are derived
+        // from the one planner the checks also sample — not a second
+        // expectation written down here.
+        let passes = crop_passes(&effect, Seconds::from_integer(4));
+        assert_eq!(passes.len(), 3, "head ramp + two keyed passes");
+        let graph = compile_export(&p).unwrap().graph;
+        assert!(graph.contains("split=3"), "{graph}");
+        for pass in &passes {
+            let dur = pass.end - pass.start;
+            let (pw, ph, px0, py0) = window_pixels((320, 180), pass.x0, pass.y0, pass.w, pass.h);
+            let (_, _, px1, py1) = window_pixels((320, 180), pass.x1, pass.y1, pass.w, pass.h);
+            let xexpr = move_expr(px0, px1, dur);
+            let yexpr = move_expr(py0, py1, dur);
+            assert!(
+                graph.contains(&format!(
+                    "trim=start={}:end={}",
+                    format_seconds(&pass.start),
+                    format_seconds(&pass.end)
+                )),
+                "pass range {pass:?}:\n{graph}"
+            );
+            assert!(
+                graph.contains(&format!("crop={pw}:{ph}:{xexpr}:{yexpr}")),
+                "pass window {pass:?}:\n{graph}"
+            );
+        }
     }
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
