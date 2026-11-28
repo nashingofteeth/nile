@@ -1985,6 +1985,10 @@ fn an_exhausted_clip_id_refuses_detect_append_without_panicking() {
         "an exhausted clip id must be a clean refusal, got {code}:\n{text}"
     );
     assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        text.contains(&format!("no clip id left at #{last}")),
+        "the refusal must name the exhausted clip id, not a missing probe: {text}"
+    );
     s.assert_loads("detect-edits append at the last clip id", &text);
 }
 
@@ -2009,5 +2013,9 @@ fn an_exhausted_asset_pool_refuses_import_without_panicking() {
         "an exhausted asset pool must be a clean refusal, got {code}:\n{text}"
     );
     assert!(!text.contains("panicked"), "{text}");
+    assert!(
+        text.contains(&format!("no asset id left at #{last}")),
+        "the refusal must name the exhausted asset id, not a missing file: {text}"
+    );
     s.assert_loads("import at the last asset id", &text);
 }
