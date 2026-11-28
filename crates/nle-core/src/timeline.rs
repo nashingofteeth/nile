@@ -669,60 +669,45 @@ pub struct CropWindow {
 }
 
 impl Effect {
-    /// The crop window at clip-relative timeline `at`. Before the first key
-    /// the static size is held and x/y move toward the first key; between
-    /// keys size steps from the earlier key and x/y interpolate; after the
-    /// last key everything holds.
-    pub fn crop_window_at(&self, at: Seconds) -> Option<CropWindow> {
+    /// The crop window at clip-relative timeline `at`, sampled from the same
+    /// [`crop_passes`] plan the exporter renders. `duration` matters at the
+    /// tail: a key past the clip end is the final pass's endpoint, so the
+    /// interpolation runs to the clip end, not to that key's own time.
+    ///
+    /// Before the head ramp the static window is returned (a head extension
+    /// has no rendered frame there); after the last pass the final window is
+    /// held by [`CropPass::window_at`]. A key exactly at `at` returns its own
+    /// window even at the clip end, where no rendered pass starts: a
+    /// split/trim there re-bases onto that key's size.
+    pub fn crop_window_at(&self, at: Seconds, duration: Seconds) -> Option<CropWindow> {
         let Effect::Crop { x, y, w, h, keys } = self else {
             return None;
         };
-        let base = CropWindow {
-            x: *x,
-            y: *y,
-            w: *w,
-            h: *h,
-        };
-        if keys.is_empty() {
-            return Some(base);
-        }
-        let mut keys = keys.clone();
-        keys.sort_by_key(|key| key.at);
-        let lerp = |a: f64, b: f64, f: f64| a + (b - a) * f;
-        let at_f = secs_f64(&at);
-        if at_f <= 0.0 {
-            return Some(base);
-        }
-        if at < keys[0].at {
-            let end = secs_f64(&keys[0].at);
-            let f = (at_f / end).clamp(0.0, 1.0);
-            return Some(CropWindow {
-                x: lerp(base.x, keys[0].x, f),
-                y: lerp(base.y, keys[0].y, f),
-                ..base
-            });
-        }
-        let Some(index) = keys.iter().rposition(|key| key.at <= at) else {
-            return Some(base);
-        };
-        let key = &keys[index];
-        let Some(next) = keys.get(index + 1) else {
+        // A key exactly at the sampled time is the state at that instant. It
+        // matters at the clip end: the renderer starts no pass for a key at
+        // `duration`, but a split/trim landing there re-bases the right-hand
+        // clip onto that key's own size.
+        if let Some(key) = keys.iter().find(|key| key.at == at) {
             return Some(CropWindow {
                 x: key.x,
                 y: key.y,
                 w: key.w,
                 h: key.h,
             });
-        };
-        let start = secs_f64(&key.at);
-        let end = secs_f64(&next.at);
-        let f = ((at_f - start) / (end - start).max(f64::EPSILON)).clamp(0.0, 1.0);
-        Some(CropWindow {
-            x: lerp(key.x, next.x, f),
-            y: lerp(key.y, next.y, f),
-            w: key.w,
-            h: key.h,
-        })
+        }
+        if at <= Seconds::from_integer(0) {
+            return Some(CropWindow {
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+            });
+        }
+        crop_passes(self, duration)
+            .iter()
+            .rev()
+            .find(|pass| pass.start <= at)
+            .map(|pass| pass.window_at(at))
     }
 }
 
@@ -769,28 +754,23 @@ impl CropPass {
 ///
 /// Keys are expected valid: `Effect::validation_error` rejects negatives and
 /// non-increasing offsets before a project loads or saves, so this planner
-/// debug-asserts that assumption instead of silently dropping the head ramp.
-/// A key at/past `duration` is inert (a tail trim leaves it beyond the new
-/// end), not an error.
+/// debug-asserts that assumption (before sorting) instead of silently
+/// dropping the head ramp. A key at/past `duration` never starts a pass: a
+/// lone one leaves the base held for the whole clip, while one after an
+/// in-range key is that final pass's endpoint, so the interpolation runs to
+/// the clip end.
 pub fn crop_passes(effect: &Effect, duration: Seconds) -> Vec<CropPass> {
-    let zero = Seconds::from_integer(0);
     let Effect::Crop { x, y, w, h, keys } = effect else {
         return Vec::new();
     };
-    if keys.is_empty() {
-        return vec![CropPass {
-            start: zero,
-            end: duration,
-            x0: *x,
-            y0: *y,
-            x1: *x,
-            y1: *y,
-            w: *w,
-            h: *h,
-        }];
-    }
-    let mut keys: Vec<&CropKey> = keys.iter().collect();
-    keys.sort_by_key(|key| key.at);
+    let base = CropWindow {
+        x: *x,
+        y: *y,
+        w: *w,
+        h: *h,
+    };
+    let keys: Vec<&CropKey> = keys.iter().collect();
+    let zero = Seconds::from_integer(0);
     debug_assert!(
         keys.iter().all(|key| key.at >= zero),
         "crop key before the clip head: validation must reject it"
@@ -799,9 +779,31 @@ pub fn crop_passes(effect: &Effect, duration: Seconds) -> Vec<CropPass> {
         keys.windows(2).all(|pair| pair[0].at < pair[1].at),
         "crop keys must be strictly increasing: validation must reject it"
     );
+    // Valid callers already hand us sorted keys; sorting here keeps a release
+    // build with a corrupt in-memory effect from emitting passes out of order.
+    let mut keys = keys;
+    keys.sort_by_key(|key| key.at);
+    keyed_passes(base, &keys, duration)
+}
 
+/// The actual plan over an ordered key slice. Kept separate from
+/// [`crop_passes`] so the release-safe negative-start skip can be tested
+/// without tripping the debug assertion above.
+fn keyed_passes(base: CropWindow, keys: &[&CropKey], duration: Seconds) -> Vec<CropPass> {
+    let zero = Seconds::from_integer(0);
+    let Some(first) = keys.first() else {
+        return vec![CropPass {
+            start: zero,
+            end: duration,
+            x0: base.x,
+            y0: base.y,
+            x1: base.x,
+            y1: base.y,
+            w: base.w,
+            h: base.h,
+        }];
+    };
     let mut passes = Vec::new();
-    let first = keys[0];
     if first.at > zero {
         let end = first.at.min(duration);
         if end > zero {
@@ -809,22 +811,24 @@ pub fn crop_passes(effect: &Effect, duration: Seconds) -> Vec<CropPass> {
             let (x1, y1) = if first.at <= duration {
                 (first.x, first.y)
             } else {
-                (*x, *y)
+                (base.x, base.y)
             };
             passes.push(CropPass {
                 start: zero,
                 end,
-                x0: *x,
-                y0: *y,
+                x0: base.x,
+                y0: base.y,
                 x1,
                 y1,
-                w: *w,
-                h: *h,
+                w: base.w,
+                h: base.h,
             });
         }
     }
     for (index, key) in keys.iter().enumerate() {
-        if key.at >= duration {
+        // Defence in depth for a corrupt in-memory effect (validation runs at
+        // load/save and at the edit boundary): never emit a negative trim.
+        if key.at < zero || key.at >= duration {
             continue;
         }
         let end = keys
@@ -863,11 +867,15 @@ impl Clip {
         if removed == Seconds::from_integer(0) {
             return;
         }
+        // The callers have already applied the head trim to `asset_in`, so
+        // this clip's duration is the *post-trim* length. The renderer showed
+        // the value against the pre-trim duration: duration + removed.
+        let duration = self.duration() + removed;
         for effect in &mut self.effects {
             if matches!(effect, Effect::Crop { keys, .. } if keys.is_empty()) {
                 continue;
             }
-            let Some(value) = effect.crop_window_at(removed) else {
+            let Some(value) = effect.crop_window_at(removed, duration) else {
                 continue;
             };
             let Effect::Crop { keys, .. } = effect else {
@@ -1619,13 +1627,28 @@ mod tests {
                 vec![crop_pass((0, 2), (0.0, 0.0, 25.0, 25.0), (100.0, 100.0))],
             ),
             (
-                "keys past the end are inert",
+                "a lone past-end key leaves the base held",
                 crop_effect(
                     (0.0, 0.0, 100.0, 100.0),
                     vec![crop_key(3, 25.0, 25.0, 50.0, 50.0)],
                 ),
                 2,
                 vec![crop_pass((0, 2), (0.0, 0.0, 0.0, 0.0), (100.0, 100.0))],
+            ),
+            (
+                "a past-end key endpoints the final pass",
+                crop_effect(
+                    (0.0, 25.0, 20.0, 20.0),
+                    vec![
+                        crop_key(1, 0.0, 25.0, 20.0, 20.0),
+                        crop_key(20, 70.0, 25.0, 20.0, 20.0),
+                    ],
+                ),
+                10,
+                vec![
+                    crop_pass((0, 1), (0.0, 25.0, 0.0, 25.0), (20.0, 20.0)),
+                    crop_pass((1, 10), (0.0, 25.0, 70.0, 25.0), (20.0, 20.0)),
+                ],
             ),
         ];
         for (name, effect, duration, expected) in cases {
@@ -1681,6 +1704,89 @@ mod tests {
             ],
         );
         let _ = crop_passes(&effect, Seconds::from_integer(2));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "crop keys must be strictly increasing")]
+    fn crop_passes_debug_assert_on_unsorted_keys() {
+        let effect = crop_effect(
+            (0.0, 0.0, 100.0, 100.0),
+            vec![
+                crop_key(2, 10.0, 10.0, 50.0, 50.0),
+                crop_key(1, 20.0, 20.0, 40.0, 40.0),
+            ],
+        );
+        let _ = crop_passes(&effect, Seconds::from_integer(3));
+    }
+
+    #[test]
+    fn crop_passes_skip_a_negative_key_without_the_debug_assert() {
+        // Call the plan helper directly: this test must pass in a release
+        // build too, where the public planner's debug assertion is gone.
+        let keys = [
+            crop_key(-1, 10.0, 10.0, 50.0, 50.0),
+            crop_key(1, 20.0, 20.0, 40.0, 40.0),
+            crop_key(2, 30.0, 30.0, 30.0, 30.0),
+        ];
+        let refs: Vec<&CropKey> = keys.iter().collect();
+        let passes = keyed_passes(
+            CropWindow {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            &refs,
+            Seconds::from_integer(2),
+        );
+        assert_eq!(
+            passes,
+            vec![crop_pass((1, 2), (20.0, 20.0, 30.0, 30.0), (40.0, 40.0))]
+        );
+        assert!(
+            passes
+                .iter()
+                .all(|pass| pass.start >= Seconds::from_integer(0))
+        );
+    }
+
+    #[test]
+    fn head_trim_rebases_to_the_rendered_tail_key_window() {
+        let effect = crop_effect(
+            (0.0, 25.0, 20.0, 20.0),
+            vec![
+                crop_key(1, 0.0, 25.0, 20.0, 20.0),
+                crop_key(20, 70.0, 25.0, 20.0, 20.0),
+            ],
+        );
+        // The pre-trim clip is [0, 10) with a key past its end. A head trim
+        // at 5 leaves `asset_in = 5` (duration 5) and only then rebases.
+        let rendered = crop_passes(&effect, Seconds::from_integer(10))
+            .iter()
+            .rev()
+            .find(|pass| pass.start <= Seconds::from_integer(5))
+            .expect("a pass covers the trim point")
+            .window_at(Seconds::from_integer(5));
+        assert!(
+            (rendered.x - 280.0 / 9.0).abs() < 1e-9,
+            "the renderer interpolates key 1→20 over [1, 10]: {rendered:?}"
+        );
+
+        let mut clip = Clip::new(1, 1, Seconds::from_integer(5), Seconds::from_integer(10));
+        clip.effects = vec![effect.clone()];
+        clip.rebase_crop_keys(Seconds::from_integer(5));
+        let Effect::Crop { keys, .. } = &clip.effects[0] else {
+            panic!("crop");
+        };
+        let head = keys
+            .iter()
+            .find(|key| key.at == Seconds::from_integer(0))
+            .expect("the cut value becomes the head key");
+        assert_eq!(head.x, rendered.x, "the rebase samples the pass plan");
+        assert_eq!(head.y, rendered.y);
+        assert_eq!(head.w, rendered.w);
+        assert_eq!(head.h, rendered.h);
     }
 
     #[test]

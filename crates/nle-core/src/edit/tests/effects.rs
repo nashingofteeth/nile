@@ -240,7 +240,7 @@ fn a_keyed_crop_is_exclusive_and_survives_static_edits() {
     // Replacing the keyed crop with another keyed crop is allowed.
     let mut next = keyed;
     if let Effect::Crop { keys, .. } = &mut next {
-        keys[0].x = 20.0;
+        keys[0].x = 5.0;
     }
     assert!(add_effect_on(&p, 0, 1, next).is_ok());
 }

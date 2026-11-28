@@ -92,6 +92,8 @@ pub enum EditError {
     BlendNoHandle { id: u32, detail: String },
     #[error("effects apply to video clips — that track is audio")]
     EffectsNeedVideo,
+    #[error("effect is invalid: {0}")]
+    InvalidEffect(&'static str),
     #[error("clip #{0} has no effects")]
     NoEffects(u32),
     #[error("clip #{0} has no effect #{1}")]
