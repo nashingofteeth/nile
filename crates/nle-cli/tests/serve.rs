@@ -572,6 +572,12 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
         relative_dir.is_dir(),
         "the relative directory resolved against the client cwd"
     );
+    // The client resolves a relative `--output-dir` with `current_dir()`, which
+    // returns the real path: on macOS that is `/private/var/...` even when
+    // `TMPDIR` spells the same directory `/var/...`.
+    let resolved_dir = relative_dir
+        .canonicalize()
+        .expect("the relative render directory exists");
     let relative_jobs = client.jobs().expect("job.list").jobs;
     assert_eq!(relative_jobs.len(), 4, "{relative_jobs:?}");
     for (job, (id, sequence)) in relative_jobs[2..].iter().zip([(3u64, 1u32), (4, 2)]) {
@@ -579,7 +585,7 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
         assert_eq!(job.sequence, sequence);
         assert_eq!(
             job.output,
-            relative_dir.join(format!("sequence-{sequence}.mp4"))
+            resolved_dir.join(format!("sequence-{sequence}.mp4"))
         );
     }
     cancel_live(&mut client);
