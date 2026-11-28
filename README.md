@@ -123,7 +123,9 @@ When enabled, video tracks show a two-row filmstrip under the clip labels: raw
 source frames sampled across each clip's source span and cached under
 `.nile/<stem>/cache/filmstrip/`. `Ctrl-t` or `:filmstrip` toggles the rows
 for this session; they start off, and effects are not baked into the preview
-strip.
+strip. With no monitor (`--dump`, or a monitor that failed to start) the
+preference is remembered and the message says it is waiting for the preview:
+the rows appear and extraction starts once the preview is live.
 
 A project can hold several **sequences** — separate timelines with their own
 frame rate, output size, playhead, audio post and undo stack, sharing one
