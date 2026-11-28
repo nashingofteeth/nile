@@ -380,6 +380,7 @@ fn job_prune_keeps_the_newest_and_deletes_the_rest_through_the_cli() {
 #[test]
 fn job_batch_queues_one_export_per_sequence_through_the_cli() {
     use std::io::BufReader;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -471,6 +472,30 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
     assert!(
         !refused.exists(),
         "a selection refusal creates no directory"
+    );
+
+    // Duplicate ids are refused too, before any directory or job.
+    let duplicate_dir = sandbox.file("batch-duplicate");
+    let duplicate_arg = duplicate_dir.display().to_string();
+    let duplicate = run_batch(
+        &sandbox,
+        &[
+            "--output-dir",
+            &duplicate_arg,
+            "--sequence",
+            "2",
+            "--sequence",
+            "2",
+        ],
+    );
+    assert!(!duplicate.status.success(), "{duplicate:?}");
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr).contains("more than once"),
+        "{duplicate:?}"
+    );
+    assert!(
+        !duplicate_dir.exists(),
+        "a duplicate refusal creates no directory"
     );
 
     // An existing render refuses the batch before any submit: no job appears
@@ -605,6 +630,8 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
     assert_eq!(ordered_jobs[5].output, ordered_dir.join("sequence-1.mp4"));
     cancel_live(&mut client);
 
+    // Let the cancellations land before the read-only probe: a terminal update
+    // writes job.json, and a read-only jobs dir would stall it.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let jobs = client.jobs().expect("job.list").jobs;
@@ -615,6 +642,41 @@ fn job_batch_queues_one_export_per_sequence_through_the_cli() {
         assert!(Instant::now() < deadline, "jobs did not stop: {jobs:?}");
         std::thread::sleep(Duration::from_millis(50));
     }
+
+    // A submit can fail after the batch created its directory. A read-only
+    // jobs dir makes that deterministic; with nothing queued, the directory
+    // this batch created must go. Root ignores permissions, so probe first.
+    let jobs_dir = nle_core::state::jobs_dir(&sandbox.file(P));
+    assert!(jobs_dir.is_dir(), "the server made its jobs directory");
+    let original = std::fs::metadata(&jobs_dir)
+        .expect("jobs metadata")
+        .permissions();
+    std::fs::set_permissions(&jobs_dir, std::fs::Permissions::from_mode(0o555))
+        .expect("chmod the jobs dir");
+    let blocked = std::fs::create_dir(jobs_dir.join("probe")).is_err();
+    if blocked {
+        let nowrite = sandbox.file("batch-nowrite");
+        let nowrite_arg = nowrite.display().to_string();
+        let failed = run_batch(
+            &sandbox,
+            &["--output-dir", &nowrite_arg, "--preset", "preview"],
+        );
+        assert!(!failed.status.success(), "{failed:?}");
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("submit sequence #1"),
+            "{failed:?}"
+        );
+        assert!(
+            !nowrite.exists(),
+            "a zero-queued batch removes the directory it created"
+        );
+        let jobs = client.jobs().expect("job.list").jobs;
+        assert_eq!(jobs.len(), 6, "the failed submit queued nothing: {jobs:?}");
+    } else {
+        let _ = std::fs::remove_dir(jobs_dir.join("probe"));
+    }
+    std::fs::set_permissions(&jobs_dir, original).expect("restore the jobs dir");
+
     let hello = client.hello().expect("hello");
     assert_eq!(
         hello.revision, before,
