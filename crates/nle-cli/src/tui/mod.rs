@@ -736,12 +736,21 @@ impl App {
 
     /// Toggle the two-row timeline strips, starting their worker when they
     /// come back on. The same wording is used by the key and `:filmstrip`.
+    ///
+    /// With no preview (`--dump`, a failed monitor start) the preference is
+    /// still recorded — the rows appear once `enable_live_monitor` runs — but
+    /// the notice says it is waiting rather than claiming extraction that
+    /// cannot happen.
     pub(crate) fn set_filmstrips(&mut self, on: bool) {
         self.filmstrip_enabled = on;
-        if on {
+        if !on {
+            self.set_message("filmstrips off");
+        } else if self.preview_enabled {
             start_filmstrips(self);
+            self.set_message("filmstrips on");
+        } else {
+            self.set_message("filmstrips on — waiting for the preview");
         }
-        self.set_message(&format!("filmstrips {}", if on { "on" } else { "off" }));
     }
 
     pub(crate) fn toggle_filmstrips(&mut self) {
@@ -1051,9 +1060,11 @@ fn dump_with_dir(
 
 /// The live TUI's non-session defaults. Filmstrips stay off until the user
 /// asks for them; keeping this in one testable place stops `run` from quietly
-/// re-enabling the extractor.
+/// re-enabling the extractor. A preference recorded while the preview was off
+/// (the `--dump` path) starts extracting here, so its "on" is not a lie.
 fn enable_live_monitor(app: &mut App) {
     app.preview_enabled = true;
+    start_filmstrips(app);
 }
 
 pub fn run<P: Mpv>(session: Session, player: P) -> anyhow::Result<()> {

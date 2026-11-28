@@ -792,11 +792,23 @@ fn effect_command_adds_an_effect() {
 fn filmstrip_command_toggles_the_timeline_rows() {
     let mut app = App::new(asset_project(), temp_project_path("filmstrip-cmd"));
     assert!(!app.filmstrip_enabled);
-    assert_eq!(cmd(&mut app, "filmstrip"), "filmstrips on");
+    assert_eq!(
+        cmd(&mut app, "filmstrip"),
+        "filmstrips on — waiting for the preview"
+    );
     assert!(app.filmstrip_enabled);
     assert_eq!(cmd(&mut app, "filmstrip off"), "filmstrips off");
     assert!(!app.filmstrip_enabled);
     assert!(cmd(&mut app, "filmstrip maybe").contains("on|off"));
+}
+
+#[test]
+fn filmstrip_on_with_a_preview_starts_the_extractor() {
+    let mut app = App::new(asset_project(), temp_project_path("filmstrip-cmd-live"));
+    app.preview_enabled = true;
+    assert_eq!(cmd(&mut app, "filmstrip on"), "filmstrips on");
+    assert!(app.filmstrip_enabled);
+    assert!(app.filmstrip_job.is_some(), "a worker was spawned");
 }
 
 #[test]
@@ -810,7 +822,7 @@ fn ctrl_t_toggles_the_filmstrip_rows() {
         KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
     );
     assert!(app.filmstrip_enabled);
-    assert_eq!(app.message, "filmstrips on");
+    assert_eq!(app.message, "filmstrips on — waiting for the preview");
     handle_key(
         &mut app,
         &fake,
