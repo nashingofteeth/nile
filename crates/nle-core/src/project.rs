@@ -366,6 +366,20 @@ fn id_has_room(family: &'static str, id: u32) -> Result<(), ProjectError> {
     Ok(())
 }
 
+/// Take the next id from a shared cursor, reserving `u32::MAX`.
+///
+/// `Some(id)` is the next free id; spending `u32::MAX - 1` leaves `None`
+/// because its successor would be reserved. A `None` cursor is refused rather
+/// than reused, so two pieces can never share an id. Every multi-id path
+/// (clip allocation, derived expectation copies) shares this rule.
+fn take_id(family: &'static str, next: &mut Option<u32>) -> Result<u32, ProjectError> {
+    let Some(id) = next.take().filter(|id| *id != u32::MAX) else {
+        return Err(ProjectError::IdExhausted(family, u32::MAX - 1));
+    };
+    *next = id.checked_add(1).filter(|next| *next != u32::MAX);
+    Ok(id)
+}
+
 impl Project {
     pub fn new() -> Self {
         Self {
@@ -481,14 +495,9 @@ impl Project {
             .collect();
         let mut expectations = Vec::with_capacity(sources.len());
         if !sources.is_empty() {
-            let mut next_annotation = self.next_annotation_id()?;
-            for (index, mut annotation) in sources.into_iter().enumerate() {
-                if index > 0 {
-                    next_annotation = next_annotation
-                        .checked_add(1)
-                        .ok_or(ProjectError::IdExhausted("annotation", next_annotation))?;
-                }
-                annotation.id = next_annotation;
+            let mut next_annotation = Some(self.next_annotation_id()?);
+            for mut annotation in sources {
+                annotation.id = take_id("annotation", &mut next_annotation)?;
                 annotation.sequence = id;
                 expectations.push(annotation);
             }
@@ -1301,16 +1310,12 @@ impl Project {
 
     /// Take the next clip/transition id from a shared cursor.
     ///
-    /// `Some(id)` is the next free id; spending `u32::MAX - 1` leaves `None`
-    /// because `u32::MAX` is reserved. A `None` cursor is refused rather than
-    /// reused, so two clips can never share an id. Callers planning several
+    /// Delegates to the family-generic cursor: spending `u32::MAX - 1` leaves
+    /// `None` because `u32::MAX` is reserved. A `None` cursor is refused rather
+    /// than reused, so two clips can never share an id. Callers planning several
     /// inserts against one project share the cursor.
     pub fn take_clip_id(next: &mut Option<u32>) -> Result<u32, ProjectError> {
-        let Some(id) = next.take().filter(|id| *id != u32::MAX) else {
-            return Err(ProjectError::IdExhausted("clip", u32::MAX - 1));
-        };
-        *next = id.checked_add(1).filter(|next| *next != u32::MAX);
-        Ok(id)
+        take_id("clip", next)
     }
 }
 
@@ -3551,6 +3556,51 @@ mod tests {
             p, before,
             "the copy and its expectation ids are prepared before any push"
         );
+    }
+
+    #[test]
+    fn a_derive_refuses_a_second_expectation_before_adding_a_sequence() {
+        let mut p = sample_project();
+        p.fps = Some(Seconds::from_integer(30));
+        let expectation = || {
+            (
+                AnnotationKind::Expectation {
+                    expect: Expectation::Cam {
+                        asset: Some(1),
+                        group: None,
+                        tolerance_frames: 0,
+                    },
+                },
+                Anchor::Timeline {
+                    start: ClipPoint {
+                        clip: 1,
+                        source: Seconds::from_integer(0),
+                    },
+                    end: ClipPoint {
+                        clip: 1,
+                        source: Seconds::from_integer(1),
+                    },
+                },
+            )
+        };
+        for _ in 0..2 {
+            let (kind, anchor) = expectation();
+            p.add_annotation(1, kind, anchor, provenance()).unwrap();
+        }
+        p.annotations[0].id = u32::MAX - 3;
+        p.annotations[1].id = u32::MAX - 2;
+        let before = p.clone();
+        assert!(matches!(
+            p.derive_sequence(1, "Copy", None, None),
+            Err(ProjectError::IdExhausted("annotation", id)) if id == u32::MAX - 1
+        ));
+        assert_eq!(
+            p.sequences.len(),
+            before.sequences.len(),
+            "no copy was pushed"
+        );
+        assert_eq!(p, before, "the first copied id was not retained");
+        assert!(p.validate().is_ok(), "the source project is still valid");
     }
 
     #[test]

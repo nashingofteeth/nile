@@ -12,7 +12,7 @@ pub use delete::{
     delete_under_on, trim_consume_target, trim_consume_target_on,
 };
 
-use crate::project::{Project, ProjectError};
+use crate::project::Project;
 use crate::time::{Seconds, checked_add, checked_frames_to_seconds, checked_mul, checked_sub};
 use crate::timeline::{
     Clip, Gap, MAX_TIMELINE_SECONDS, Segment, Track, Transition, TransitionSource,
@@ -200,6 +200,61 @@ pub(super) fn pasted_piece(snapshot: &Segment, new_id: u32) -> Segment {
     }
 }
 
+/// A lazily seeded cursor for a paste's fresh clip/transition ids.
+///
+/// A gap payload consumes no id, so the cursor stays unseeded and a pure-gap
+/// paste works even when the clip id space is full. The first real request
+/// seeds it from [`Project::next_clip_id`]; [`Project::take_clip_id`] then
+/// enforces the reserved `u32::MAX`.
+struct FreshIds<'a> {
+    project: &'a Project,
+    cursor: Option<Option<u32>>,
+}
+
+impl<'a> FreshIds<'a> {
+    fn new(project: &'a Project) -> Self {
+        Self {
+            project,
+            cursor: None,
+        }
+    }
+
+    fn take(&mut self) -> Result<u32, EditError> {
+        if self.cursor.is_none() {
+            self.cursor = Some(Some(self.project.next_clip_id()?));
+        }
+        let cursor = self.cursor.as_mut().expect("the cursor was just seeded");
+        Ok(Project::take_clip_id(cursor)?)
+    }
+}
+
+/// Paste the snapshot, allocating only when its kind carries an id. Returns
+/// the piece and the id it consumed (a gap consumes none).
+fn pasted_with_id(
+    ids: &mut FreshIds<'_>,
+    snapshot: &Segment,
+) -> Result<(Segment, Option<u32>), EditError> {
+    match snapshot {
+        Segment::Gap(_) => Ok((snapshot.clone(), None)),
+        Segment::Clip(_) | Segment::Transition(_) => {
+            let id = ids.take()?;
+            Ok((pasted_piece(snapshot, id), Some(id)))
+        }
+    }
+}
+
+/// The `desc` label for a ripple paste, using the id actually spent.
+fn inserted_label(snapshot: &Segment, payload_id: Option<u32>) -> String {
+    match snapshot {
+        Segment::Clip(_) => payload_id.map_or_else(
+            || "clip inserted".to_string(),
+            |id| format!("clip #{id} inserted"),
+        ),
+        Segment::Gap(_) => "gap inserted".to_string(),
+        Segment::Transition(_) => "transition inserted".to_string(),
+    }
+}
+
 /// `p` — replace-paste: drop the clipboard at the playhead, overwriting
 /// whatever its span covers. Covered gaps vanish, wholly-covered clips
 /// are removed, and a straddled follower is trimmed at its near edge;
@@ -223,8 +278,8 @@ pub fn paste_on(
         return Ok(batch);
     }
     let dur = snapshot.duration();
-    let next = project.next_clip_id()?;
-    let pasted = pasted_piece(snapshot, next);
+    let mut ids = FreshIds::new(project);
+    let (pasted, _) = pasted_with_id(&mut ids, snapshot)?;
 
     // At/past the end (or an empty track): nothing to overwrite — append,
     // bridging the void with a gap when there's distance to cover.
@@ -285,8 +340,7 @@ pub fn paste_on(
                         // tail needs a fresh id only when the same clip
                         // supplied both pieces.
                         let id = if ei == si && left_ok {
-                            next.checked_add(1)
-                                .ok_or(ProjectError::IdExhausted("clip", next))?
+                            ids.take()?
                         } else {
                             c.id
                         };
@@ -501,24 +555,19 @@ pub fn paste_ripple_on(
     {
         return Ok(batch);
     }
-    let what = match snapshot {
-        Segment::Clip(_) => format!("clip #{}", project.next_clip_id()?),
-        Segment::Gap(_) => "gap".to_string(),
-        Segment::Transition(_) => "transition".to_string(),
-    };
-
     // At or past the track end: the void becomes a gap (coalesced with the
     // payload when it is itself a gap), then the payload lands on the playhead.
     if t >= track.end() {
         let void = checked_sub(&t, &track.end()).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
+        let mut ids = FreshIds::new(project);
+        let (pasted, payload_id) = pasted_with_id(&mut ids, snapshot)?;
         return Ok(Batch {
-            ops: append_at_end(
-                ti,
-                track,
-                void,
-                pasted_piece(snapshot, project.next_clip_id()?),
-            )?,
-            desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
+            ops: append_at_end(ti, track, void, pasted)?,
+            desc: format!(
+                "ripple paste at {} — {}",
+                stamp(project, &t),
+                inserted_label(snapshot, payload_id)
+            ),
         });
     }
     let si = track.index_at(t).ok_or(EditError::NoSegment)?;
@@ -537,7 +586,8 @@ pub fn paste_ripple_on(
 
     // The containing segment splits at t; the paste rides between the
     // pieces. Inserting shifts every follower automatically.
-    let pieces: Vec<Segment> = match &seg {
+    let mut ids = FreshIds::new(project);
+    let (pieces, payload_id) = match &seg {
         // A transition owns its neighbours' trimmed spans and can't be split,
         // so an insert at/over one is refused (as `_` does) rather than
         // consuming it — a ripple paste would have to cut it in two.
@@ -546,7 +596,6 @@ pub fn paste_ripple_on(
             let head_len =
                 checked_sub(&t, &seg_start).ok_or(EditError::TooLong(MAX_TIMELINE_SECONDS))?;
             let (head_ok, tail_ok) = split_sides(project, c.duration(), head_len);
-            let pid = project.next_clip_id()?;
             let mut pieces = Vec::new();
             if head_ok {
                 pieces.push(Segment::Clip(Clip {
@@ -558,16 +607,12 @@ pub fn paste_ripple_on(
                     effects: c.effects.clone(),
                 }));
             }
-            pieces.push(pasted_piece(snapshot, pid));
+            let (pasted, payload_id) = pasted_with_id(&mut ids, snapshot)?;
+            pieces.push(pasted);
             if tail_ok {
                 // The right half is a new clip on a split, or keeps the
                 // original's identity on an insert-before.
-                let id = if head_ok {
-                    pid.checked_add(1)
-                        .ok_or(ProjectError::IdExhausted("clip", pid))?
-                } else {
-                    c.id
-                };
+                let id = if head_ok { ids.take()? } else { c.id };
                 let mut tail = Clip {
                     id,
                     asset: c.asset,
@@ -579,7 +624,7 @@ pub fn paste_ripple_on(
                 tail.rebase_crop_keys(head_len);
                 pieces.push(Segment::Clip(tail));
             }
-            pieces
+            (pieces, payload_id)
         }
         Segment::Gap(g) => {
             // Guard the remainders like `paste_on` does: an off-grid gap start
@@ -592,16 +637,21 @@ pub fn paste_ripple_on(
             if head > Seconds::from_integer(0) && at_least_a_frame(project, &head).is_ok() {
                 pieces.push(Segment::Gap(Gap { duration: head }));
             }
-            pieces.push(pasted_piece(snapshot, project.next_clip_id()?));
+            let (pasted, payload_id) = pasted_with_id(&mut ids, snapshot)?;
+            pieces.push(pasted);
             if tail > Seconds::from_integer(0) && at_least_a_frame(project, &tail).is_ok() {
                 pieces.push(Segment::Gap(Gap { duration: tail }));
             }
-            pieces
+            (pieces, payload_id)
         }
     };
     Ok(Batch {
         ops: replace_with_many(ti, si, &seg, pieces),
-        desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
+        desc: format!(
+            "ripple paste at {} — {}",
+            stamp(project, &t),
+            inserted_label(snapshot, payload_id)
+        ),
     })
 }
 

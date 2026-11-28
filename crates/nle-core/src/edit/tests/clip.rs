@@ -851,6 +851,99 @@ fn paste_gap_payloads() {
 }
 
 #[test]
+fn a_gap_paste_that_splits_a_clip_takes_the_last_id_then_refuses() {
+    let last = u32::MAX - 1;
+    let payload = Segment::Gap(Gap {
+        duration: Seconds::new(1, 2),
+    });
+    for ripple in [false, true] {
+        // A gap payload spends no id itself; the split tail takes the one
+        // fresh id, which is the last legal one.
+        let mut p = fixture();
+        set_first_clip_id(&mut p, last - 1);
+        let batch = if ripple {
+            paste_ripple_on(&p, 0, &payload, 0.5)
+        } else {
+            paste_on(&p, 0, &payload, 0.5)
+        }
+        .expect("the split tail fits at the last legal id");
+        let mut q = p.clone();
+        let mut h = History::default();
+        h.apply(&mut q, batch, 0).unwrap();
+        let ids = clip_ids(&q);
+        assert!(ids.contains(&last), "{ids:?}");
+        assert!(!ids.contains(&u32::MAX), "{ids:?}");
+
+        // With that last id already in use, the tail has no successor.
+        let mut p = fixture();
+        set_first_clip_id(&mut p, last);
+        let before = p.clone();
+        let err = if ripple {
+            paste_ripple_on(&p, 0, &payload, 0.5)
+        } else {
+            paste_on(&p, 0, &payload, 0.5)
+        }
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            EditError::Project(ProjectError::IdExhausted("clip", id)) if id == last
+        ));
+        assert_eq!(p, before, "the planner mutated nothing");
+    }
+}
+
+#[test]
+fn a_gap_paste_past_the_end_allocates_no_id_at_the_ceiling() {
+    let last = u32::MAX - 1;
+    let payload = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    for ripple in [false, true] {
+        let mut p = fixture();
+        set_first_clip_id(&mut p, last);
+        let batch = if ripple {
+            paste_ripple_on(&p, 0, &payload, 5.0)
+        } else {
+            paste_on(&p, 0, &payload, 5.0)
+        }
+        .expect("a gap payload needs no clip id");
+        let mut q = p.clone();
+        let mut h = History::default();
+        h.apply(&mut q, batch, 0).unwrap();
+        let ids = clip_ids(&q);
+        assert!(ids.contains(&last), "{ids:?}");
+        assert!(!ids.contains(&u32::MAX), "{ids:?}");
+    }
+}
+
+#[test]
+fn a_ripple_paste_desc_names_the_id_it_spent() {
+    let last = u32::MAX - 1;
+    let mut p = fixture();
+    set_first_clip_id(&mut p, last - 1);
+    let payload = Segment::Clip(Clip::new(
+        0,
+        1,
+        Seconds::from_integer(0),
+        Seconds::from_integer(1),
+    ));
+    let batch = paste_ripple_on(&p, 0, &payload, 5.0).expect("one fresh id fits");
+    assert!(
+        batch.desc.contains(&format!("clip #{last} inserted")),
+        "{}",
+        batch.desc
+    );
+}
+
+fn set_first_clip_id(project: &mut Project, id: u32) {
+    if let Segment::Clip(clip) = &mut project.timeline.video_track_mut().unwrap().segments[0] {
+        clip.id = id;
+    } else {
+        panic!("the fixture starts with a clip");
+    }
+}
+
+#[test]
 fn insert_gap_splits_clip_adds_to_gap_and_grows() {
     // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
     let mut p = fixture();
