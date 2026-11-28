@@ -686,7 +686,8 @@ enum JobCmd {
     },
     /// Snapshot the project and queue an export
     Submit {
-        /// Output file (relative paths resolve against the current directory)
+        /// Output file (relative paths resolve against the current directory;
+        /// an existing file is refused)
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
         /// Sequence to render (default: the server's active sequence)
@@ -704,7 +705,8 @@ enum JobCmd {
     },
     /// Queue one export per sequence into a directory
     Batch {
-        /// Directory for the renders (created if missing)
+        /// Directory for the renders (created if missing; an existing render
+        /// file is refused)
         #[arg(long, value_name = "DIR")]
         output_dir: PathBuf,
         /// Render only these sequences, in this order (default: every sequence)

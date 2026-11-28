@@ -6,7 +6,7 @@
 //! background. These commands never open the project directly: with no server
 //! there is no queue to talk to, so the error says to start one. `batch` adds
 //! no wire method: it is a client-side loop over `job.submit`, which refuses
-//! an output a live job owns.
+//! an output that already exists or that a live job owns.
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
@@ -142,8 +142,9 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
                     }
                     Err(error) => {
                         // The server may refuse a path a live job owns even
-                        // though our `exists()` plan passed. If nothing was
-                        // queued, do not leave the components this batch made.
+                        // though our `symlink_metadata` plan passed. If nothing
+                        // was queued, do not leave the components this batch
+                        // made.
                         if queued.is_empty() {
                             discard_created_dirs(&created);
                         }
@@ -197,7 +198,10 @@ fn plan_outputs(dir: &Path, sequences: &[u32]) -> Result<Vec<(u32, PathBuf)>> {
     let mut plan = Vec::with_capacity(sequences.len());
     for &sequence in sequences {
         let output = dir.join(batch_name(sequence));
-        if output.exists() {
+        // `symlink_metadata` sees a dangling symlink (and a directory), which
+        // `Path::exists` would miss: the publish would refuse it later, but
+        // the batch should refuse before any submit.
+        if std::fs::symlink_metadata(&output).is_ok() {
             bail!(
                 "{} already exists; the batch refuses to overwrite a render",
                 output.display()
@@ -402,6 +406,34 @@ mod tests {
             !dir.join("sequence-1.mp4").exists(),
             "the plan writes nothing"
         );
+    }
+
+    #[test]
+    fn batch_plan_refuses_a_directory_and_a_dangling_symlink() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let dir = parent.path().join("renders");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::create_dir(dir.join("sequence-1.mp4")).expect("mkdir output name");
+
+        let error = plan_outputs(&dir, &[1])
+            .expect_err("a directory is not a render slot")
+            .to_string();
+        assert!(error.contains("sequence-1.mp4"), "{error}");
+        assert!(error.contains("already exists"), "{error}");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                parent.path().join("missing.mp4"),
+                dir.join("sequence-2.mp4"),
+            )
+            .expect("dangling symlink");
+            let error = plan_outputs(&dir, &[2])
+                .expect_err("a dangling symlink still owns the name")
+                .to_string();
+            assert!(error.contains("sequence-2.mp4"), "{error}");
+            assert!(error.contains("already exists"), "{error}");
+        }
     }
 
     #[test]

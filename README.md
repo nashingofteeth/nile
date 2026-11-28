@@ -521,9 +521,10 @@ terminal job; queued or running jobs must be cancelled first.
 never started) to be older than that window; the newest N are always kept.
 Queued and running jobs are never pruned. A directory that cannot be deleted
 does not stop the pass: the removed ids are printed and the failures are named,
-then the command exits nonzero. A server start also removes hidden render temps
-(`.name.jobN.ext`) left by a crash, but only when the temp is exactly the one a
-terminal record names; a queued or running temp is live and is left alone. Job
+then the command exits nonzero. A server start also removes hidden crash
+leftovers, but only when they are exactly the paths a terminal record names:
+the render temp (`.name.jobN.ext`) and its `.name.jobN.ext.copy` publish stage.
+A queued or running temp/stage is live and is left alone. Job
 ids are never recycled, even after a prune: `jobs/.next-id` is the high-water
 mark and is advanced on removal too.
 
@@ -532,20 +533,29 @@ sequence into `DIR`: with no `--sequence` it takes every sequence, otherwise
 the given ids in that order. Each output is named `sequence-<id>.mp4`.
 Duplicate ids, unknown ids and an existing file refuse the batch before any
 job is submitted; a bad selection or an existing file also leaves no new
-directory. `job.submit` refuses an output another **non-terminal** job owns
-(`-32602`, naming that job), comparing a canonical parent plus the file name,
-so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` are one deliverable,
-and two overlapping batches cannot both claim it even when both passed their
-own existence check. A finished job's existing file is not newly claimed:
-terminal-file overwrite is a separate open item. If a submit fails before
-anything was queued, the batch removes exactly the directory components it
-created (innermost first, and only while empty; pre-existing parents stay).
+directory. `job.submit` refuses an output that already exists on disk
+(`-32602`, naming the path; a finished job's deliverable never gets a second
+job) or that another **non-terminal** job owns (`-32602`, naming that job),
+comparing the canonical whole path when the file exists (so a symlinked final
+file aliases its target) and otherwise a canonical parent plus the file name,
+so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` are one deliverable.
+Two overlapping batches therefore cannot both claim a path even when both
+passed their own existence check, and publishing is no-replace: the finished
+render is hard-linked into place atomically, or, where hard links are not
+available, staged as a complete hidden `.copy` temp and renamed into place only
+after a last-moment existence check. A file that appeared during the render is
+left untouched and the job fails instead of overwriting it; a concurrent
+creator landing between that final check and the rename is the documented
+residual. A cancel racing that final rename can still lose: the rename is the
+commit point, so the job may land `done`. If a submit fails before anything was
+queued, the batch removes exactly the directory components it created (innermost
+first, and only while empty; pre-existing parents stay).
 Every submit uses the revision read at the start (`job.submit` is not a model
 write), so a concurrent edit makes the remaining submits refuse instead of
 mixing revisions. The queued lines print the job id, sequence and output; a
 mid-batch failure names the jobs already queued and exits nonzero. There is no
-new wire method: the loop is a client-side sequence of `job.submit`, which now
-refuses an output a live job owns.
+new wire method: the loop is a client-side sequence of `job.submit`, which
+refuses an existing output or one a live job owns.
 
 ### One-shot tools and logging
 

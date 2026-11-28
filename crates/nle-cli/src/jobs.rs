@@ -22,11 +22,14 @@
 //!
 //! ## Cancel and partial output
 //!
-//! The render writes to a hidden temp file beside `output` and renames it only
-//! after ffmpeg exits successfully. A cancel kills the child on the worker's
-//! thread, removes the temp file and marks the job `cancelled`, so a
-//! cancelled job never leaves a half-written deliverable at the output path.
+//! The render writes to a hidden temp file beside `output` and publishes it
+//! without replacing an existing file only after ffmpeg exits successfully: a
+//! hard link when possible, otherwise a complete hidden copy renamed after a
+//! last-moment check. A cancel kills the child on the worker's thread, removes
+//! the temp/stage and marks the job `cancelled`, so a cancelled job never
+//! leaves a half-written deliverable at the output path.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -34,7 +37,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use nle_core::jobs::{
-    JobError, JobExport, JobProgress, JobRecord, JobState, JobStore, now_secs, partial_path,
+    JobError, JobExport, JobProgress, JobRecord, JobState, JobStore, copy_path, now_secs,
+    partial_path,
 };
 use nle_core::{Project, RenderReport, Seconds, secs_f64};
 
@@ -91,12 +95,19 @@ pub(crate) struct PruneReport {
     pub failed: Vec<(u64, String)>,
 }
 
-/// Durable identity of a render target: canonical parent + file name, so
-/// `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` all name one output.
-/// A record is created only after the handler made the parent, so
-/// `canonicalize` normally succeeds; a direct caller with a missing parent
-/// falls back to the lexical path and `store.create` reports the real error.
+/// Durable identity of a render target.
+///
+/// An existing path is canonicalized whole, so a symlinked final file aliases
+/// the file it points at. A path that does not exist yet keeps its canonical
+/// parent plus file name, so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked
+/// `dir` all name one future output. A record is created only after the
+/// handler made the parent, so `canonicalize` normally succeeds; a direct
+/// caller with a missing parent falls back to the lexical path and
+/// `store.create` reports the real error.
 fn output_identity(output: &Path) -> PathBuf {
+    if let Ok(existing) = output.canonicalize() {
+        return existing;
+    }
     let Some(name) = output.file_name() else {
         return output.to_path_buf();
     };
@@ -187,11 +198,14 @@ impl JobQueue {
     /// Queue a snapshot and wake the dispatcher. The snapshot is captured
     /// before the record, so a record always names a complete project.
     ///
-    /// The queue lock covers the live-output check and the record creation:
-    /// two batches (or two clients) that picked the same path cannot both
-    /// submit, because the client's `exists()` check is only advisory. The
-    /// comparison is by [`output_identity`], not the literal `PathBuf`, so a
-    /// `..` or symlinked spelling cannot claim the same file twice.
+    /// The queue lock covers both output guards and the record creation: two
+    /// batches (or two clients) that picked the same path cannot both submit,
+    /// because the client's preflight check is only advisory. The first guard
+    /// refuses a path a live job owns (so a submit racing a just-published
+    /// record names that job); the second refuses a path already on disk (a
+    /// finished job's deliverable or any unrelated file). Both compare
+    /// [`output_identity`], not the literal `PathBuf`, so a `..` or symlinked
+    /// spelling cannot claim the same file twice.
     pub(crate) fn submit(
         &self,
         project: &Project,
@@ -210,6 +224,18 @@ impl JobQueue {
             return Err(QueueError::Invalid(format!(
                 "job #{} already renders to {}; cancel it or pick another output",
                 live.id,
+                output.display()
+            )));
+        }
+        // `canonicalize` above resolved an existing file (including a
+        // symlink's target), so this is the durable "does the deliverable
+        // already exist?" check. `symlink_metadata` also sees a dangling
+        // symlink, which a no-replace publish would refuse anyway. The live
+        // owner scan comes first so a submit racing a published-but-not-yet-
+        // terminal record names that job.
+        if std::fs::symlink_metadata(&identity).is_ok() {
+            return Err(QueueError::Invalid(format!(
+                "{} already exists; refusing to overwrite it",
                 output.display()
             )));
         }
@@ -265,7 +291,7 @@ impl JobQueue {
             .ok_or_else(|| QueueError::Invalid(format!("job #{id} not found")))?;
         // A running job always has an `active` entry. Seeing `running` here
         // means the worker has finished the child and is publishing the
-        // terminal record; killing it now would race the rename.
+        // terminal record; killing it now would race the publish.
         if job.state == JobState::Running {
             return Err(QueueError::Invalid(format!(
                 "job #{id} is finishing; try again"
@@ -552,8 +578,181 @@ pub(crate) fn export_options(export: &JobExport) -> ExportOptions {
     }
 }
 
-/// Render one job from its snapshot. Writes a hidden temp file, renames on
-/// success, and removes it on every failure — including cancellation.
+/// Why a publish did not expose the output.
+#[derive(Debug)]
+enum PublishError {
+    /// The caller cancelled during the staged copy.
+    Cancelled,
+    /// A file operation failed; `AlreadyExists` means the output was claimed.
+    Io(std::io::Error),
+}
+
+/// How much of the staged copy is copied between cancellation checks.
+const COPY_CHUNK: usize = 1024 * 1024;
+
+/// Publish a finished temp render without ever replacing a file that is
+/// already at `output`.
+///
+/// A hard link is an atomic no-replace publish: it fails with `AlreadyExists`
+/// instead of overwriting, and both names briefly point at one inode until the
+/// temp is removed. A filesystem that cannot link across devices (`EXDEV`) or
+/// forbids links falls back to [`copy_no_replace`], which builds a complete
+/// file at `copy_temp` and only renames it into place after a last-moment
+/// existence check, so a crash leaves a sweepable hidden file — never a
+/// truncated deliverable.
+fn publish_no_replace(
+    temp: &Path,
+    copy_temp: &Path,
+    output: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), PublishError> {
+    match std::fs::hard_link(temp, output) {
+        Ok(()) => {
+            remove_temp(temp);
+            Ok(())
+        }
+        Err(link) if link.kind() == std::io::ErrorKind::AlreadyExists => {
+            remove_temp(temp);
+            Err(PublishError::Io(link))
+        }
+        Err(link) => {
+            let mut cancelled = || cancel.load(Ordering::Relaxed);
+            match copy_no_replace(temp, copy_temp, output, &mut cancelled) {
+                // The helper consumed both the stage and the source temp.
+                Ok(()) => Ok(()),
+                Err(PublishError::Cancelled) => {
+                    remove_temp(temp);
+                    Err(PublishError::Cancelled)
+                }
+                Err(PublishError::Io(copy)) => {
+                    remove_temp(temp);
+                    Err(PublishError::Io(std::io::Error::new(
+                        copy.kind(),
+                        format!("hard link failed ({link}); copy failed: {copy}"),
+                    )))
+                }
+            }
+        }
+    }
+}
+
+/// The staged-copy fallback for [`publish_no_replace`].
+///
+/// Copies `temp` into `copy_temp` in bounded chunks (checking `cancelled`
+/// between them), syncs it, then checks the final name for an existing entry
+/// and renames the complete copy into place. The final path is never created
+/// before the bytes are there, so a crash or cancel leaves only the hidden
+/// staging file. On success the source temp is consumed too, so the caller
+/// never has two complete renders. A concurrent creator between the check and
+/// the rename is the residual race: `rename` replaces, and std exposes no
+/// no-replace rename.
+fn copy_no_replace(
+    temp: &Path,
+    copy_temp: &Path,
+    output: &Path,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), PublishError> {
+    let mut source = std::fs::File::open(temp).map_err(PublishError::Io)?;
+    let mut dest = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(copy_temp)
+    {
+        Ok(file) => file,
+        Err(error) => return Err(PublishError::Io(error)),
+    };
+    let copied = (|| -> Result<(), PublishError> {
+        let mut buffer = vec![0u8; COPY_CHUNK];
+        loop {
+            if cancelled() {
+                return Err(PublishError::Cancelled);
+            }
+            match source.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => dest.write_all(&buffer[..read]).map_err(PublishError::Io)?,
+                Err(error) => return Err(PublishError::Io(error)),
+            }
+        }
+        dest.sync_all().map_err(PublishError::Io)
+    })();
+    if let Err(error) = copied {
+        drop(dest);
+        remove_staging(copy_temp);
+        return Err(error);
+    }
+    drop(dest);
+    // The rename is the last step: a cancel after the copy still leaves no
+    // deliverable, and only a complete staged file reaches the final name.
+    if cancelled() {
+        remove_staging(copy_temp);
+        return Err(PublishError::Cancelled);
+    }
+    match std::fs::symlink_metadata(output) {
+        Ok(_) => {
+            remove_staging(copy_temp);
+            return Err(PublishError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} already exists", output.display()),
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            remove_staging(copy_temp);
+            return Err(PublishError::Io(error));
+        }
+    }
+    if let Err(error) = std::fs::rename(copy_temp, output) {
+        remove_staging(copy_temp);
+        return Err(PublishError::Io(error));
+    }
+    remove_temp(temp);
+    Ok(())
+}
+
+/// Drop the staging copy on a failed or cancelled publish. A removal failure
+/// is left to the startup sweep, which knows the terminal record's path.
+fn remove_staging(copy_temp: &Path) {
+    if let Err(error) = std::fs::remove_file(copy_temp) {
+        log::line(&format!(
+            "job queue: could not remove publish stage {}: {error}",
+            copy_temp.display()
+        ));
+    }
+}
+
+/// Drop the temp after a publish attempt. A failure here does not undo the
+/// deliverable; the record turns terminal and the startup sweep removes the
+/// exact temp a terminal record names.
+fn remove_temp(temp: &Path) {
+    if let Err(error) = std::fs::remove_file(temp) {
+        log::line(&format!(
+            "job queue: could not remove render temp {}: {error}",
+            temp.display()
+        ));
+    }
+}
+
+/// Map a no-replace publish onto the job's failure shape, naming the output
+/// and the reason in the terminal record.
+fn publish_job_output(
+    temp: &Path,
+    copy_temp: &Path,
+    output: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), JobRunError> {
+    match publish_no_replace(temp, copy_temp, output, cancel) {
+        Ok(()) => Ok(()),
+        Err(PublishError::Cancelled) => Err(JobRunError::Cancelled),
+        Err(PublishError::Io(error)) => Err(JobRunError::Failed(format!(
+            "publish {}: {error}",
+            output.display()
+        ))),
+    }
+}
+
+/// Render one job from its snapshot. Writes a hidden temp file, then
+/// publishes it without replacing an existing output, and removes it on every
+/// failure — including cancellation.
 pub(crate) fn run_export_job(
     store: &JobStore,
     job: &JobRecord,
@@ -569,6 +768,7 @@ pub(crate) fn run_export_job(
     let total = total_frames(&project);
     let options = export_options(&job.export);
     let temp = partial_path(&job.output, job.id);
+    let copy_temp = copy_path(&job.output, job.id);
     if let Some(parent) = temp.parent().filter(|p| !p.as_os_str().is_empty())
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -614,15 +814,12 @@ pub(crate) fn run_export_job(
         };
     }
     // Cancellation may have been requested between the child's exit and the
-    // rename: still honour it, and never publish a file after a cancel.
+    // publish: still honour it, and never publish a file after a cancel.
     if cancel.load(Ordering::Relaxed) {
         let _ = std::fs::remove_file(&temp);
         return Err(JobRunError::Cancelled);
     }
-    std::fs::rename(&temp, &job.output).map_err(|e| {
-        let _ = std::fs::remove_file(&temp);
-        JobRunError::Failed(format!("publish {}: {e}", job.output.display()))
-    })?;
+    publish_job_output(&temp, &copy_temp, &job.output, cancel)?;
     let frames = nle_ffmpeg::frame_count(&job.output).unwrap_or(total as i64);
     let built = RenderReport::build(
         &project,
@@ -964,7 +1161,7 @@ mod tests {
 
     #[test]
     fn prune_removes_terminal_jobs_but_never_running_or_queued() {
-        let (_dir, path) = seeded();
+        let (dir, path) = seeded();
         let store = JobStore::at(&path);
         let project = Project::load(&path).unwrap();
         for n in 0..2 {
@@ -988,7 +1185,7 @@ mod tests {
             .submit(
                 &project,
                 1,
-                PathBuf::from("/tmp/prune-2.mp4"),
+                dir.path().join("prune-2.mp4"),
                 JobExport::default(),
             )
             .expect("submit");
@@ -1101,6 +1298,8 @@ mod tests {
         store.update(&done).unwrap();
         let crashed = partial_path(&done.output, done.id);
         std::fs::write(&crashed, b"half a render").unwrap();
+        let staged = copy_path(&done.output, done.id);
+        std::fs::write(&staged, b"half a copy").unwrap();
         let queued = store
             .create(
                 &project,
@@ -1110,11 +1309,18 @@ mod tests {
             )
             .unwrap();
         let queued_temp = partial_path(&queued.output, queued.id);
+        let queued_staged = copy_path(&queued.output, queued.id);
         std::fs::write(&queued_temp, b"not started").unwrap();
+        std::fs::write(&queued_staged, b"not started either").unwrap();
 
         let _queue = JobQueue::start_with(&path, quick_runner()).expect("queue");
         assert!(!crashed.exists(), "a terminal record's temp is swept");
+        assert!(!staged.exists(), "a terminal record's staged copy is swept");
         assert!(queued_temp.exists(), "a queued record's temp is kept");
+        assert!(
+            queued_staged.exists(),
+            "a queued record's staged copy is kept"
+        );
     }
 
     #[test]
@@ -1215,6 +1421,301 @@ mod tests {
         assert!(matches!(result, Err(JobRunError::Cancelled)));
         assert!(!out.exists(), "no output after a cancel");
         assert!(!partial_path(&out, job.id).exists(), "no temp left behind");
+        assert!(
+            !copy_path(&out, job.id).exists(),
+            "no staged copy left behind"
+        );
+    }
+
+    #[test]
+    fn submit_refuses_an_existing_output_even_without_a_live_job() {
+        let (dir, path) = seeded();
+        let store = JobStore::at(&path);
+        let project = Project::load(&path).unwrap();
+        // A finished job's deliverable, plus a file that never was a job.
+        let done_output = dir.path().join("done.mp4");
+        let mut done = store
+            .create(&project, 1, done_output.clone(), JobExport::default())
+            .unwrap();
+        done.state = JobState::Done;
+        store.update(&done).unwrap();
+        std::fs::write(&done_output, b"finished render").unwrap();
+        let unrelated = dir.path().join("unrelated.mp4");
+        std::fs::write(&unrelated, b"not a job").unwrap();
+        let queue = JobQueue::start_with(&path, quick_runner()).expect("queue");
+
+        let name = dir.path().file_name().expect("tempdir name");
+        let respelled = dir.path().join("..").join(name).join("done.mp4");
+        let mut spellings = vec![
+            ("finished", done_output.clone()),
+            ("respelled", respelled),
+            ("unrelated", unrelated.clone()),
+        ];
+        let render_dir = dir.path().join("render-dir");
+        std::fs::create_dir(&render_dir).expect("mkdir");
+        spellings.push(("directory", render_dir));
+        #[cfg(unix)]
+        {
+            let linked = dir.path().join("linked.mp4");
+            std::os::unix::fs::symlink(&done_output, &linked).expect("symlink file");
+            spellings.push(("symlinked file", linked));
+            let dangling_abs = dir.path().join("dangling-abs.mp4");
+            std::os::unix::fs::symlink(dir.path().join("missing.mp4"), &dangling_abs)
+                .expect("dangling absolute symlink");
+            spellings.push(("dangling absolute", dangling_abs));
+            let dangling_rel = dir.path().join("dangling-rel.mp4");
+            std::os::unix::fs::symlink("missing.mp4", &dangling_rel)
+                .expect("dangling relative symlink");
+            spellings.push(("dangling relative", dangling_rel));
+        }
+        for (label, output) in spellings {
+            let error = queue
+                .submit(&project, 1, output, JobExport::default())
+                .expect_err(label);
+            assert!(matches!(error, QueueError::Invalid(_)), "{label}: {error}");
+            assert!(
+                error.to_string().contains("already exists"),
+                "{label}: {error}"
+            );
+        }
+
+        assert_eq!(queue.list().unwrap().len(), 1, "no refused submit queued");
+        assert_eq!(
+            std::fs::read(&done_output).unwrap(),
+            b"finished render",
+            "the finished deliverable is untouched"
+        );
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"not a job");
+    }
+
+    #[test]
+    fn a_finished_job_output_is_not_claimed_again() {
+        let (dir, path) = seeded();
+        let output = dir.path().join("finished.mp4");
+        let run: Arc<JobRunner> = Arc::new(|_store, job, _cancel, _progress| {
+            std::fs::write(&job.output, b"deliverable").expect("write output");
+            Ok(None)
+        });
+        let queue = JobQueue::start_with(&path, run).expect("queue");
+        let project = Project::load(&path).unwrap();
+        let job = queue
+            .submit(&project, 1, output.clone(), JobExport::default())
+            .expect("first submit");
+        assert_eq!(wait_done(&queue, job.id).state, JobState::Done);
+        assert_eq!(std::fs::read(&output).unwrap(), b"deliverable");
+
+        let error = queue
+            .submit(&project, 1, output.clone(), JobExport::default())
+            .expect_err("the finished output is claimed");
+        assert!(matches!(error, QueueError::Invalid(_)), "{error}");
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(queue.list().unwrap().len(), 1, "no second record");
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"deliverable",
+            "the existing deliverable is untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_identity_follows_an_existing_symlinked_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real.mp4");
+        let link = dir.path().join("link.mp4");
+        std::fs::write(&target, b"render").unwrap();
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        assert_eq!(output_identity(&link), output_identity(&target));
+        assert_eq!(
+            output_identity(&dir.path().join("future.mp4")),
+            dir.path().canonicalize().unwrap().join("future.mp4"),
+            "a missing file keeps the canonical parent plus its name"
+        );
+    }
+
+    #[test]
+    fn publish_no_replace_creates_a_new_file_and_never_overwrites() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job1.mp4");
+        let staging = copy_path(&dir.path().join("out.mp4"), 1);
+        let output = dir.path().join("out.mp4");
+        let cancel = AtomicBool::new(false);
+        std::fs::write(&temp, b"render bytes").unwrap();
+        publish_no_replace(&temp, &staging, &output, &cancel).expect("publish a fresh output");
+        assert_eq!(std::fs::read(&output).unwrap(), b"render bytes");
+        assert!(!temp.exists(), "the temp is consumed");
+        assert!(!staging.exists(), "the staging path is unused on hard link");
+
+        let next = dir.path().join(".out.job2.mp4");
+        let next_staging = copy_path(&output, 2);
+        std::fs::write(&next, b"newer render").unwrap();
+        let error = publish_no_replace(&next, &next_staging, &output, &cancel)
+            .expect_err("existing output");
+        let PublishError::Io(error) = error else {
+            panic!("an existing output is an I/O refusal, not a cancel");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"render bytes",
+            "the existing deliverable is not replaced"
+        );
+        assert!(!next.exists(), "a refused publish still removes its temp");
+        assert!(!next_staging.exists(), "no staging copy is left behind");
+    }
+
+    #[test]
+    fn the_copy_fallback_refuses_an_existing_output_without_touching_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job3.mp4");
+        let staging = copy_path(&dir.path().join("out.mp4"), 3);
+        let output = dir.path().join("out.mp4");
+        std::fs::write(&temp, b"new render").unwrap();
+        std::fs::write(&output, b"old render").unwrap();
+
+        let mut never = || false;
+        let error =
+            copy_no_replace(&temp, &staging, &output, &mut never).expect_err("existing output");
+        let PublishError::Io(error) = error else {
+            panic!("an existing output is an I/O refusal, not a cancel");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"old render",
+            "the existing deliverable is untouched"
+        );
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn the_copy_fallback_removes_the_stage_when_the_source_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 4);
+
+        // A missing source fails before the staging file exists.
+        let mut never = || false;
+        let missing = dir.path().join("missing.mp4");
+        let error =
+            copy_no_replace(&missing, &staging, &output, &mut never).expect_err("missing source");
+        assert!(matches!(error, PublishError::Io(_)));
+        assert!(!output.exists());
+        assert!(!staging.exists());
+
+        // A directory opens but fails on read, after the stage was created.
+        let source = dir.path().join("source-dir");
+        std::fs::create_dir(&source).expect("mkdir");
+        let error =
+            copy_no_replace(&source, &staging, &output, &mut never).expect_err("unreadable source");
+        assert!(matches!(error, PublishError::Io(_)), "{error:?}");
+        assert!(!output.exists(), "no deliverable from a failed copy");
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn the_copy_fallback_publishes_complete_bytes_on_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job6.mp4");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 6);
+        std::fs::write(&temp, b"complete render bytes").unwrap();
+
+        let mut never = || false;
+        copy_no_replace(&temp, &staging, &output, &mut never).expect("publish the copy");
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"complete render bytes",
+            "the final name holds the complete staged bytes"
+        );
+        assert!(!staging.exists(), "the staged copy became the output");
+        assert!(!temp.exists(), "the source temp is consumed on success");
+    }
+
+    #[test]
+    fn the_copy_fallback_cancels_after_the_copy_before_the_rename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job7.mp4");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 7);
+        std::fs::write(&temp, b"x").unwrap();
+
+        // Two loop checks see the file (one read, then EOF); the post-copy
+        // check cancels before the rename, so the commit point is never
+        // reached.
+        let mut calls = 0;
+        let mut cancel_after_copy = || {
+            calls += 1;
+            calls > 2
+        };
+        let error = copy_no_replace(&temp, &staging, &output, &mut cancel_after_copy)
+            .expect_err("cancelled after the copy");
+        assert!(matches!(error, PublishError::Cancelled));
+        assert_eq!(calls, 3, "the post-copy check ran");
+        assert!(
+            !output.exists(),
+            "no deliverable after the post-copy cancel"
+        );
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn the_copy_fallback_honours_a_cancel_before_and_during_the_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 5);
+        let temp = dir.path().join(".out.job5.mp4");
+        std::fs::write(&temp, vec![7u8; COPY_CHUNK + 1]).unwrap();
+
+        // Already cancelled before the first chunk.
+        let mut before = || true;
+        let error =
+            copy_no_replace(&temp, &staging, &output, &mut before).expect_err("cancelled before");
+        assert!(matches!(error, PublishError::Cancelled));
+        assert!(!output.exists());
+        assert!(!staging.exists());
+
+        // Cancelled after the first chunk: the copy has started, so this
+        // proves the loop checks between bounded reads.
+        let mut calls = 0;
+        let mut during = || {
+            calls += 1;
+            calls > 1
+        };
+        let error =
+            copy_no_replace(&temp, &staging, &output, &mut during).expect_err("cancelled during");
+        assert!(matches!(error, PublishError::Cancelled));
+        assert!(calls >= 2, "the cancel check ran between chunks");
+        assert!(!output.exists(), "no deliverable after a cancelled copy");
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn a_file_that_appears_before_publish_fails_the_job_without_clobbering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job9.mp4");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 9);
+        let cancel = AtomicBool::new(false);
+        std::fs::write(&temp, b"our render").unwrap();
+        // The file appeared after submit, while the render was running.
+        std::fs::write(&output, b"late file").unwrap();
+
+        let error =
+            publish_job_output(&temp, &staging, &output, &cancel).expect_err("refuse the publish");
+        let JobRunError::Failed(reason) = error else {
+            panic!("a publish failure must be Failed, not Cancelled");
+        };
+        assert!(reason.contains("publish"), "{reason}");
+        assert!(reason.contains("out.mp4"), "{reason}");
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"late file",
+            "the late file is never replaced"
+        );
+        assert!(!temp.exists(), "the failed job leaves no temp");
+        assert!(!staging.exists(), "the failed job leaves no staged copy");
     }
 
     #[test]

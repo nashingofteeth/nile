@@ -23,9 +23,9 @@
 //!
 //! [`prune_plan`] is a pure plan over **terminal** records (the queue executes
 //! it, so `nile serve` stays the one writer). [`JobStore::sweep_temps`] runs
-//! at startup: it deletes only the exact [`partial_path`] a terminal record
-//! names, never a glob, so a live export's temp and an unexplained file are
-//! both left alone.
+//! at startup: it deletes only the exact [`partial_path`]/[`copy_path`] temps a
+//! terminal record names, never a glob, so a live export's temp and an
+//! unexplained file are both left alone.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -510,24 +510,30 @@ impl JobStore {
 
     /// Startup sweep: delete hidden render temps a crash left behind.
     ///
-    /// A temp is only deleted when it is exactly [`partial_path`] of a
-    /// **terminal** record. The renderer renames or removes that path before
-    /// the terminal record is written, so one still on disk cannot belong to a
-    /// live export; a queued/running record is never considered. The path set
-    /// comes from the records, not a glob, so no unexplained file is removed
-    /// (a temp whose record was already deleted stays for a human). A path that
-    /// is also some record's deliverable is skipped even if the names collide.
+    /// A temp is only deleted when it is exactly [`partial_path`] (the render
+    /// temp) or [`copy_path`] (the link-less publish staging file) of a
+    /// **terminal** record. The renderer publishes or removes either path
+    /// before the terminal record is written, so one still on disk cannot
+    /// belong to a live export; a queued/running record is never considered.
+    /// The path set comes from the records, not a glob, so no unexplained file
+    /// is removed (a temp whose record was already deleted stays for a human).
+    /// A path that is also some record's deliverable is skipped even if the
+    /// names collide.
     pub fn sweep_temps(&self, jobs: &[JobRecord]) -> TempSweep {
         let mut sweep = TempSweep::default();
         for job in jobs.iter().filter(|job| job.state.is_terminal()) {
-            let temp = partial_path(&job.output, job.id);
-            if jobs.iter().any(|other| other.output == temp) {
-                continue;
-            }
-            match std::fs::remove_file(&temp) {
-                Ok(()) => sweep.removed.push(temp),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => sweep.failed.push((temp, e)),
+            for temp in [
+                partial_path(&job.output, job.id),
+                copy_path(&job.output, job.id),
+            ] {
+                if jobs.iter().any(|other| other.output == temp) {
+                    continue;
+                }
+                match std::fs::remove_file(&temp) {
+                    Ok(()) => sweep.removed.push(temp),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => sweep.failed.push((temp, e)),
+                }
             }
         }
         sweep
@@ -543,12 +549,13 @@ pub struct TempSweep {
     pub failed: Vec<(PathBuf, std::io::Error)>,
 }
 
-/// The hidden temp path the renderer writes before the atomic rename.
+/// The hidden temp path the renderer writes before publishing.
 ///
 /// It keeps the output's extension (ffmpeg picks the muxer from it) and lives
-/// beside the output so the final rename stays on one filesystem. This is the
-/// one spelling the executor and the startup sweep share; a different shape
-/// here would make a crash leftover invisible to the sweep.
+/// beside the output so the publish stays on one filesystem. This spelling and
+/// [`copy_path`] (derived from it) are the two the executor and the startup
+/// sweep share; a different shape here would make a crash leftover invisible to
+/// the sweep.
 pub fn partial_path(output: &Path, id: u64) -> PathBuf {
     let name = output
         .file_name()
@@ -559,6 +566,22 @@ pub fn partial_path(output: &Path, id: u64) -> PathBuf {
         _ => (name.as_str(), "mp4"),
     };
     output.with_file_name(format!(".{stem}.job{id}.{ext}"))
+}
+
+/// The staging path the link-less publish copies into before its final rename.
+///
+/// Deriving it from [`partial_path`] keeps both names in the same directory and
+/// hidden, so a crash mid-copy leaves a file the startup sweep knows to remove
+/// and never a truncated deliverable. The executor and the sweep share this
+/// function; a different shape here would strand the staged copy.
+pub fn copy_path(output: &Path, id: u64) -> PathBuf {
+    let temp = partial_path(output, id);
+    let mut name = temp
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".copy");
+    temp.with_file_name(name)
 }
 
 /// Which terminal jobs a retention pass removes, oldest first.
@@ -961,11 +984,17 @@ mod tests {
         store.update(&running).expect("update");
 
         let done_temp = partial_path(&done.output, done.id);
+        let done_copy = copy_path(&done.output, done.id);
         let queued_temp = partial_path(&queued.output, queued.id);
+        let queued_copy = copy_path(&queued.output, queued.id);
         let running_temp = partial_path(&running.output, running.id);
+        let running_copy = copy_path(&running.output, running.id);
         std::fs::write(&done_temp, b"crashed render").unwrap();
+        std::fs::write(&done_copy, b"crashed staged copy").unwrap();
         std::fs::write(&queued_temp, b"queued").unwrap();
+        std::fs::write(&queued_copy, b"queued copy").unwrap();
         std::fs::write(&running_temp, b"live").unwrap();
+        std::fs::write(&running_copy, b"live copy").unwrap();
         std::fs::write(&done.output, b"deliverable").unwrap();
         let unexplained = renders.join(".unknown.job99.mp4");
         std::fs::write(&unexplained, b"no record names me").unwrap();
@@ -973,11 +1002,14 @@ mod tests {
         std::fs::write(&not_a_temp, b"keep").unwrap();
 
         let sweep = store.sweep_temps(&[done.clone(), queued.clone(), running.clone()]);
-        assert_eq!(sweep.removed, vec![done_temp.clone()]);
+        assert_eq!(sweep.removed, vec![done_temp.clone(), done_copy.clone()]);
         assert!(sweep.failed.is_empty(), "{:?}", sweep.failed);
-        assert!(!done_temp.exists(), "a terminal temp is removed");
+        assert!(!done_temp.exists(), "a terminal render temp is removed");
+        assert!(!done_copy.exists(), "a terminal staged copy is removed");
         assert!(queued_temp.exists(), "a queued temp is untouched");
+        assert!(queued_copy.exists(), "a queued staged copy is untouched");
         assert!(running_temp.exists(), "a running temp is untouched");
+        assert!(running_copy.exists(), "a running staged copy is untouched");
         assert!(done.output.exists(), "the deliverable is untouched");
         assert!(unexplained.exists(), "no record explains it, so keep it");
         assert!(not_a_temp.exists());
@@ -1144,6 +1176,11 @@ mod tests {
         assert_eq!(
             partial_path(Path::new("/tmp/noext"), 2).extension(),
             Some("mp4".as_ref())
+        );
+        assert_eq!(
+            copy_path(out, 7),
+            Path::new("/tmp/.show.job7.mp4.copy"),
+            "the staged copy stays hidden beside the render temp"
         );
     }
 
