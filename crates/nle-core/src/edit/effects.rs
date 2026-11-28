@@ -152,6 +152,16 @@ fn sync_effect_sides(
     Ok(())
 }
 
+/// Reject an effect the model could not persist. The catalog is another
+/// write path into the in-memory project (and previews run it on a clone),
+/// so `add_effect_on`/`replace_effect_on` must not rely on save/load
+/// validation to catch a negative or unsorted crop key.
+fn validate_effect(effect: &Effect) -> Result<(), EditError> {
+    effect
+        .validation_error()
+        .map_or(Ok(()), |why| Err(EditError::InvalidEffect(why)))
+}
+
 /// Add `effect` to clip `clip_id` on the first video track.
 pub fn add_effect(project: &Project, clip_id: u32, effect: Effect) -> Result<Batch, EditError> {
     add_effect_on(project, video_track_index(project)?, clip_id, effect)
@@ -166,6 +176,7 @@ pub fn add_effect_on(
     clip_id: u32,
     effect: Effect,
 ) -> Result<Batch, EditError> {
+    validate_effect(&effect)?;
     let tr = track_at(project, track)?;
     // Effects are video filters: on an audio track the model would hold an
     // effect the export graph never applies, so refuse rather than no-op.
@@ -221,6 +232,7 @@ pub fn replace_effect_on(
     index: usize,
     effect: Effect,
 ) -> Result<Batch, EditError> {
+    validate_effect(&effect)?;
     let tr = track_at(project, track)?;
     if tr.kind != TrackKind::Video {
         return Err(EditError::EffectsNeedVideo);

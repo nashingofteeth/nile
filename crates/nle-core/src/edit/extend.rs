@@ -149,7 +149,7 @@ pub fn extend_edge_on(
                 asset_in,
                 ..c.clone()
             };
-            after.rebase_crop_keys(-delta);
+            after.rebase_crop_keys(-delta, c.duration());
             after
         }
     } else {
@@ -508,7 +508,7 @@ pub fn absorb_outward_on(
                 asset_in,
                 ..c.clone()
             };
-            after.rebase_crop_keys(-delta);
+            after.rebase_crop_keys(-delta, c.duration());
             after
         }
     } else {

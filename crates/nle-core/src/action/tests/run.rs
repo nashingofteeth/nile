@@ -91,6 +91,70 @@ fn add_effect_finds_the_clips_own_track() {
 }
 
 #[test]
+fn add_effect_refuses_invalid_crop_keys_before_they_land() {
+    let mut p = fixture();
+    let mut reg = None;
+    let crop = |keys| Effect::Crop {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 100.0,
+        keys,
+    };
+    let key = |at: i64| crate::timeline::CropKey {
+        at: Seconds::from_integer(at),
+        x: 10.0,
+        y: 0.0,
+        w: 50.0,
+        h: 100.0,
+    };
+    let add = |effect, index| Action::AddEffect {
+        track: 0,
+        clip: 1,
+        effect,
+        index,
+    };
+
+    // A negative key and an unsorted key are refused at the catalog boundary,
+    // not just on save/load.
+    for effect in [crop(vec![key(-1), key(1)]), crop(vec![key(2), key(1)])] {
+        assert!(matches!(
+            run(&mut p, &mut reg, &add(effect, None)),
+            Err(EditError::InvalidEffect(_))
+        ));
+    }
+    match &p.timeline.video_track().unwrap().segments[1] {
+        Segment::Clip(c) => assert!(c.effects.is_empty(), "nothing landed"),
+        other => panic!("expected clip #1, got {other:?}"),
+    }
+
+    // The replace path is a catalog write too (`index: Some`).
+    run(
+        &mut p,
+        &mut reg,
+        &add(
+            Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            },
+            None,
+        ),
+    )
+    .unwrap();
+    assert!(matches!(
+        run(&mut p, &mut reg, &add(crop(vec![key(2), key(1)]), Some(0))),
+        Err(EditError::InvalidEffect(_))
+    ));
+    match &p.timeline.video_track().unwrap().segments[1] {
+        Segment::Clip(c) => {
+            assert!(matches!(c.effects[0], Effect::Eq { .. }), "row unchanged")
+        }
+        other => panic!("expected clip #1, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_transition_action_retimes_an_existing_blend() {
     let mut p = fixture();
     let mut reg = None;

@@ -126,8 +126,10 @@ just no longer drags the audio clock with it.
   (`x`/`y` top-left, `w`/`h` size), not four independent insets; later
   effects see the cropped box because the chain threads it forward.
 - A keyed crop leaves the normal chain: it splits the clip into constant-size
-  passes, animates x/y with crop+overlay expressions, and concatenates. It
-  must be the only effect on the clip and cannot sit on a transition side.
+  passes, animates x/y with crop+overlay expressions, and concatenates. The
+  pass plan is `nle_core::timeline::crop_passes` (the CV checks sample the
+  same ranges and windows); this module only formats it. It must be the only
+  effect on the clip and cannot sit on a transition side.
 
 - Export retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained
   outside [0.5, 2]); the 1× graph stays byte-identical.
