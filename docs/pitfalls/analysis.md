@@ -305,11 +305,13 @@ check, never a sample of the composited render:
    A different asset on screen and a black frame **fail**; a blend frame is
    **unverifiable** (there is no single source picture).
 3. `clip.timeline_offset_of(source)` maps source → clip-relative timeline.
-   A static chain calls `Effect::geometry` (the export's own `Content`
+   A static chain calls `Effect::geometry` (the export's own `Picture`
    tracker) for the visible box and the source→canvas projection; a keyed
    crop uses `crop_segments`/`window_at` (the same base→first-key ramp the
    exporter uses). Static `scale`/`offset` are projected, not skipped; a keyed
    crop mixed with another effect has no render path and is unverifiable.
+   `work-in-frame` uses the same tracker; its margin rule applies only to a
+   clip carrying a geometry effect, so a plain full-bleed clip passes.
 4. `SampleGrid::index_at(source)` floors exactly in `i128`; a source time
    before the grid or past its packed frames is **unverifiable**, never a
    guessed frame.
@@ -424,7 +426,8 @@ Landed with subject detection:
 - **Geometry:** `EffectGeometry` is the export's own tracker, so
   `Effect::chain`'s final `pad` and `visible`/`project` agree
   (`effect_geometry_agrees_with_the_chain_it_renders`); a no-op scale stays
-  identity and a zoom/offset clips the box.
+  identity, a zoom/offset clips the box, and `work-in-frame` passes a plain
+  clip but fails a zoom that fills the frame.
 - **End to end:** `behaviour.rs` runs `nile analysis detect --label red`, then
   `annotation add --expect subject-in-frame` and `annotation check` on a real
   export; a crop that excludes the box flips the check to fail.

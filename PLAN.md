@@ -635,9 +635,10 @@ shared by the TUI and agents — with no clipgen code present.
   (bundled colour test double, or an absolute `--analyzer`), products carry
   normalized millionth boxes on a `SampleGrid`, and `subject-in-frame` maps
   each output frame through the report to the product grid and the clip's
-  visible window. `Effect::geometry` is the export's own source/canvas tracker,
-  so static crop+scale+offset compose into both `subject-in-frame` and
-  `work-in-frame`; a keyed crop keeps its key-window path. Audio levels landed: `nile analysis analyze-audio` samples through
+  visible window. `Effect::geometry` is the export's own source/canvas
+  tracker, so static crop+scale+offset compose into both `subject-in-frame`
+  and `work-in-frame`; a keyed crop keeps its key-window path. Audio levels
+  landed: `nile analysis analyze-audio` samples through
   `cache/analysis` and the bundled analyzer writes per-window RMS/peak
   (millionths of full scale, all channels aggregated) as an `audio_levels`
   product under `analysis/products/`; sidecar protocol 3 and a 250 000-window

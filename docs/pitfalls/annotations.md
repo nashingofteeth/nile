@@ -52,11 +52,12 @@ Read before touching `annotation.rs`, the `Change::Annotations` path, or
   - `crop-stable [--max-move P] [--no-hold-size]`: the crop never moves faster
     than P percentage points per second (default 25) and, unless
     `--no-hold-size`, keeps its size.
-  - `work-in-frame [--margin P]`: the visible picture keeps P% of the frame on
-    all four sides (default 5). A static chain composes crop/scale/offset
-    through `Effect::geometry`; a keyed crop uses its window at each key, and a
-    chain that leaves the full frame untouched (no-op scale, full-window crop)
-    passes.
+  - `work-in-frame [--margin P]`: for a clip carrying a geometry effect
+    (crop/scale/offset), the visible picture keeps P% of the frame on all four
+    sides (default 5). A static chain composes through `Effect::geometry`; a
+    keyed crop uses its window at each key, and a no-op chain (or a clip with
+    no geometry effect) passes. A keyed crop mixed with another effect is
+    unverifiable, matching `subject-in-frame`.
   - `subject-in-frame --asset N --product a1-… --label NAME [--subject-id ID]
     [--margin P] [--min-confidence F] [--tolerance-frames N]`: every detected
     box of that label (optionally one detector instance) with confidence at
