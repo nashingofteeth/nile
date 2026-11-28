@@ -489,8 +489,8 @@ pub(crate) fn cmd_media_ls(project_path: &Path) -> Result<()> {
 }
 
 /// `nile track ls` — the track listing. (add/mute/rm are catalog actions.)
-/// `nile sequence ls|add|use` — the project's timelines. Selection is
-/// session state: edits and undo follow the active sequence.
+/// `nile sequence ls|add|derive|use|audio` — the project's timelines.
+/// Selection is session state: edits and undo follow the active sequence.
 pub(crate) fn cmd_sequence(project_path: &Path, action: &SequenceCmd) -> Result<()> {
     match action {
         SequenceCmd::Ls => {

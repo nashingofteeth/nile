@@ -416,7 +416,7 @@ enum Cmd {
         #[command(subcommand)]
         action: TrackCmd,
     },
-    /// Sequences: list, add, switch the active one
+    /// Sequences: list, add, derive, switch the active one, audio post
     Sequence {
         #[command(subcommand)]
         action: SequenceCmd,
