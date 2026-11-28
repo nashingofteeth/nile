@@ -93,6 +93,74 @@ fn job_submit_renders_the_snapshot_and_retains_the_report() {
     let missing = call(&mut serve, 99, "job.get", Some(json!({"id": 99})));
     assert_eq!(missing["error"]["code"], -32602);
 
+    // A finished job's deliverable is not claimed again: the submit refuses
+    // the path the queue no longer has a live owner for.
+    let again = call(
+        &mut serve,
+        98,
+        "job.submit",
+        Some(json!({
+            "base_revision": hello.revision,
+            "output": output.display().to_string(),
+            "sequence": 1
+        })),
+    );
+    assert_eq!(again["error"]["code"], -32602, "{again}");
+    assert!(
+        again["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already exists"),
+        "{again}"
+    );
+    let list = {
+        let mut client = serve.client();
+        client.jobs().expect("job.list")
+    };
+    assert_eq!(list.jobs.len(), 1, "the refused submit queued nothing");
+
+    assert!(serve.finish().success(), "serve exits cleanly");
+}
+
+#[test]
+fn job_submit_refuses_an_output_file_that_already_exists() {
+    let sandbox = Sandbox::new();
+    sandbox.base();
+    let mut serve = sandbox.serve();
+    let hello = call(&mut serve, 1, "hello", None);
+    let revision = hello["result"]["revision"].as_u64().expect("revision");
+    let output = sandbox.file("existing.mp4");
+    std::fs::write(&output, b"an older render").expect("write the old render");
+
+    let refused = call(
+        &mut serve,
+        2,
+        "job.submit",
+        Some(json!({
+            "base_revision": revision,
+            "output": output.display().to_string(),
+            "sequence": 1
+        })),
+    );
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already exists"),
+        "{refused}"
+    );
+
+    let list = call(&mut serve, 3, "job.list", None);
+    assert!(
+        list["result"]["jobs"].as_array().unwrap().is_empty(),
+        "the refusal queued no record: {list}"
+    );
+    assert_eq!(
+        std::fs::read(&output).expect("read"),
+        b"an older render",
+        "the existing file is untouched"
+    );
     assert!(serve.finish().success(), "serve exits cleanly");
 }
 
