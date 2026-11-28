@@ -14,6 +14,11 @@ Read before touching `CropKey`, the keyframe action, or the keyed-crop graph.
   x/y interpolate with a filter expression. Before the first key the static
   size is held and x/y move toward the first key, clamped to the available
   travel (the window never pre-shrinks); after the last key it holds.
+- **One planner.** `timeline::crop_passes` owns the ranges and windows: the
+  exporter only formats its passes and the CV checks sample
+  `CropPass::window_at`. Validation rejects negative/non-increasing keys, so the
+  planner debug-asserts that instead of filtering them (filtering used to drop
+  the head ramp).
 - **The head is the origin.** Split/trim-in/head-extend re-base keys onto the
   new head (the cut value becomes the key at 0); retime scales key offsets so
   the same source frame keeps its key. Tail trims leave keys after the new

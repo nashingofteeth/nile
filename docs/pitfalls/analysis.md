@@ -307,9 +307,10 @@ check, never a sample of the composited render:
 3. `clip.timeline_offset_of(source)` maps source → clip-relative timeline.
    A static chain calls `Effect::geometry` (the export's own `Picture`
    tracker) for the visible box and the source→canvas projection; a keyed
-   crop uses `crop_segments`/`window_at` (the same base→first-key ramp the
-   exporter uses). Static `scale`/`offset` are projected, not skipped; a keyed
-   crop mixed with another effect has no render path and is unverifiable.
+   crop uses `timeline::crop_passes`/`CropPass::window_at` (the same planner
+   the exporter formats, head ramp included). Static `scale`/`offset` are
+   projected, not skipped; a keyed crop mixed with another effect has no
+   render path and is unverifiable.
    `work-in-frame` uses the same tracker; its margin rule applies only to a
    clip carrying a geometry effect, so a plain full-bleed clip passes.
 4. `SampleGrid::index_at(source)` floors exactly in `i128`; a source time
