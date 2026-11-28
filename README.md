@@ -129,10 +129,11 @@ frame rate, output size, playhead, audio post and undo stack, sharing one
 media pool. The TUI edits the active sequence; the status row names it when
 there is more than one. `:sequence ls` lists them, `:sequence N` switches, and
 `:sequence add NAME [--width W --height H --fps RATE]` creates one.
-`nile sequence derive --from N --name NAME [--size WxH] [--fps RATE]` copies a
-sequence snapshot into a new sequence without switching; the copy has its own
-undo stack and starts at 0, and the optional `--size`/`--fps` set the
-copy's canvas and grid. Presets such as 9x16 are not applied yet — add
+`:sequence derive --from N --name NAME [--size WxH] [--fps RATE]` (or
+`nile sequence derive …`) copies a sequence snapshot into a new sequence
+without switching; the copy keeps its own undo stack (starting empty), starts
+at 0, copies the source's expectations, and the optional `--size`/`--fps` set
+its canvas and grid. Presets such as 9x16 are not applied yet — add
 crop/scale effects or wait for the preset slice. Switching sequences saves
 `active`, adopts that timeline's playhead, resets the active track and
 reloads the monitor. Undo is
@@ -261,6 +262,7 @@ The `:` line is the CLI grammar, flag for flag:
 :undo / :redo                 :purge
 :track add video|audio        :track mute [N] / :track rm N
 :sequence [ls|N|use N]         :sequence add NAME [--width W --height H --fps RATE]
+:sequence derive --from N --name NAME [--size WxH] [--fps RATE]
 :sequence audio [--normalize [BOOL]] [--fade-in S --fade-out S]
 :media ls|rm                  :cache prune [--days N] [--dry-run]
 :filmstrip [on|off]           # timeline strips (session-only)
@@ -567,7 +569,7 @@ line, on the project's Unix socket (or stdin/stdout with `--stdio`). One
 server per project owns the socket; a second `nile serve` refuses. Multiple
 connections serialize their calls through one handler. Call `hello` first,
 then `project.show`, `timeline.edl`,
-`sequence.list|use|add|audio`, `media.list|add`, `playhead.set`,
+`sequence.list|use|add|derive|audio`, `media.list|add`, `playhead.set`,
 `annotation.list|check`, `analysis.add`, `action.preview`,
 `action.apply`, `undo`, `redo`, or the durable
 `job.submit|list|get|cancel|remove|prune`.

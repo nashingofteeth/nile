@@ -487,7 +487,8 @@ shared by the TUI and agents — with no clipgen code present.
   scope, resolved like the active track (`--sequence`, TUI switch, protocol
   param).
 - `Sequence.origin = Root | Derived { from, spec }` and a manual-edit counter;
-  snapshot derive landed; presets/regeneration remain.
+  snapshot derive landed on the CLI, protocol and `:sequence derive`; presets
+  and regeneration remain.
 - Export takes a sequence; proxy/export caches key per sequence.
 - Landed: v16 projects with shared media, media groups and annotations, v23
   per-sequence histories with
@@ -653,12 +654,13 @@ shared by the TUI and agents — with no clipgen code present.
 ### 7. Toolkit hooks (after the core)
 
 - Snapshot derived sequences landed (`sequence derive --from N --name NAME
-  [--size WxH] [--fps RATE]`; expectations copied, origin records overrides)
-  and batch render jobs landed (`nile job batch --output-dir DIR
-  [--sequence ID]...` queues one `job.submit` per sequence at one revision,
-  deterministic `sequence-<id>.mp4`; duplicates/unknown ids/existing files
-  refuse before any submit, `job.submit` refuses an output a non-terminal job
-  owns by canonical parent + name, and a zero-queued failure removes only the
+  [--size WxH] [--fps RATE]`, CLI/protocol and `:sequence derive` in the TUI;
+  expectations copied, origin records overrides) and batch render jobs landed
+  (`nile job batch --output-dir DIR [--sequence ID]...` queues one
+  `job.submit` per sequence at one revision, deterministic
+  `sequence-<id>.mp4`; duplicates/unknown ids/existing files refuse before
+  any submit, `job.submit` refuses an output a non-terminal job owns by
+  canonical parent + name, and a zero-queued failure removes only the
   directory components it created). Presets/regeneration and per-sequence
   export presets remain.
 - Marker/chapter annotations in the TUI; transcript and text-based editing

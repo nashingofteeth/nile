@@ -56,11 +56,13 @@ checks); older files are rejected, never migrated.
 ## Front-ends
 
 - TUI: `:sequence ls`, `:sequence N`/`:sequence use N`, `:sequence add NAME
-  [--width W --height H --fps RATE]`. Switching resets the active track (tracks
+  [--width W --height H --fps RATE]`, `:sequence derive --from N --name NAME
+  [--size WxH] [--fps RATE]`. Switching resets the active track (tracks
   are per sequence), adopts the target's stored playhead, saves the project,
   and rebuilds the monitor.
-- CLI: `nile sequence ls|add|use|audio`; `--sequence N` on `show`, `edl` and
-  `export` reads/renders that timeline without changing the stored active one.
+- CLI: `nile sequence ls|add|use|derive|audio`; `--sequence N` on `show`,
+  `edl` and `export` reads/renders that timeline without changing the stored
+  active one.
   `show --json` always prints the whole project, so it refuses `--sequence`
   rather than rewriting `active` in the machine-readable output.
 - `sequence audio [--normalize [BOOL]] [--fade-in S] [--fade-out S]` changes
@@ -84,9 +86,10 @@ checks); older files are rejected, never migrated.
 `Sequence.origin` is `Root` or `Derived { from, spec }`, and every sequence
 carries a monotonic `manual_edits` counter (undo does not decrement it).
 
-`nile sequence derive --from N --name NAME [--size WxH] [--fps RATE]` copies
-the source sequence's **snapshot**: tracks/segments, effects, audio post, and
-settings. This is deliberately not a live derivation:
+`nile sequence derive --from N --name NAME [--size WxH] [--fps RATE]` (the
+TUI spells it `:sequence derive …`) copies the source sequence's **snapshot**:
+tracks/segments, effects, audio post, and settings. This is deliberately not
+a live derivation:
 
 - The source and copy share the media pool, but not their timelines or undo
   stacks. Editing either leaves the other untouched.
