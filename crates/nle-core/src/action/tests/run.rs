@@ -367,6 +367,96 @@ fn total(track: &crate::timeline::Track) -> Seconds {
     track.end()
 }
 
+// A full id space must not refuse an edit whose sync only shifts/removes. The
+// sync cursor is `None` until a split actually takes an id.
+fn last_id_sync_project(audio: bool) -> Project {
+    let last = u32::MAX - 1;
+    let mut p = Project::new();
+    p.fps = Some(Seconds::from_integer(30));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
+    let clip = |id, ain: i64, aout: i64| {
+        Segment::Clip(Clip {
+            id,
+            asset: a,
+            asset_in: Seconds::from_integer(ain),
+            asset_out: Seconds::from_integer(aout),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })
+    };
+    p.timeline.video_track_mut().unwrap().segments =
+        vec![clip(last, 0, 2), clip(2, 2, 4), clip(3, 4, 6)];
+    if audio {
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.track_mut(ai).unwrap().segments = vec![clip(99, 0, 6)];
+    }
+    p
+}
+
+#[test]
+fn a_base_edit_at_the_last_id_needs_a_sync_id_only_for_a_split() {
+    let last = u32::MAX - 1;
+    let edits = [
+        Action::TrimOut {
+            track: 0,
+            at: 1.0,
+            ripple: true,
+        },
+        Action::Delete {
+            track: 0,
+            target: Target::Clip(2),
+            ripple: true,
+        },
+    ];
+
+    for edit in &edits {
+        let mut p = last_id_sync_project(false);
+        let mut reg = None;
+        run(&mut p, &mut reg, edit).expect("no sync split, so no id is needed");
+        assert!(
+            p.timeline
+                .video_track()
+                .unwrap()
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, Segment::Clip(clip) if clip.id == last)),
+            "the last id survives the edit"
+        );
+    }
+
+    let gap = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    let mut p = last_id_sync_project(false);
+    let mut reg = None;
+    run(
+        &mut p,
+        &mut reg,
+        &Action::Paste {
+            track: 0,
+            at: 6.0,
+            ripple: true,
+            segment: Some(gap),
+        },
+    )
+    .expect("a gap append needs no id");
+
+    // A second track straddled by the removed span must be split, and that
+    // split is the only thing that needs the exhausted id.
+    for edit in &edits {
+        let mut p = last_id_sync_project(true);
+        let before = p.timeline.clone();
+        let mut reg = None;
+        assert!(matches!(
+            run(&mut p, &mut reg, edit),
+            Err(EditError::Project(ProjectError::IdExhausted("clip", id))) if id == last
+        ));
+        assert_eq!(p.timeline, before, "a failed sync applies nothing");
+    }
+}
+
 #[test]
 fn a_ripple_delete_shifts_every_track() {
     let (mut p, ai) = sync_pair();

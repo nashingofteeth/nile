@@ -944,6 +944,37 @@ fn set_first_clip_id(project: &mut Project, id: u32) {
 }
 
 #[test]
+fn inserting_a_gap_at_a_clip_head_needs_no_id() {
+    let last = u32::MAX - 1;
+    let mut p = fixture();
+    set_first_clip_id(&mut p, last);
+    let batch = insert_gap_on(&p, 0, 0.0, 15).expect("insert-before keeps the original clip id");
+    let mut q = p.clone();
+    let mut h = History::default();
+    h.apply(&mut q, batch, 0).unwrap();
+    let ids = clip_ids(&q);
+    assert!(ids.contains(&last));
+    assert!(!ids.contains(&u32::MAX));
+}
+
+#[test]
+fn a_gap_only_range_insert_needs_no_clip_id() {
+    let last = u32::MAX - 1;
+    let mut p = fixture();
+    set_first_clip_id(&mut p, last);
+    let gap = Segment::Gap(Gap {
+        duration: Seconds::from_integer(1),
+    });
+    let batch = insert_segments_on(&p, 0, 3.0, &[gap]).expect("a gap payload takes no id");
+    let mut q = p.clone();
+    let mut h = History::default();
+    h.apply(&mut q, batch, 0).unwrap();
+    let ids = clip_ids(&q);
+    assert!(ids.contains(&last));
+    assert!(!ids.contains(&u32::MAX));
+}
+
+#[test]
 fn insert_gap_splits_clip_adds_to_gap_and_grows() {
     // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
     let mut p = fixture();

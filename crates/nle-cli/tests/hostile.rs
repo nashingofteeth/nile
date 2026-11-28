@@ -3,9 +3,11 @@
 //! - exit 0 (accepted), 1 (refused with a message) or 2 (usage error),
 //! - leave a project that still loads with a finite, non-negative length.
 //!
-//! These are the old `scripts/fuzz.sh` cases. Nothing here asserts *what* a
-//! command said — only that it held the invariant — so a deliberate wording
-//! change never touches this file.
+//! These are the old `scripts/fuzz.sh` cases. The invariant cases are
+//! wording-agnostic — only whether the command held the invariant matters, so a
+//! deliberate message change never touches this file. The two typed-refusal
+//! cause checks for exhausted ids are the exception: they pin the error text so
+//! a missing file/probe cannot make the case pass by accident.
 
 mod common;
 
