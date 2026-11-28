@@ -599,8 +599,11 @@ shared by the TUI and agents — with no clipgen code present.
   [--json]`, which `nile annotation check` also consumes (expectations
   evaluated over the frame map); `Effect::Crop` is a window with keyframes
   (project v16, history v23): x/y animate, w/h step at keys, and height rungs
-  are authoring-only. **Audio post** is per-sequence `AudioSettings` (project
-  v18, history v24): `nile sequence audio --normalize/--fade-in/--fade-out`,
+  are authoring-only. Known keyed-crop limitation (F<NN>.3): a size-step pass
+  can cross the frame cap before a cut; cuts clamp the sampled endpoint but do
+  not synthesize the cap-crossing key, so the left ramp before the cut can
+  differ. Pixel parity is also still deferred. **Audio post** is per-sequence
+  `AudioSettings` (project v18, history v24): `nile sequence audio --normalize/--fade-in/--fade-out`,
   with TUI and `sequence.audio` parity; one-pass `loudnorm` at -16 LUFS/
   -1.5 dBTP/LRA 11 plus clamped programme fades, applied once after the final
   mix at 48 kHz. Chunked export defers the chain to its final mux: chunks
