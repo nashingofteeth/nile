@@ -1292,6 +1292,8 @@ mod tests {
         store.update(&done).unwrap();
         let crashed = partial_path(&done.output, done.id);
         std::fs::write(&crashed, b"half a render").unwrap();
+        let staged = copy_path(&done.output, done.id);
+        std::fs::write(&staged, b"half a copy").unwrap();
         let queued = store
             .create(
                 &project,
@@ -1301,11 +1303,18 @@ mod tests {
             )
             .unwrap();
         let queued_temp = partial_path(&queued.output, queued.id);
+        let queued_staged = copy_path(&queued.output, queued.id);
         std::fs::write(&queued_temp, b"not started").unwrap();
+        std::fs::write(&queued_staged, b"not started either").unwrap();
 
         let _queue = JobQueue::start_with(&path, quick_runner()).expect("queue");
         assert!(!crashed.exists(), "a terminal record's temp is swept");
+        assert!(!staged.exists(), "a terminal record's staged copy is swept");
         assert!(queued_temp.exists(), "a queued record's temp is kept");
+        assert!(
+            queued_staged.exists(),
+            "a queued record's staged copy is kept"
+        );
     }
 
     #[test]
@@ -1406,6 +1415,10 @@ mod tests {
         assert!(matches!(result, Err(JobRunError::Cancelled)));
         assert!(!out.exists(), "no output after a cancel");
         assert!(!partial_path(&out, job.id).exists(), "no temp left behind");
+        assert!(
+            !copy_path(&out, job.id).exists(),
+            "no staged copy left behind"
+        );
     }
 
     #[test]
@@ -1543,6 +1556,87 @@ mod tests {
             "the existing deliverable is not replaced"
         );
         assert!(!next.exists(), "a refused publish still removes its temp");
+        assert!(!next_staging.exists(), "no staging copy is left behind");
+    }
+
+    #[test]
+    fn the_copy_fallback_refuses_an_existing_output_without_touching_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = dir.path().join(".out.job3.mp4");
+        let staging = copy_path(&dir.path().join("out.mp4"), 3);
+        let output = dir.path().join("out.mp4");
+        std::fs::write(&temp, b"new render").unwrap();
+        std::fs::write(&output, b"old render").unwrap();
+
+        let mut never = || false;
+        let error =
+            copy_no_replace(&temp, &staging, &output, &mut never).expect_err("existing output");
+        let PublishError::Io(error) = error else {
+            panic!("an existing output is an I/O refusal, not a cancel");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"old render",
+            "the existing deliverable is untouched"
+        );
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn the_copy_fallback_removes_the_stage_when_the_source_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 4);
+
+        // A missing source fails before the staging file exists.
+        let mut never = || false;
+        let missing = dir.path().join("missing.mp4");
+        let error =
+            copy_no_replace(&missing, &staging, &output, &mut never).expect_err("missing source");
+        assert!(matches!(error, PublishError::Io(_)));
+        assert!(!output.exists());
+        assert!(!staging.exists());
+
+        // A directory opens but fails on read, after the stage was created.
+        let source = dir.path().join("source-dir");
+        std::fs::create_dir(&source).expect("mkdir");
+        let error =
+            copy_no_replace(&source, &staging, &output, &mut never).expect_err("unreadable source");
+        assert!(matches!(error, PublishError::Io(_)), "{error:?}");
+        assert!(!output.exists(), "no deliverable from a failed copy");
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn the_copy_fallback_honours_a_cancel_before_and_during_the_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.mp4");
+        let staging = copy_path(&output, 5);
+        let temp = dir.path().join(".out.job5.mp4");
+        std::fs::write(&temp, vec![7u8; COPY_CHUNK + 1]).unwrap();
+
+        // Already cancelled before the first chunk.
+        let mut before = || true;
+        let error =
+            copy_no_replace(&temp, &staging, &output, &mut before).expect_err("cancelled before");
+        assert!(matches!(error, PublishError::Cancelled));
+        assert!(!output.exists());
+        assert!(!staging.exists());
+
+        // Cancelled after the first chunk: the copy has started, so this
+        // proves the loop checks between bounded reads.
+        let mut calls = 0;
+        let mut during = || {
+            calls += 1;
+            calls > 1
+        };
+        let error =
+            copy_no_replace(&temp, &staging, &output, &mut during).expect_err("cancelled during");
+        assert!(matches!(error, PublishError::Cancelled));
+        assert!(calls >= 2, "the cancel check ran between chunks");
+        assert!(!output.exists(), "no deliverable after a cancelled copy");
+        assert!(!staging.exists(), "the staged copy is removed");
     }
 
     #[test]
@@ -1569,6 +1663,7 @@ mod tests {
             "the late file is never replaced"
         );
         assert!(!temp.exists(), "the failed job leaves no temp");
+        assert!(!staging.exists(), "the failed job leaves no staged copy");
     }
 
     #[test]

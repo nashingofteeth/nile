@@ -983,11 +983,17 @@ mod tests {
         store.update(&running).expect("update");
 
         let done_temp = partial_path(&done.output, done.id);
+        let done_copy = copy_path(&done.output, done.id);
         let queued_temp = partial_path(&queued.output, queued.id);
+        let queued_copy = copy_path(&queued.output, queued.id);
         let running_temp = partial_path(&running.output, running.id);
+        let running_copy = copy_path(&running.output, running.id);
         std::fs::write(&done_temp, b"crashed render").unwrap();
+        std::fs::write(&done_copy, b"crashed staged copy").unwrap();
         std::fs::write(&queued_temp, b"queued").unwrap();
+        std::fs::write(&queued_copy, b"queued copy").unwrap();
         std::fs::write(&running_temp, b"live").unwrap();
+        std::fs::write(&running_copy, b"live copy").unwrap();
         std::fs::write(&done.output, b"deliverable").unwrap();
         let unexplained = renders.join(".unknown.job99.mp4");
         std::fs::write(&unexplained, b"no record names me").unwrap();
@@ -995,11 +1001,14 @@ mod tests {
         std::fs::write(&not_a_temp, b"keep").unwrap();
 
         let sweep = store.sweep_temps(&[done.clone(), queued.clone(), running.clone()]);
-        assert_eq!(sweep.removed, vec![done_temp.clone()]);
+        assert_eq!(sweep.removed, vec![done_temp.clone(), done_copy.clone()]);
         assert!(sweep.failed.is_empty(), "{:?}", sweep.failed);
-        assert!(!done_temp.exists(), "a terminal temp is removed");
+        assert!(!done_temp.exists(), "a terminal render temp is removed");
+        assert!(!done_copy.exists(), "a terminal staged copy is removed");
         assert!(queued_temp.exists(), "a queued temp is untouched");
+        assert!(queued_copy.exists(), "a queued staged copy is untouched");
         assert!(running_temp.exists(), "a running temp is untouched");
+        assert!(running_copy.exists(), "a running staged copy is untouched");
         assert!(done.output.exists(), "the deliverable is untouched");
         assert!(unexplained.exists(), "no record explains it, so keep it");
         assert!(not_a_temp.exists());
@@ -1166,6 +1175,11 @@ mod tests {
         assert_eq!(
             partial_path(Path::new("/tmp/noext"), 2).extension(),
             Some("mp4".as_ref())
+        );
+        assert_eq!(
+            copy_path(out, 7),
+            Path::new("/tmp/.show.job7.mp4.copy"),
+            "the staged copy stays hidden beside the render temp"
         );
     }
 

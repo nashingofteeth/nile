@@ -408,6 +408,34 @@ mod tests {
     }
 
     #[test]
+    fn batch_plan_refuses_a_directory_and_a_dangling_symlink() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let dir = parent.path().join("renders");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::create_dir(dir.join("sequence-1.mp4")).expect("mkdir output name");
+
+        let error = plan_outputs(&dir, &[1])
+            .expect_err("a directory is not a render slot")
+            .to_string();
+        assert!(error.contains("sequence-1.mp4"), "{error}");
+        assert!(error.contains("already exists"), "{error}");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                parent.path().join("missing.mp4"),
+                dir.join("sequence-2.mp4"),
+            )
+            .expect("dangling symlink");
+            let error = plan_outputs(&dir, &[2])
+                .expect_err("a dangling symlink still owns the name")
+                .to_string();
+            assert!(error.contains("sequence-2.mp4"), "{error}");
+            assert!(error.contains("already exists"), "{error}");
+        }
+    }
+
+    #[test]
     fn created_batch_directories_are_removed_in_reverse_and_never_beyond_them() {
         let parent = tempfile::tempdir().expect("tempdir");
 
