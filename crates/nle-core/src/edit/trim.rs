@@ -869,10 +869,7 @@ pub(super) fn trim_or_absorb_head(
                 });
                 return Ok(());
             }
-            let after = Clip {
-                asset_in: c.asset_in + source_span(&c, t - start),
-                ..c.clone()
-            };
+            let after = c.split_right_at(t - start, c.duration());
             absorbed.push(format!("trimmed clip #{}", c.id));
             ops.push(EditOp::Replace {
                 track: ti,
@@ -942,10 +939,7 @@ pub(super) fn trim_or_absorb_tail(
                 });
                 return Ok(());
             }
-            let after = Clip {
-                asset_out: c.asset_in + source_span(&c, remainder),
-                ..c.clone()
-            };
+            let after = c.split_left_at(remainder, c.duration());
             absorbed.push(format!("trimmed clip #{}", c.id));
             ops.push(EditOp::Replace {
                 track: ti,

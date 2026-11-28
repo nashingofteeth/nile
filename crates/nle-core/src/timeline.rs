@@ -879,7 +879,9 @@ impl Clip {
     ///
     /// `duration` is the *pre-cut* clip duration: callers have already
     /// adjusted `asset_in`, so `self.duration()` alone is too short and would
-    /// compress a pass that ended at the old end.
+    /// compress a pass that ended at the old end. The explicit argument is
+    /// intentional, not a compatibility shim: pre-cut sampling is a
+    /// compile-time obligation at every call site.
     pub fn rebase_crop_keys(&mut self, removed: Seconds, duration: Seconds) {
         if removed == Seconds::from_integer(0) {
             return;
@@ -916,7 +918,14 @@ impl Clip {
     /// the same window the right half re-bases to; keys after the cut are then
     /// dropped. Without the endpoint the final pass would hold the previous
     /// key and pop at the seam.
+    ///
+    /// The explicit `duration` is intentional, not a compatibility shim:
+    /// every caller must say which length the cut was sampled from, or a pass
+    /// that ended at the old tail is compressed into the new one.
     pub fn truncate_crop_keys(&mut self, at: Seconds, duration: Seconds) {
+        if at <= Seconds::from_integer(0) {
+            return; // no left half to keep: do not collapse a head ramp at 0
+        }
         for effect in &mut self.effects {
             let Effect::Crop { keys, .. } = effect else {
                 continue;
@@ -944,6 +953,31 @@ impl Clip {
             keys.retain(|key| key.at <= at);
             keys.sort_by_key(|key| key.at);
         }
+    }
+
+    /// The left half of a cut at clip-relative `cut`: same id and effects,
+    /// source span `[asset_in, source_at(cut))`, crop tail cut with the
+    /// pre-cut `duration`. One helper so paste/insert/split cannot leave the
+    /// left half stretching its last pass.
+    pub(crate) fn split_left_at(&self, cut: Seconds, duration: Seconds) -> Clip {
+        let mut left = Clip {
+            asset_out: self.source_at(cut),
+            ..self.clone()
+        };
+        left.truncate_crop_keys(cut, duration);
+        left
+    }
+
+    /// The right half of a cut at clip-relative `cut`: same id and effects,
+    /// source span `[source_at(cut), asset_out)`, crop re-based onto the cut.
+    /// Callers that need a fresh id overwrite it after cloning.
+    pub(crate) fn split_right_at(&self, cut: Seconds, duration: Seconds) -> Clip {
+        let mut right = Clip {
+            asset_in: self.source_at(cut),
+            ..self.clone()
+        };
+        right.rebase_crop_keys(cut, duration);
+        right
     }
 
     /// Scale key offsets after a retime. `ratio` is old duration / new
@@ -1791,6 +1825,25 @@ mod tests {
             passes
                 .iter()
                 .all(|pass| pass.start >= Seconds::from_integer(0))
+        );
+    }
+
+    #[test]
+    fn truncating_at_zero_keeps_a_head_ramp() {
+        let effect = crop_effect(
+            (0.0, 0.0, 100.0, 100.0),
+            vec![
+                crop_key(1, 10.0, 20.0, 50.0, 40.0),
+                crop_key(2, 30.0, 20.0, 40.0, 40.0),
+            ],
+        );
+        let mut clip = Clip::new(1, 1, Seconds::from_integer(0), Seconds::from_integer(3));
+        clip.effects = vec![effect.clone()];
+        clip.truncate_crop_keys(Seconds::from_integer(0), Seconds::from_integer(3));
+        assert_eq!(
+            clip.effects,
+            vec![effect],
+            "a zero cut has no left half: the head ramp survives"
         );
     }
 
