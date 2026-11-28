@@ -1,15 +1,18 @@
-//! `nile job ls|show|cancel|rm|prune|submit`: the durable queue on `nile serve`.
+//! `nile job ls|show|cancel|rm|prune|submit|batch`: the durable queue on
+//! `nile serve`.
 //!
 //! Unlike `nile export` (synchronous, file-based), a job is submitted to the
 //! running server, which snapshots the project and renders it in the
 //! background. These commands never open the project directly: with no server
-//! there is no queue to talk to, so the error says to start one.
+//! there is no queue to talk to, so the error says to start one. `batch` adds
+//! no wire method: it is a client-side loop over `job.submit`, which refuses
+//! an output a live job owns.
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use nle_core::jobs::{ExportPreset, JobExport, JobRecord};
 use nle_protocol::Client;
@@ -82,7 +85,7 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
         } => {
             let hello = client.hello().map_err(anyhow::Error::msg)?;
             let sequence = sequence.unwrap_or(hello.active);
-            let output = absolute_output(output)?;
+            let output = absolute_path(output)?;
             let export = JobExport {
                 preset: preset_of(*preset),
                 crf: *crf,
@@ -98,13 +101,204 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
                 job.output.display()
             );
         }
+        JobCmd::Batch {
+            output_dir,
+            sequence,
+            preset,
+            crf,
+            encoder_preset,
+        } => {
+            // Read the revision once: `job.submit` is not a model write, so
+            // every submit in the batch uses the same CAS token. A concurrent
+            // edit makes a later submit refuse instead of mixing revisions.
+            let hello = client.hello().map_err(anyhow::Error::msg)?;
+            let listed = client.sequences().map_err(anyhow::Error::msg)?;
+            let available: Vec<u32> = listed.sequences.iter().map(|item| item.id).collect();
+            let picked = select_sequences(&available, sequence)?;
+            if picked.is_empty() {
+                bail!("no sequences to render");
+            }
+            let dir = absolute_path(output_dir)?;
+            // Refuse before creating anything: a bad selection or an existing
+            // file must not leave a directory (or half a batch) behind.
+            let plan = plan_outputs(&dir, &picked)?;
+            let created = create_output_dir(&dir)?;
+            let export = JobExport {
+                preset: preset_of(*preset),
+                crf: *crf,
+                encoder_preset: encoder_preset.clone(),
+            };
+            let mut queued: Vec<u64> = Vec::new();
+            for (sequence, output) in plan {
+                match client.submit_job(hello.revision, output, sequence, export.clone()) {
+                    Ok(job) => {
+                        say!(
+                            "queued job #{} for sequence #{} → {}",
+                            job.id,
+                            job.sequence,
+                            job.output.display()
+                        );
+                        queued.push(job.id);
+                    }
+                    Err(error) => {
+                        // The server may refuse a path a live job owns even
+                        // though our `exists()` plan passed. If nothing was
+                        // queued, do not leave the components this batch made.
+                        if queued.is_empty() {
+                            discard_created_dirs(&created);
+                        }
+                        return Err(batch_submit_error(
+                            anyhow::Error::msg(error),
+                            sequence,
+                            &queued,
+                        ));
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
 
-/// The server's cwd differs from the client's, so a relative output would
-/// name a different file than the user meant. Resolve it here.
-fn absolute_output(output: &Path) -> Result<PathBuf> {
+/// Resolve a batch's sequence ids. Explicit ids keep the command-line order,
+/// so job ids follow the user's intent; no ids means the server's listing
+/// order. Duplicates and unknown ids are refused here, before any submit or
+/// output-directory side effect.
+fn select_sequences(available: &[u32], chosen: &[u32]) -> Result<Vec<u32>> {
+    if chosen.is_empty() {
+        return Ok(available.to_vec());
+    }
+    let mut picked = Vec::with_capacity(chosen.len());
+    for &id in chosen {
+        if picked.contains(&id) {
+            bail!("sequence #{id} was given more than once");
+        }
+        if !available.contains(&id) {
+            bail!(
+                "no sequence #{id} in this project (have: {})",
+                id_list(available)
+            );
+        }
+        picked.push(id);
+    }
+    Ok(picked)
+}
+
+/// One deterministic name per sequence. Ids are unique and stable; display
+/// names are not (spaces, slashes, renames), so this never needs sanitizing.
+fn batch_name(sequence: u32) -> String {
+    format!("sequence-{sequence}.mp4")
+}
+
+/// Resolve every target before the first submit. Checking all of them up front
+/// means an existing file refuses the whole batch rather than a half-queued
+/// one.
+fn plan_outputs(dir: &Path, sequences: &[u32]) -> Result<Vec<(u32, PathBuf)>> {
+    let mut plan = Vec::with_capacity(sequences.len());
+    for &sequence in sequences {
+        let output = dir.join(batch_name(sequence));
+        if output.exists() {
+            bail!(
+                "{} already exists; the batch refuses to overwrite a render",
+                output.display()
+            );
+        }
+        plan.push((sequence, output));
+    }
+    Ok(plan)
+}
+
+/// Create `dir` and its missing ancestors one component at a time, returning
+/// the components this call created (outermost first). `create_dir_all`
+/// cannot tell "I made it" from "someone else already had it", so a caller
+/// that may need to undo its work must own exactly these components.
+fn create_output_dir(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut current = dir;
+    loop {
+        match std::fs::metadata(current) {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    bail!("{} exists and is not a directory", current.display());
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(current.to_path_buf());
+                match current.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => current = parent,
+                    _ => break,
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect the output directory {}", current.display())
+                });
+            }
+        }
+    }
+    missing.reverse();
+
+    let mut created: Vec<PathBuf> = Vec::with_capacity(missing.len());
+    for path in missing {
+        match std::fs::create_dir(&path) {
+            Ok(()) => created.push(path),
+            // Another process won this component between the scan and the
+            // create; it is not ours to remove.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !path.is_dir() {
+                    discard_created_dirs(&created);
+                    bail!("{} exists and is not a directory", path.display());
+                }
+            }
+            Err(error) => {
+                discard_created_dirs(&created);
+                return Err(error)
+                    .with_context(|| format!("create the output directory {}", path.display()));
+            }
+        }
+    }
+    Ok(created)
+}
+
+/// Remove directories this batch created, innermost first. `remove_dir`
+/// refuses a non-empty tree, so a directory another writer filled is left
+/// alone; the submit error stays the one reported, so a cleanup failure is
+/// ignored.
+fn discard_created_dirs(created: &[PathBuf]) {
+    for dir in created.iter().rev() {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// A failed batch submit: always names the sequence, and names the jobs
+/// already queued so a partial batch is actionable.
+fn batch_submit_error(error: anyhow::Error, sequence: u32, queued: &[u64]) -> anyhow::Error {
+    let error = error.context(format!("submit sequence #{sequence}"));
+    if queued.is_empty() {
+        error
+    } else {
+        error.context(format!(
+            "queued {} job(s) before the batch failed: {}",
+            queued.len(),
+            id_list(queued)
+        ))
+    }
+}
+
+fn id_list<T: std::fmt::Display>(ids: &[T]) -> String {
+    if ids.is_empty() {
+        return "none".to_string();
+    }
+    ids.iter()
+        .map(|id| format!("#{id}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The server's cwd differs from the client's, so a relative path would name
+/// a different file (or batch directory) than the user meant. Resolve it here.
+fn absolute_path(output: &Path) -> Result<PathBuf> {
     let output = crate::cmd::import::expand_tilde(output);
     if output.is_absolute() {
         return Ok(output);
@@ -136,4 +330,134 @@ fn job_line(job: &JobRecord) -> String {
         line.push_str(&format!("  — {error}"));
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_selection_defaults_to_the_listing_order() {
+        assert_eq!(
+            select_sequences(&[3, 1, 2], &[]).expect("default"),
+            [3, 1, 2]
+        );
+    }
+
+    #[test]
+    fn batch_selection_keeps_the_requested_order() {
+        assert_eq!(
+            select_sequences(&[1, 2, 3], &[3, 1]).expect("explicit"),
+            [3, 1]
+        );
+    }
+
+    #[test]
+    fn batch_selection_refuses_duplicates_and_unknown_ids() {
+        let duplicate = select_sequences(&[1, 2], &[2, 2])
+            .expect_err("duplicate")
+            .to_string();
+        assert!(
+            duplicate.contains("sequence #2") && duplicate.contains("more than once"),
+            "{duplicate}"
+        );
+
+        let unknown = select_sequences(&[1, 2], &[9])
+            .expect_err("unknown")
+            .to_string();
+        assert!(unknown.contains("no sequence #9"), "{unknown}");
+        assert!(unknown.contains("#1, #2"), "{unknown}");
+    }
+
+    #[test]
+    fn batch_plan_names_outputs_in_selection_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = plan_outputs(dir.path(), &[4, 2]).expect("plan");
+        assert_eq!(
+            plan,
+            vec![
+                (4, dir.path().join("sequence-4.mp4")),
+                (2, dir.path().join("sequence-2.mp4")),
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_plan_refuses_an_existing_output_without_writing() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let dir = parent.path().join("renders");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::write(dir.join("sequence-2.mp4"), b"an old render").expect("write");
+
+        let error = plan_outputs(&dir, &[1, 2])
+            .expect_err("existing file")
+            .to_string();
+        assert!(error.contains("sequence-2.mp4"), "{error}");
+        assert_eq!(
+            std::fs::read(dir.join("sequence-2.mp4")).expect("read"),
+            b"an old render",
+            "the existing file is untouched"
+        );
+        assert!(
+            !dir.join("sequence-1.mp4").exists(),
+            "the plan writes nothing"
+        );
+    }
+
+    #[test]
+    fn created_batch_directories_are_removed_in_reverse_and_never_beyond_them() {
+        let parent = tempfile::tempdir().expect("tempdir");
+
+        // A deep missing path: every component is ours, so all go.
+        let deep = parent.path().join("a").join("b").join("c");
+        let created = create_output_dir(&deep).expect("create deep");
+        assert_eq!(
+            created,
+            vec![
+                parent.path().join("a"),
+                parent.path().join("a").join("b"),
+                deep.clone()
+            ]
+        );
+        assert!(deep.is_dir());
+        discard_created_dirs(&created);
+        assert!(!parent.path().join("a").exists(), "the whole chain goes");
+
+        // An existing prefix is not ours; only the missing suffix is undone.
+        let existing = parent.path().join("existing");
+        std::fs::create_dir(&existing).expect("mkdir");
+        let deeper = existing.join("x").join("y");
+        let created = create_output_dir(&deeper).expect("create under existing");
+        assert_eq!(created, vec![existing.join("x"), deeper.clone()]);
+        discard_created_dirs(&created);
+        assert!(existing.is_dir(), "the pre-existing directory stays");
+        assert!(!existing.join("x").exists(), "our suffix goes");
+
+        // A created directory another writer filled is left alone.
+        let occupied = parent.path().join("occupied");
+        let created = create_output_dir(&occupied).expect("create occupied");
+        std::fs::write(occupied.join("sequence-1.mp4"), b"a render").expect("write");
+        discard_created_dirs(&created);
+        assert!(
+            occupied.join("sequence-1.mp4").exists(),
+            "a non-empty directory is not removed"
+        );
+    }
+
+    #[test]
+    fn a_partial_batch_names_the_sequence_and_the_jobs_already_queued() {
+        let error = batch_submit_error(anyhow::anyhow!("job #7 is rendering to x"), 1, &[8]);
+        let text = format!("{error:#}");
+        assert!(text.contains("submit sequence #1"), "{text}");
+        assert!(
+            text.contains("queued 1 job(s) before the batch failed: #8"),
+            "{text}"
+        );
+        assert!(text.contains("job #7"), "{text}");
+
+        let first = batch_submit_error(anyhow::anyhow!("boom"), 2, &[]);
+        let text = format!("{first:#}");
+        assert!(text.contains("submit sequence #2"), "{text}");
+        assert!(!text.contains("before the batch failed"), "{text}");
+    }
 }

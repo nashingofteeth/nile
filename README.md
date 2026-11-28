@@ -493,6 +493,7 @@ nile bench [--runs N] [--preset preview|balanced|max] [--parallel N]
 
 ```sh
 nile job submit -o final.mp4 [--sequence N] [--preset balanced] [--crf 22]
+nile job batch --output-dir renders/ [--sequence 2 --sequence 1] [--preset balanced]
 nile job ls                                # id, state, progress, output
 nile job show 1                            # the full record as JSON
 nile job cancel 1                          # drop queued or kill the render
@@ -522,6 +523,26 @@ then the command exits nonzero. A server start also removes hidden render temps
 terminal record names; a queued or running temp is live and is left alone. Job
 ids are never recycled, even after a prune: `jobs/.next-id` is the high-water
 mark and is advanced on removal too.
+
+`nile job batch --output-dir DIR [--sequence ID]...` queues one job per
+sequence into `DIR`: with no `--sequence` it takes every sequence, otherwise
+the given ids in that order. Each output is named `sequence-<id>.mp4`.
+Duplicate ids, unknown ids and an existing file refuse the batch before any
+job is submitted; a bad selection or an existing file also leaves no new
+directory. `job.submit` refuses an output another **non-terminal** job owns
+(`-32602`, naming that job), comparing a canonical parent plus the file name,
+so `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` are one deliverable,
+and two overlapping batches cannot both claim it even when both passed their
+own existence check. A finished job's existing file is not newly claimed:
+terminal-file overwrite is a separate open item. If a submit fails before
+anything was queued, the batch removes exactly the directory components it
+created (innermost first, and only while empty; pre-existing parents stay).
+Every submit uses the revision read at the start (`job.submit` is not a model
+write), so a concurrent edit makes the remaining submits refuse instead of
+mixing revisions. The queued lines print the job id, sequence and output; a
+mid-batch failure names the jobs already queued and exits nonzero. There is no
+new wire method: the loop is a client-side sequence of `job.submit`, which now
+refuses an output a live job owns.
 
 ### One-shot tools and logging
 
