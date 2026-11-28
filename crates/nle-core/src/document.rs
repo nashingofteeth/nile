@@ -385,7 +385,7 @@ impl Document {
         path: std::path::PathBuf,
         report: crate::media::RawProbe,
         playhead: i64,
-    ) -> (u32, String) {
+    ) -> Result<(u32, String), EditError> {
         let active = self.project.active_id();
         self.histories
             .get_mut(active)
@@ -397,7 +397,7 @@ impl Document {
         &mut self,
         assets: Vec<(std::path::PathBuf, crate::media::RawProbe)>,
         playhead: i64,
-    ) -> Vec<u32> {
+    ) -> Result<Vec<u32>, EditError> {
         let active = self.project.active_id();
         self.histories
             .get_mut(active)
@@ -482,7 +482,7 @@ impl Document {
         let ids = self
             .histories
             .get_mut(active)
-            .add_assets(&mut self.project, assets, playhead);
+            .add_assets(&mut self.project, assets, playhead)?;
         let parts = self.project.group_parts(&files)?;
         let group =
             self.histories
@@ -603,7 +603,9 @@ mod tests {
     fn document() -> Document {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        let (asset, _) = p.add_asset("/media/red.mp4".into(), probe("4"));
+        let (asset, _) = p
+            .add_asset("/media/red.mp4".into(), probe("4"))
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
             id: 1,
             asset,
@@ -932,7 +934,9 @@ mod tests {
             "pool and timeline are restored"
         );
         // The batch is closed, so later writes still record.
-        let ids = doc.add_assets(vec![("/media/b.mp4".into(), probe("3"))], 0);
+        let ids = doc
+            .add_assets(vec![("/media/b.mp4".into(), probe("3"))], 0)
+            .expect("assets");
         assert_eq!(ids.len(), 1);
         assert_eq!(doc.depth(), depth + 1);
         doc.undo().expect("undo the later batch");
@@ -963,6 +967,59 @@ mod tests {
             without_revision(&before),
             "the asset batch is rolled back with the group"
         );
+    }
+
+    #[test]
+    fn add_assets_rolls_back_and_records_nothing_on_id_exhaustion() {
+        let last = u32::MAX - 1;
+        let mut project = Project::new();
+        project
+            .add_asset("/media/a.mp4".into(), probe("5"))
+            .expect("asset");
+        project.media[0].id = last - 1;
+        let mut doc = Document::new(project);
+        let before = doc.project.media.clone();
+        let revision = doc.revision();
+        let err = doc
+            .add_assets(
+                vec![
+                    ("/media/b.mp4".into(), probe("5")),
+                    ("/media/c.mp4".into(), probe("5")),
+                ],
+                0,
+            )
+            .expect_err("the second asset would take the reserved id");
+        assert!(matches!(
+            err,
+            EditError::Project(ProjectError::IdExhausted("asset", id)) if id == last
+        ));
+        assert_eq!(doc.project.media, before, "the batch is rolled back");
+        assert_eq!(doc.depth(), 0, "no history entry survives");
+        assert_eq!(
+            doc.revision(),
+            revision,
+            "a refused batch is not a model write"
+        );
+    }
+
+    #[test]
+    fn add_asset_refuses_without_recording_at_the_last_legal_id() {
+        let last = u32::MAX - 1;
+        let mut project = Project::new();
+        project
+            .add_asset("/media/a.mp4".into(), probe("5"))
+            .expect("asset");
+        project.media[0].id = last;
+        let mut doc = Document::new(project);
+        let before = doc.project.media.clone();
+        let revision = doc.revision();
+        assert!(matches!(
+            doc.add_asset("/media/b.mp4".into(), probe("5"), 0),
+            Err(EditError::Project(ProjectError::IdExhausted("asset", id))) if id == last
+        ));
+        assert_eq!(doc.project.media, before);
+        assert_eq!(doc.depth(), 0);
+        assert_eq!(doc.revision(), revision);
     }
 
     #[test]
@@ -1171,7 +1228,9 @@ mod tests {
 
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        let (asset, _) = p.add_asset("/media/red.mp4".into(), probe("4"));
+        let (asset, _) = p
+            .add_asset("/media/red.mp4".into(), probe("4"))
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
             id: 7,
             asset,
@@ -1309,7 +1368,8 @@ mod tests {
         let mut doc = document();
         let second = second_sequence(&mut doc);
         doc.select_sequence(1).unwrap();
-        doc.add_asset("/media/extra.mp4".into(), probe("2"), 0);
+        doc.add_asset("/media/extra.mp4".into(), probe("2"), 0)
+            .expect("asset");
         assert_eq!(doc.depth(), 1);
         doc.select_sequence(second).unwrap();
         assert_eq!(doc.depth(), 0, "the pool entry stayed with sequence 1");
@@ -1412,12 +1472,15 @@ mod tests {
             let mut doc = document();
             let active = doc.project.active_id();
             for i in 0..start {
-                doc.histories.get_mut(active).add_asset(
-                    &mut doc.project,
-                    format!("/media/{i}.mp4").into(),
-                    probe("2"),
-                    0,
-                );
+                doc.histories
+                    .get_mut(active)
+                    .add_asset(
+                        &mut doc.project,
+                        format!("/media/{i}.mp4").into(),
+                        probe("2"),
+                        0,
+                    )
+                    .expect("asset");
             }
             assert_eq!(doc.depth(), start);
 
@@ -1492,7 +1555,8 @@ mod tests {
         assert_eq!(Project::load(&path).unwrap().revision, doc.revision());
 
         let before_asset = doc.revision();
-        doc.add_asset("/media/extra.mp4".into(), probe("2"), 0);
+        doc.add_asset("/media/extra.mp4".into(), probe("2"), 0)
+            .expect("asset");
         assert_eq!(doc.revision(), before_asset + 1, "a pool add bumps");
     }
 

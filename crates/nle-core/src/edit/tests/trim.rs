@@ -247,7 +247,9 @@ fn o_on_trailing_gap_shortens_the_tail() {
 fn i_on_leading_gap_shortens_from_the_front() {
     let mut p = Project::new();
     p.fps = Some(Seconds::new(30, 1));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![
         Segment::Gap(Gap {
             duration: Seconds::from_integer(2),
@@ -382,7 +384,9 @@ fn edge_trims_at_a_shared_cut_consume_the_two_neighbours() {
     let shared_cut = || {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_report("10"))
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![
             Segment::Gap(Gap {
                 duration: Seconds::from_integer(1),

@@ -1892,7 +1892,9 @@ mod tests {
             ("c.mp4", false),
             ("d.mp4", true),
         ] {
-            project.add_asset(format!("/media/{name}").into(), probe(audio));
+            project
+                .add_asset(format!("/media/{name}").into(), probe(audio))
+                .expect("asset");
         }
         project
     }

@@ -919,15 +919,11 @@ pub fn remove_span_on(
 
 /// Take the next segment id from a shared counter.
 ///
-/// `Some(id)` is the next free id; `None` records that the last take spent
-/// `u32::MAX`, so there is no successor and reusing the max id would alias two
-/// clips. The batch is refused before anything is applied.
+/// Delegates to [`Project::take_clip_id`]: `u32::MAX` is reserved, so spending
+/// `u32::MAX - 1` leaves `None` and a second allocation refuses instead of
+/// aliasing the last id. The batch is refused before anything is applied.
 fn take_id(next: &mut Option<u32>) -> Result<u32, EditError> {
-    let id = next
-        .take()
-        .ok_or(ProjectError::IdExhausted("clip", u32::MAX))?;
-    *next = id.checked_add(1);
-    Ok(id)
+    Ok(Project::take_clip_id(next)?)
 }
 
 /// Split one segment at a timeline offset. Transitions cannot be split; the

@@ -277,7 +277,7 @@ pub(crate) fn stage_clip(
             if let Some(reason) = wrong_kind(&canonical, &report, kind) {
                 bail!("{reason}");
             }
-            let (id, _) = doc.add_asset(canonical, report, playhead);
+            let (id, _) = doc.add_asset(canonical, report, playhead)?;
             (id, true)
         }
     };

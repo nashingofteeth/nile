@@ -433,7 +433,9 @@ mod tests {
             height: 240,
         });
         for name in ["a.mp4", "b.mp4", "c.mp4", "d.mp4"] {
-            project.add_asset(format!("/media/{name}").into(), probe());
+            project
+                .add_asset(format!("/media/{name}").into(), probe())
+                .expect("asset");
         }
         project.timeline.tracks = tracks;
         project

@@ -374,6 +374,24 @@ fn track_rm_deletes_a_nonempty_track_with_its_clips() {
         std::process::id()
     ));
     let mut p = asset_project();
+    let audio_probe = RawProbe {
+        streams: vec![RawStream {
+            index: 0,
+            codec_type: Some("audio".into()),
+            codec_name: Some("aac".into()),
+            sample_rate: Some("48000".into()),
+            channels: Some(2),
+            ..Default::default()
+        }],
+        format: RawFormat {
+            format_name: "m4a".into(),
+            duration: Some("10".into()),
+            ..Default::default()
+        },
+    };
+    let (audio, _) = p
+        .add_asset("/media/mic.m4a".into(), audio_probe)
+        .expect("audio asset");
     let ai = p.timeline.add_track(TrackKind::Audio);
     p.timeline
         .track_mut(ai)
@@ -381,7 +399,7 @@ fn track_rm_deletes_a_nonempty_track_with_its_clips() {
         .segments
         .push(TimelineSegment::Clip(nle_core::Clip::new(
             9,
-            1,
+            audio,
             Seconds::from_integer(0),
             Seconds::from_integer(2),
         )));

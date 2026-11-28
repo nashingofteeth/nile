@@ -596,7 +596,8 @@ fn non_reanchoring_actions_leave_the_playhead_put() {
             .project
             .document_mut()
             .expect("direct test session")
-            .add_asset("/media/spare.mp4".into(), probe, 0);
+            .add_asset("/media/spare.mp4".into(), probe, 0)
+            .expect("asset");
         Action::AssetRm { id }
     }
     fn seeded_annotation(app: &mut App) -> u32 {

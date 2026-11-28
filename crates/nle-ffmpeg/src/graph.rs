@@ -1254,10 +1254,12 @@ mod tests {
             width: 320,
             height: 180,
         });
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("4", 320, 180, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("4", 320, 180, "30/1", false),
+            )
+            .expect("asset");
         let mut clip = Clip::new(1, asset, Seconds::from_integer(0), Seconds::from_integer(2));
         clip.effects = vec![
             Effect::Crop {
@@ -1294,10 +1296,12 @@ mod tests {
             width: 320,
             height: 180,
         });
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("4", 320, 180, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("4", 320, 180, "30/1", false),
+            )
+            .expect("asset");
         let keys = vec![
             CropKey {
                 at: Seconds::from_integer(0),
@@ -1374,11 +1378,15 @@ mod tests {
             width: 1920,
             height: 1080,
         });
-        let (a0, _) = p.add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
-        let (a1, _) = p.add_asset(
-            "b.mp4".into(),
-            probe_report("8", 1280, 720, "30000/1001", false),
-        );
+        let (a0, _) = p
+            .add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true))
+            .expect("asset");
+        let (a1, _) = p
+            .add_asset(
+                "b.mp4".into(),
+                probe_report("8", 1280, 720, "30000/1001", false),
+            )
+            .expect("asset");
         let track = p.timeline.video_track_mut().unwrap();
         track.segments = vec![
             Segment::Clip(Clip {
@@ -1473,10 +1481,12 @@ mod tests {
             width: 1920,
             height: 1080,
         });
-        let (a, _) = p.add_asset(
-            "a.mp4".into(),
-            probe_report("10", 1920, 1080, "30000/1001", true),
-        );
+        let (a, _) = p
+            .add_asset(
+                "a.mp4".into(),
+                probe_report("10", 1920, 1080, "30000/1001", true),
+            )
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
             id: 1,
             asset: a,
@@ -1505,10 +1515,12 @@ mod tests {
             width: 1920,
             height: 1080,
         });
-        let (a, _) = p.add_asset(
-            "a.mp4".into(),
-            probe_report("10", 1920, 1080, "60000/1001", true),
-        );
+        let (a, _) = p
+            .add_asset(
+                "a.mp4".into(),
+                probe_report("10", 1920, 1080, "60000/1001", true),
+            )
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
             id: 1,
             asset: a,

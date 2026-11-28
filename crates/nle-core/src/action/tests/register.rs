@@ -12,7 +12,9 @@ fn a_register_from_another_project_resolves_or_refuses() {
     // The same file pooled here under a different id (asset 1 is
     // red.mp4 in the fixture): the register resolves by path.
     let mut other = p.clone();
-    let (spare, _) = other.add_asset("/media/spare.mp4".into(), probe_report("5"));
+    let (spare, _) = other
+        .add_asset("/media/spare.mp4".into(), probe_report("5"))
+        .expect("asset");
     let reg = Register::of(
         &other,
         Segment::Clip(Clip {
@@ -36,7 +38,9 @@ fn a_register_from_another_project_resolves_or_refuses() {
 
     // A file this project *does* pool (under a different id) remaps.
     let mut here = p.clone();
-    let (id, _) = here.add_asset("/media/other/red.mp4".into(), probe_report("10"));
+    let (id, _) = here
+        .add_asset("/media/other/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let entry = RegisterEntry {
         segment: Segment::Clip(Clip {
             id: 7,

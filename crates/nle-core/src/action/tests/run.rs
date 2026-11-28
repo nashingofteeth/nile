@@ -343,7 +343,9 @@ fn a_ripple_insert_shifts_every_track() {
 fn sync_pair() -> (Project, usize) {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let clip = |id, ain: i64, aout: i64| {
         Segment::Clip(Clip {
             id,
@@ -1285,7 +1287,9 @@ fn a_length_change_on_an_overlay_stays_local() {
 fn a_transition_boundary_skips_sync_with_a_notice() {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let clip = |id, ain: i64, aout: i64| {
         Segment::Clip(Clip {
             id,

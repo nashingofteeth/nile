@@ -695,7 +695,9 @@ fn a_zoomed_timeline_draws_only_the_visible_window() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     let mut p = asset_project();
-    let (blue, _) = p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+    let (blue, _) = p
+        .add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone())
+        .expect("asset");
     if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[0].segments[2] {
         c.asset = blue;
     }
@@ -818,7 +820,8 @@ fn pool_list_scrolls_to_keep_the_selection_visible() {
     let mut p = asset_project();
     let probe = p.asset(1).unwrap().probe.clone();
     for i in 2..=20 {
-        p.add_asset(format!("/media/a{i}.mp4").into(), probe.clone());
+        p.add_asset(format!("/media/a{i}.mp4").into(), probe.clone())
+            .expect("asset");
     }
     let mut app = App::new(p, temp_project_path("t"));
     open_pool_mode(&mut app, 19); // the last asset, far past a short pane
@@ -941,7 +944,8 @@ fn pool_strip_replaces_the_timeline_while_the_pool_is_open() {
     use ratatui::backend::TestBackend;
     let mut p = asset_project();
     let probe = p.asset(1).unwrap().probe.clone(); // 10 s, 30 fps
-    p.add_asset("/media/pooled.mp4".into(), probe);
+    p.add_asset("/media/pooled.mp4".into(), probe)
+        .expect("asset");
     let mut app = App::new(p, temp_project_path("t"));
     open_pool_mode(&mut app, 1); // index 1, id 2 (not the first asset)
     set_pool_pos(&mut app, 5.0); // halfway through the 10 s asset
@@ -1071,7 +1075,8 @@ fn media_pool_renders() {
     use ratatui::backend::TestBackend;
     let mut p = asset_project();
     // A second asset so list index (1) differs from asset id (2).
-    p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+    p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone())
+        .expect("asset");
     let mut app = App::new(p, temp_project_path("t"));
     open_pool_mode(&mut app, 1); // second row
 

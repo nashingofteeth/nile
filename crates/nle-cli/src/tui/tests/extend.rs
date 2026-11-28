@@ -410,7 +410,7 @@ fn extend_to_material_end_lands_on_grid() {
             ..Default::default()
         },
     };
-    let (a, _) = p.add_asset("/media/blue.mp4".into(), probe);
+    let (a, _) = p.add_asset("/media/blue.mp4".into(), probe).expect("asset");
     p.timeline.video_track_mut().unwrap().segments = vec![
         TimelineSegment::Clip(nle_core::Clip {
             id: 1,

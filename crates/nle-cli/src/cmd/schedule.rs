@@ -602,7 +602,9 @@ mod tests {
             width: 320,
             height: 180,
         });
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe());
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe())
+            .expect("asset");
         p.timeline.tracks = vec![Track {
             kind: TrackKind::Video,
             muted: false,
@@ -944,7 +946,9 @@ mod tests {
         let mut p = project();
         let mut probe24 = probe();
         probe24.streams[0].r_frame_rate = Some("24/1".into());
-        let (b, _) = p.add_asset("/media/blue.mp4".into(), probe24);
+        let (b, _) = p
+            .add_asset("/media/blue.mp4".into(), probe24)
+            .expect("asset");
         p.timeline.tracks.push(Track {
             kind: TrackKind::Video,
             muted: false,

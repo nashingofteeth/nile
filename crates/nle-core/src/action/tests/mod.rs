@@ -55,7 +55,9 @@ fn probe_report(duration: &str) -> RawProbe {
 fn fixture() -> Project {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("10"))
+        .expect("asset");
     let seg = |id: u32, in_s: i64, out_s: i64| {
         Segment::Clip(Clip {
             id,

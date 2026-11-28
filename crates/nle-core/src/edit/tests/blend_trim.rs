@@ -169,7 +169,9 @@ fn a_trim_beside_a_blend_grows_it() {
     let blend_with_handles = || {
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_report("10"))
+            .expect("asset");
         let clip = |id, in_, out| {
             Segment::Clip(Clip {
                 id,
@@ -530,7 +532,9 @@ fn speed_retimes_the_transition_sides_it_owns() {
 fn speed_retimes_a_clip_between_two_transitions() {
     let mut p = Project::new();
     p.fps = Some(Seconds::from_integer(30));
-    let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("30"));
+    let (a, _) = p
+        .add_asset("/media/red.mp4".into(), probe_report("30"))
+        .expect("asset");
     let clip = |id, in_, out| {
         Segment::Clip(Clip {
             id,

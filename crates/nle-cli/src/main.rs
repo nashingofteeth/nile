@@ -2120,10 +2120,12 @@ mod tests {
     fn show_report_names_a_clips_effects() {
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset(
-            "/media/red.mp4".into(),
-            nle_core::media::RawProbe::default(),
-        );
+        let (a, _) = p
+            .add_asset(
+                "/media/red.mp4".into(),
+                nle_core::media::RawProbe::default(),
+            )
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
             id: 1,
             asset: a,
@@ -2386,7 +2388,9 @@ mod tests {
         let path = dir.join("p.json");
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset(PathBuf::from("/media/red.mp4"), RawProbe::default());
+        let (a, _) = p
+            .add_asset(PathBuf::from("/media/red.mp4"), RawProbe::default())
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
             a,
@@ -2419,7 +2423,9 @@ mod tests {
         let path = dir.join("p.json");
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset(PathBuf::from("/media/red.mp4"), RawProbe::default());
+        let (a, _) = p
+            .add_asset(PathBuf::from("/media/red.mp4"), RawProbe::default())
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
             a,
@@ -2507,7 +2513,9 @@ mod tests {
     fn pool(names: &[&str]) -> Project {
         let mut p = Project::new();
         for n in names {
-            let (_, _) = p.add_asset(PathBuf::from(n), RawProbe::default());
+            let (_, _) = p
+                .add_asset(PathBuf::from(n), RawProbe::default())
+                .expect("asset");
         }
         p
     }

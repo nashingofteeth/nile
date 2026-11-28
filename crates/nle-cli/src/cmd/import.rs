@@ -16,7 +16,7 @@ use nle_core::timeline::{Segment, Timeline, TrackKind};
 use nle_core::{Document, Project, VideoSettings, frame_of};
 use nle_ffmpeg::probe;
 
-use super::detect::{append_spans, next_clip_id};
+use super::detect::append_spans;
 use super::project::{save_and_reset_history, secs_f64};
 use super::{CommandReport, asset_summary};
 use crate::{parse_fps_arg, say};
@@ -77,7 +77,7 @@ pub(crate) fn cmd_import(
         let (ids, group_id) = doc.add_assets_with_group(fresh, playhead, name, files.clone())?;
         (ids, Some(group_id))
     } else {
-        (doc.add_assets(fresh, playhead), None)
+        (doc.add_assets(fresh, playhead)?, None)
     };
     for (id, path) in ids.iter().zip(&imported_paths) {
         let asset = doc.asset(*id).context("asset vanished")?;
@@ -210,7 +210,7 @@ fn pool_group_part(project: &mut Project, path: &Path) -> Result<()> {
         return Ok(());
     }
     let report = probe(path).with_context(|| format!("probing {}", path.display()))?;
-    project.add_asset(path.to_path_buf(), report);
+    project.add_asset(path.to_path_buf(), report)?;
     Ok(())
 }
 
@@ -313,18 +313,12 @@ fn append_timeline(
     video_track: Option<usize>,
 ) -> Result<()> {
     let start = project.timeline.end();
-    let mut next_id = next_clip_id(project);
+    let mut next_id = Some(project.next_clip_id()?);
     for track in &mut incoming.tracks {
         for segment in &mut track.segments {
             match segment {
-                Segment::Clip(clip) => {
-                    clip.id = next_id;
-                    next_id += 1;
-                }
-                Segment::Transition(tr) => {
-                    tr.id = next_id;
-                    next_id += 1;
-                }
+                Segment::Clip(clip) => clip.id = Project::take_clip_id(&mut next_id)?,
+                Segment::Transition(tr) => tr.id = Project::take_clip_id(&mut next_id)?,
                 Segment::Gap(_) => {}
             }
         }
@@ -664,7 +658,7 @@ pub(crate) fn import_edl_work(args: EdlImport<'_>) -> Result<CommandReport> {
             .with_context(|| format!("{} not found", p.display()))?;
         if project.asset_by_path(&canonical).is_none() {
             let report = probe(&canonical)?;
-            project.add_asset(canonical.clone(), report);
+            project.add_asset(canonical.clone(), report)?;
         }
         Ok(canonical)
     };
@@ -814,7 +808,7 @@ pub(crate) fn pool_media_dir(project: &mut Project, dir: &Path) -> Result<(usize
         if project.asset_by_path(&canonical).is_none() {
             match probe(&canonical) {
                 Ok(report) => {
-                    project.add_asset(canonical, report);
+                    project.add_asset(canonical, report)?;
                 }
                 Err(e) => {
                     notes.push(format!("warning: skipping {} — {e}", path.display()));
@@ -973,7 +967,7 @@ pub(crate) fn import_otio_work(args: OtioImport<'_>) -> Result<CommandReport> {
                 continue;
             }
             let report = probe(&canonical)?;
-            let (id, _) = project.add_asset(canonical, report);
+            let (id, _) = project.add_asset(canonical, report)?;
             by_path.insert(c.path.clone(), id);
         }
     }
@@ -1103,8 +1097,12 @@ mod tests {
     #[test]
     fn group_parts_use_argument_order_and_cumulative_starts() {
         let mut p = Project::new();
-        let (first, _) = p.add_asset("/media/a.mp4".into(), fake_probe("2"));
-        let (second, _) = p.add_asset("/media/b.mp4".into(), fake_probe("3"));
+        let (first, _) = p
+            .add_asset("/media/a.mp4".into(), fake_probe("2"))
+            .expect("asset");
+        let (second, _) = p
+            .add_asset("/media/b.mp4".into(), fake_probe("3"))
+            .expect("asset");
         let spec: GroupSpec = "CAM 3=a.mp4,b.mp4".parse().unwrap();
         let id = add_group_parts(
             &mut p,
@@ -1124,7 +1122,8 @@ mod tests {
     #[test]
     fn group_parts_refuse_a_duplicate_part() {
         let mut p = Project::new();
-        p.add_asset("/media/a.mp4".into(), fake_probe("2"));
+        p.add_asset("/media/a.mp4".into(), fake_probe("2"))
+            .expect("asset");
         let spec: GroupSpec = "CAM 3=a.mp4,a.mp4".parse().unwrap();
         let err = add_group_parts(
             &mut p,
@@ -1139,10 +1138,11 @@ mod tests {
     #[test]
     fn group_parts_refuse_an_unknown_duration() {
         let mut p = Project::new();
-        p.add_asset("/media/a.mp4".into(), fake_probe("2"));
+        p.add_asset("/media/a.mp4".into(), fake_probe("2"))
+            .expect("asset");
         let mut nodur = fake_probe("2");
         nodur.format.duration = None;
-        p.add_asset("/media/b.webm".into(), nodur);
+        p.add_asset("/media/b.webm".into(), nodur).expect("asset");
         let spec: GroupSpec = "CAM 3=a.mp4,b.webm".parse().unwrap();
         let err = add_group_parts(
             &mut p,
@@ -1159,8 +1159,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("local.mp4"), b"").unwrap();
         let mut p = Project::new();
-        p.add_asset("/archive/pooled.mp4".into(), fake_probe("2"));
-        p.add_asset("/archive/moved.mp4".into(), fake_probe("2"));
+        p.add_asset("/archive/pooled.mp4".into(), fake_probe("2"))
+            .expect("asset");
+        p.add_asset("/archive/moved.mp4".into(), fake_probe("2"))
+            .expect("asset");
 
         let absolute = dir.path().join("local.mp4");
         assert_eq!(
@@ -1184,8 +1186,10 @@ mod tests {
     fn resolve_group_part_refuses_a_missing_or_ambiguous_name() {
         let dir = tempfile::tempdir().unwrap();
         let mut p = Project::new();
-        p.add_asset("/one/cam.mp4".into(), fake_probe("2"));
-        p.add_asset("/two/cam.mp4".into(), fake_probe("2"));
+        p.add_asset("/one/cam.mp4".into(), fake_probe("2"))
+            .expect("asset");
+        p.add_asset("/two/cam.mp4".into(), fake_probe("2"))
+            .expect("asset");
 
         let err = resolve_group_part(&p, Path::new("cam.mp4"), dir.path()).unwrap_err();
         assert!(err.to_string().contains("matches 2 pooled files"), "{err}");

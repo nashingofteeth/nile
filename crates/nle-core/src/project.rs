@@ -344,14 +344,17 @@ fn expectation_names_group(expect: &Expectation, id: u32) -> bool {
     }
 }
 
-/// The id after the highest in `ids`, or a typed refusal at `u32::MAX`.
+/// The id after the highest in `ids`, reserving `u32::MAX`.
 ///
-/// `max + 1` panics in debug and wraps to 0 in release; `checked_add` makes
-/// both profiles refuse the same way. Every id family funnels through here,
-/// so no allocator can quietly keep its own unchecked arithmetic.
+/// Legal ids are `1..=u32::MAX - 1`: `u32::MAX` is never assigned, so the
+/// last representable id is `u32::MAX - 1` and the allocator refuses once it
+/// is in use. `max + 1` would panic in debug and wrap in release;
+/// `checked_add` makes both profiles refuse the same way, and the filter keeps
+/// a successor from spilling into the reserved value.
 fn next_id(family: &'static str, ids: impl IntoIterator<Item = u32>) -> Result<u32, ProjectError> {
     let max = ids.into_iter().max().unwrap_or(0);
     max.checked_add(1)
+        .filter(|next| *next != u32::MAX)
         .ok_or(ProjectError::IdExhausted(family, max))
 }
 
@@ -584,11 +587,14 @@ impl Project {
     /// Atomic save: write a temp file in the same directory, then rename
     /// over the target. A crash mid-write can't corrupt the project.
     ///
+    /// Validates first, so the writer itself guarantees a loadable file (a
+    /// raw `Project::save` cannot be the one path around the load checks).
     /// A symlinked project is an alias, not a second project: resolve the link
     /// first so the rename updates the real file and the link survives (a
     /// rename over the link would replace the link with a regular file). The
     /// fallback keeps `init`'s not-yet-created path lexical.
     pub fn save(&self, path: &Path) -> Result<(), ProjectError> {
+        self.validate()?;
         let real = std::fs::canonicalize(path).ok();
         let path = real.as_deref().unwrap_or(path);
         let mut json = serde_json::to_string_pretty(self)?;
@@ -887,24 +893,23 @@ impl Project {
             .ok_or_else(|| ProjectError::Asset(id, "not in the media pool".into()))
     }
 
-    /// Add an asset, or return the existing one. Returns (id, was_new).
+    /// Add an asset, or return the existing one. Returns `(id, was_new)`.
     ///
-    /// This is the one allocator that keeps an infallible signature: its
-    /// callers destructure a tuple, and threading `Result` through the import
-    /// workers and ~150 tests would dwarf the fix. `Project::validate` is the
-    /// guard — it refuses any asset id at `u32::MAX`, so a loaded or
-    /// hand-edited project cannot hand the allocator a full pool. The
-    /// `expect` below is the invariant check for an in-memory pool that could
-    /// not exist anyway (2^32 assets), not a user-facing refusal.
-    pub fn add_asset(&mut self, path: PathBuf, probe: RawProbe) -> (u32, bool) {
+    /// The pool is an id family like any other: `u32::MAX` is reserved, so a
+    /// pool already holding `u32::MAX - 1` refuses a new asset with
+    /// [`ProjectError::IdExhausted`] instead of wrapping, saturating or
+    /// panicking. A path already pooled is still a successful no-op.
+    pub fn add_asset(
+        &mut self,
+        path: PathBuf,
+        probe: RawProbe,
+    ) -> Result<(u32, bool), ProjectError> {
         if let Some(a) = self.media.iter().find(|a| a.path == path) {
-            return (a.id, false);
+            return Ok((a.id, false));
         }
-        let id = self
-            .next_asset_id()
-            .expect("Project::validate refuses an asset id at u32::MAX");
+        let id = self.next_asset_id()?;
         self.media.push(Asset { id, path, probe });
-        (id, true)
+        Ok((id, true))
     }
 
     pub fn asset(&self, id: u32) -> Option<&Asset> {
@@ -1278,7 +1283,10 @@ impl Project {
         next_id("asset", self.media.iter().map(|a| a.id))
     }
 
-    pub(crate) fn next_clip_id(&self) -> Result<u32, ProjectError> {
+    /// The next free clip/transition id in the active sequence.
+    ///
+    /// `u32::MAX` is reserved, so this refuses once `u32::MAX - 1` is in use.
+    pub fn next_clip_id(&self) -> Result<u32, ProjectError> {
         next_id(
             "clip",
             self.timeline.tracks.iter().flat_map(|t| {
@@ -1289,6 +1297,20 @@ impl Project {
                 })
             }),
         )
+    }
+
+    /// Take the next clip/transition id from a shared cursor.
+    ///
+    /// `Some(id)` is the next free id; spending `u32::MAX - 1` leaves `None`
+    /// because `u32::MAX` is reserved. A `None` cursor is refused rather than
+    /// reused, so two clips can never share an id. Callers planning several
+    /// inserts against one project share the cursor.
+    pub fn take_clip_id(next: &mut Option<u32>) -> Result<u32, ProjectError> {
+        let Some(id) = next.take().filter(|id| *id != u32::MAX) else {
+            return Err(ProjectError::IdExhausted("clip", u32::MAX - 1));
+        };
+        *next = id.checked_add(1).filter(|next| *next != u32::MAX);
+        Ok(id)
     }
 }
 
@@ -1480,11 +1502,15 @@ mod tests {
 
     fn sample_project() -> Project {
         let mut p = Project::new();
-        let (a0, _) = p.add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
-        let (a1, _) = p.add_asset(
-            "b.mp4".into(),
-            probe_report("8", 1280, 720, "30000/1001", false),
-        );
+        let (a0, _) = p
+            .add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true))
+            .expect("asset");
+        let (a1, _) = p
+            .add_asset(
+                "b.mp4".into(),
+                probe_report("8", 1280, 720, "30000/1001", false),
+            )
+            .expect("asset");
         // [0..2) a.mp4 src 0..2 · [2..5) b.mp4 src 2..5
         let mut h = History::default();
         let batch = edit::paste_ripple(
@@ -1522,14 +1548,18 @@ mod tests {
     #[test]
     fn asset_dedup_by_path() {
         let mut p = Project::new();
-        let (id1, added1) = p.add_asset(
-            "/x/a.mp4".into(),
-            probe_report("10", 1920, 1080, "30/1", true),
-        );
-        let (id2, added2) = p.add_asset(
-            "/x/a.mp4".into(),
-            probe_report("10", 1920, 1080, "30/1", true),
-        );
+        let (id1, added1) = p
+            .add_asset(
+                "/x/a.mp4".into(),
+                probe_report("10", 1920, 1080, "30/1", true),
+            )
+            .expect("asset");
+        let (id2, added2) = p
+            .add_asset(
+                "/x/a.mp4".into(),
+                probe_report("10", 1920, 1080, "30/1", true),
+            )
+            .expect("asset");
         assert!(added1 && !added2);
         assert_eq!(id1, id2);
         assert_eq!(p.media.len(), 1);
@@ -1546,13 +1576,35 @@ mod tests {
         );
         assert_eq!(p.media.len(), 2);
         // Unused: an imported-but-unplaced asset removes cleanly.
-        let (id, _) = p.add_asset(
-            "/x/spare.mp4".into(),
-            probe_report("5", 320, 240, "30/1", false),
-        );
+        let (id, _) = p
+            .add_asset(
+                "/x/spare.mp4".into(),
+                probe_report("5", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         assert!(p.asset_usage(id).is_empty());
         assert!(p.remove_asset(id).is_ok());
         assert!(p.remove_asset(id).is_err(), "already gone");
+    }
+
+    #[test]
+    fn add_asset_refuses_at_the_reserved_max_and_leaves_the_pool_unchanged() {
+        let last = u32::MAX - 1;
+        let mut p = Project::new();
+        p.media.push(Asset {
+            id: last,
+            path: "/media/a.mp4".into(),
+            probe: probe_report("10", 320, 240, "30/1", false),
+        });
+        let before = p.clone();
+        // Both calls refuse: the next id would be the reserved `u32::MAX`.
+        for path in ["/media/b.mp4", "/media/c.mp4"] {
+            assert!(matches!(
+                p.add_asset(path.into(), probe_report("10", 320, 240, "30/1", false)),
+                Err(ProjectError::IdExhausted("asset", id)) if id == last
+            ));
+        }
+        assert_eq!(p, before, "the pool and its ids are unchanged");
     }
 
     #[test]
@@ -1710,7 +1762,9 @@ mod tests {
         };
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset("/media/music.m4a".into(), audio_only());
+        let (a, _) = p
+            .add_asset("/media/music.m4a".into(), audio_only())
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
             a,
@@ -1728,7 +1782,9 @@ mod tests {
         let video_only = probe_report("10", 320, 240, "30/1", false);
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset("/media/silent.mp4".into(), video_only);
+        let (a, _) = p
+            .add_asset("/media/silent.mp4".into(), video_only)
+            .expect("asset");
         let ai = p.timeline.add_track(TrackKind::Audio);
         p.timeline.track_mut(ai).unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
@@ -1745,7 +1801,9 @@ mod tests {
         // A probe with no stream info is "unknown", not "absent".
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (a, _) = p.add_asset("/media/unknown.mp4".into(), RawProbe::default());
+        let (a, _) = p
+            .add_asset("/media/unknown.mp4".into(), RawProbe::default())
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
             a,
@@ -2180,10 +2238,12 @@ mod tests {
         use crate::timeline::{Clip, Gap, Segment};
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("20", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("20", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![
             Segment::Clip(Clip::new(
                 asset,
@@ -2270,10 +2330,12 @@ mod tests {
     #[test]
     fn annotations_validate_their_source_anchor() {
         let mut p = Project::new();
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         let note = |text: &str| AnnotationKind::Note {
             text: text.to_string(),
         };
@@ -2378,10 +2440,12 @@ mod tests {
     fn timeline_anchors_validate_the_clip_and_source() {
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
             asset,
@@ -2511,14 +2575,18 @@ mod tests {
     #[test]
     fn annotations_guard_the_asset_and_group_they_anchor_to() {
         let mut p = Project::new();
-        let (used, _) = p.add_asset(
-            "/media/used.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
-        let (spare, _) = p.add_asset(
-            "/media/spare.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
+        let (used, _) = p
+            .add_asset(
+                "/media/used.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
+        let (spare, _) = p
+            .add_asset(
+                "/media/spare.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         let id = p
             .add_annotation(
                 1,
@@ -2573,10 +2641,12 @@ mod tests {
     fn expectation_selectors_must_name_pooled_media() {
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
             asset,
@@ -2676,14 +2746,18 @@ mod tests {
     fn expectation_selectors_guard_asset_and_group_removal() {
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (used, _) = p.add_asset(
-            "/media/used.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
-        let (spare, _) = p.add_asset(
-            "/media/spare.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
+        let (used, _) = p
+            .add_asset(
+                "/media/used.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
+        let (spare, _) = p
+            .add_asset(
+                "/media/spare.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
             1,
             used,
@@ -2801,10 +2875,12 @@ mod tests {
     #[test]
     fn annotations_round_trip_through_the_project_file() {
         let mut p = Project::new();
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("10", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("10", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.add_annotation(
             1,
             AnnotationKind::Note {
@@ -2828,14 +2904,18 @@ mod tests {
     #[test]
     fn group_parts_follow_argument_order() {
         let mut p = Project::new();
-        let (a, _) = p.add_asset(
-            "/media/a.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
-        let (b, _) = p.add_asset(
-            "/media/b.mp4".into(),
-            probe_report("3", 320, 240, "30/1", false),
-        );
+        let (a, _) = p
+            .add_asset(
+                "/media/a.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
+        let (b, _) = p
+            .add_asset(
+                "/media/b.mp4".into(),
+                probe_report("3", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         let parts = p
             .group_parts(&["/media/b.mp4".into(), "/media/a.mp4".into()])
             .unwrap();
@@ -2857,10 +2937,11 @@ mod tests {
         p.add_asset(
             "/media/a.mp4".into(),
             probe_report("2", 320, 240, "30/1", false),
-        );
+        )
+        .expect("asset");
         let mut nodur = probe_report("2", 320, 240, "30/1", false);
         nodur.format.duration = None;
-        p.add_asset("/media/b.webm".into(), nodur);
+        p.add_asset("/media/b.webm".into(), nodur).expect("asset");
 
         assert!(matches!(
             p.group_parts(&["/media/a.mp4".into(), "/media/a.mp4".into()]),
@@ -2882,10 +2963,12 @@ mod tests {
         use crate::timeline::{Clip, Segment};
         let mut p = Project::new();
         p.fps = Some(Seconds::from_integer(30));
-        let (asset, _) = p.add_asset(
-            "/media/cam.mp4".into(),
-            probe_report("20", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/cam.mp4".into(),
+                probe_report("20", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         let mut clip = Clip::new(
             1,
             asset,
@@ -2932,10 +3015,12 @@ mod tests {
     #[test]
     fn remove_asset_refuses_a_group_only_reference() {
         let mut p = sample_project();
-        let (spare, _) = p.add_asset(
-            "/media/spare.mp4".into(),
-            probe_report("5", 320, 240, "30/1", true),
-        );
+        let (spare, _) = p
+            .add_asset(
+                "/media/spare.mp4".into(),
+                probe_report("5", 320, 240, "30/1", true),
+            )
+            .expect("asset");
         let group = p
             .add_group(
                 "MIC 1",
@@ -2971,10 +3056,12 @@ mod tests {
         assert!(!diff.is_empty());
 
         let mut after = before.clone();
-        let (asset, _) = after.add_asset(
-            "/media/new.mp4".into(),
-            probe_report("2", 320, 240, "30/1", false),
-        );
+        let (asset, _) = after
+            .add_asset(
+                "/media/new.mp4".into(),
+                probe_report("2", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         let diff = before.diff(&after);
         assert_eq!(diff.assets_added, vec![asset]);
         assert!(
@@ -3124,31 +3211,49 @@ mod tests {
     }
 
     #[test]
-    fn a_max_minus_one_id_validates_and_the_next_allocation_is_max() {
-        // The last ordinary id still leaves one representable id free; the
-        // allocator must spend it, not panic or wrap.
+    fn the_last_ordinary_id_validates_and_allocation_stops_before_the_reserved_max() {
+        // `u32::MAX` is reserved; `u32::MAX - 1` is the last id an allocator
+        // may hand out. A family one below it still allocates that id, then
+        // refuses once it is in use.
         let last = u32::MAX - 1;
+        let below = u32::MAX - 2;
 
         let mut p = sample_project();
+        p.sequences[0].id = below;
+        p.active = below;
+        assert!(p.validate().is_ok());
+        assert_eq!(p.next_sequence_id().unwrap(), last);
         p.sequences[0].id = last;
         p.active = last;
         assert!(p.validate().is_ok());
-        assert_eq!(p.next_sequence_id().unwrap(), u32::MAX);
+        assert!(matches!(
+            p.next_sequence_id(),
+            Err(ProjectError::IdExhausted("sequence", id)) if id == last
+        ));
 
         let mut p = Project::new();
         p.add_asset(
             "/media/a.mp4".into(),
             probe_report("10", 320, 240, "30/1", false),
-        );
+        )
+        .expect("asset");
+        p.media[0].id = below;
+        assert!(p.validate().is_ok());
+        assert_eq!(p.next_asset_id().unwrap(), last);
         p.media[0].id = last;
         assert!(p.validate().is_ok());
-        assert_eq!(p.next_asset_id().unwrap(), u32::MAX);
+        assert!(matches!(
+            p.next_asset_id(),
+            Err(ProjectError::IdExhausted("asset", id)) if id == last
+        ));
 
         let mut p = Project::new();
-        let (asset, _) = p.add_asset(
-            "/media/a.mp4".into(),
-            probe_report("10", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/a.mp4".into(),
+                probe_report("10", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.add_group(
             "CAM 3",
             vec![MediaPart {
@@ -3158,16 +3263,24 @@ mod tests {
                 duration: Seconds::from_integer(2),
             }],
         )
-        .unwrap();
+        .expect("group");
+        p.groups[0].id = below;
+        assert!(p.validate().is_ok());
+        assert_eq!(p.next_group_id().unwrap(), last);
         p.groups[0].id = last;
         assert!(p.validate().is_ok());
-        assert_eq!(p.next_group_id().unwrap(), u32::MAX);
+        assert!(matches!(
+            p.next_group_id(),
+            Err(ProjectError::IdExhausted("group", id)) if id == last
+        ));
 
         let mut p = Project::new();
-        let (asset, _) = p.add_asset(
-            "/media/a.mp4".into(),
-            probe_report("10", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/a.mp4".into(),
+                probe_report("10", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.add_annotation(
             1,
             AnnotationKind::Marker,
@@ -3177,17 +3290,31 @@ mod tests {
             },
             provenance(),
         )
-        .unwrap();
+        .expect("annotation");
+        p.annotations[0].id = below;
+        assert!(p.validate().is_ok());
+        assert_eq!(p.next_annotation_id().unwrap(), last);
         p.annotations[0].id = last;
         assert!(p.validate().is_ok());
-        assert_eq!(p.next_annotation_id().unwrap(), u32::MAX);
+        assert!(matches!(
+            p.next_annotation_id(),
+            Err(ProjectError::IdExhausted("annotation", id)) if id == last
+        ));
 
         let mut p = sample_project();
+        if let Segment::Clip(clip) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            clip.id = below;
+        }
+        assert!(p.validate().is_ok());
+        assert_eq!(p.next_clip_id().unwrap(), last);
         if let Segment::Clip(clip) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
             clip.id = last;
         }
         assert!(p.validate().is_ok());
-        assert_eq!(p.next_clip_id().unwrap(), u32::MAX);
+        assert!(matches!(
+            p.next_clip_id(),
+            Err(ProjectError::IdExhausted("clip", id)) if id == last
+        ));
 
         // Transitions share the clip id space: a transition at the last
         // ordinary id must still be seen by the allocator.
@@ -3203,41 +3330,117 @@ mod tests {
         .unwrap();
         let mut history = History::default();
         history.apply(&mut p, batch, 0).unwrap();
-        let transition = p
-            .timeline
-            .video_track_mut()
-            .unwrap()
-            .segments
-            .iter_mut()
-            .find_map(|segment| match segment {
-                Segment::Transition(transition) => Some(transition),
-                _ => None,
-            })
-            .expect("the added transition");
-        transition.id = last;
+        fn set_transition_id(project: &mut Project, id: u32) {
+            let transition = project
+                .timeline
+                .video_track_mut()
+                .unwrap()
+                .segments
+                .iter_mut()
+                .find_map(|segment| match segment {
+                    Segment::Transition(transition) => Some(transition),
+                    _ => None,
+                })
+                .expect("the added transition");
+            transition.id = id;
+        }
+        set_transition_id(&mut p, below);
         assert!(p.validate().is_ok());
-        assert_eq!(p.next_clip_id().unwrap(), u32::MAX);
+        assert_eq!(p.next_clip_id().unwrap(), last);
+        set_transition_id(&mut p, last);
+        assert!(p.validate().is_ok());
+        assert!(matches!(
+            p.next_clip_id(),
+            Err(ProjectError::IdExhausted("clip", id)) if id == last
+        ));
+    }
+
+    #[test]
+    fn an_id_at_the_last_ordinary_value_saves_and_round_trips() {
+        let last = u32::MAX - 1;
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        p.add_asset(
+            "/media/a.mp4".into(),
+            probe_report("10", 320, 240, "30/1", false),
+        )
+        .expect("asset");
+        p.media[0].id = last;
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            last,
+            last,
+            Seconds::from_integer(0),
+            Seconds::from_integer(2),
+        ))];
+        assert!(p.validate().is_ok(), "the last ordinary id is legal");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nile.json");
+        p.save(&path).expect("the last ordinary id saves");
+        let loaded = Project::load(&path).expect("and loads");
+        assert_eq!(loaded.media[0].id, last);
+        assert!(matches!(
+            &loaded.timeline.video_track().unwrap().segments[0],
+            Segment::Clip(clip) if clip.id == last
+        ));
+    }
+
+    #[test]
+    fn project_save_refuses_the_reserved_max_without_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh.json");
+
+        let mut p = sample_project();
+        p.fps = Some(Seconds::from_integer(30));
+        if let Segment::Clip(clip) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            clip.id = u32::MAX;
+        }
+        assert!(matches!(
+            p.save(&fresh),
+            Err(ProjectError::IdExhausted("clip", u32::MAX))
+        ));
+        assert!(!fresh.exists(), "a refused save creates no file");
+
+        let existing = dir.path().join("existing.json");
+        let mut valid = sample_project();
+        valid.save(&existing).expect("a valid project saves");
+        let before = std::fs::read(&existing).unwrap();
+        if let Segment::Clip(clip) = &mut valid.timeline.video_track_mut().unwrap().segments[0] {
+            clip.id = u32::MAX;
+        }
+        assert!(matches!(
+            valid.save(&existing),
+            Err(ProjectError::IdExhausted("clip", u32::MAX))
+        ));
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            before,
+            "a refused save leaves the previous file untouched"
+        );
     }
 
     #[test]
     fn exhausted_allocators_refuse_before_changing_the_project() {
-        // A project can only hold a ceiling id in memory (validate refuses it
-        // on load/save); the allocator itself must still refuse cleanly.
+        // `u32::MAX` is reserved, so the last legal id refuses the next
+        // allocation. No path may push first and fail later.
+        let last = u32::MAX - 1;
         let mut p = Project::new();
-        p.sequences[0].id = u32::MAX;
-        p.active = u32::MAX;
+        p.sequences[0].id = last;
+        p.active = last;
         let before = p.clone();
         assert!(matches!(
             p.add_sequence("Next", None, None),
-            Err(ProjectError::IdExhausted("sequence", u32::MAX))
+            Err(ProjectError::IdExhausted("sequence", id)) if id == last
         ));
         assert_eq!(p, before, "no sequence was pushed");
 
         let mut p = Project::new();
-        let (asset, _) = p.add_asset(
-            "/media/a.mp4".into(),
-            probe_report("10", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/a.mp4".into(),
+                probe_report("10", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         let parts = || {
             vec![MediaPart {
                 asset,
@@ -3247,19 +3450,21 @@ mod tests {
             }]
         };
         p.add_group("CAM 3", parts()).unwrap();
-        p.groups[0].id = u32::MAX;
+        p.groups[0].id = last;
         let before = p.clone();
         assert!(matches!(
             p.add_group("CAM 4", parts()),
-            Err(ProjectError::IdExhausted("group", u32::MAX))
+            Err(ProjectError::IdExhausted("group", id)) if id == last
         ));
         assert_eq!(p, before, "no group was pushed");
 
         let mut p = Project::new();
-        let (asset, _) = p.add_asset(
-            "/media/a.mp4".into(),
-            probe_report("10", 320, 240, "30/1", false),
-        );
+        let (asset, _) = p
+            .add_asset(
+                "/media/a.mp4".into(),
+                probe_report("10", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         let marker = || AnnotationKind::Marker;
         let anchor = || Anchor::Source {
             source: SourceRef::Asset { id: asset },
@@ -3267,11 +3472,11 @@ mod tests {
         };
         p.add_annotation(1, marker(), anchor(), provenance())
             .unwrap();
-        p.annotations[0].id = u32::MAX;
+        p.annotations[0].id = last;
         let before = p.clone();
         assert!(matches!(
             p.add_annotation(1, marker(), anchor(), provenance()),
-            Err(ProjectError::IdExhausted("annotation", u32::MAX))
+            Err(ProjectError::IdExhausted("annotation", id)) if id == last
         ));
         assert_eq!(p, before, "no annotation was pushed");
 
@@ -3279,32 +3484,30 @@ mod tests {
         p.add_asset(
             "/media/a.mp4".into(),
             probe_report("10", 320, 240, "30/1", false),
-        );
-        p.media[0].id = u32::MAX;
+        )
+        .expect("asset");
+        p.media[0].id = last;
         let before = p.clone();
         assert!(matches!(
             p.next_asset_id(),
-            Err(ProjectError::IdExhausted("asset", u32::MAX))
+            Err(ProjectError::IdExhausted("asset", id)) if id == last
         ));
         assert_eq!(p, before, "the asset allocator is read-only");
 
         let mut p = sample_project();
         p.fps = Some(Seconds::from_integer(30));
         if let Segment::Clip(clip) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
-            clip.id = u32::MAX;
+            clip.id = last;
         }
         let before = p.clone();
         assert!(matches!(
             p.next_clip_id(),
-            Err(ProjectError::IdExhausted("clip", u32::MAX))
+            Err(ProjectError::IdExhausted("clip", id)) if id == last
         ));
         assert!(
             matches!(
                 edit::split_on(&p, 0, 1.0),
-                Err(EditError::Project(ProjectError::IdExhausted(
-                    "clip",
-                    u32::MAX
-                )))
+                Err(EditError::Project(ProjectError::IdExhausted("clip", id))) if id == last
             ),
             "{:?}",
             edit::split_on(&p, 0, 1.0)
@@ -3338,11 +3541,11 @@ mod tests {
             provenance(),
         )
         .unwrap();
-        p.annotations[0].id = u32::MAX;
+        p.annotations[0].id = u32::MAX - 1;
         let before = p.clone();
         assert!(matches!(
             p.derive_sequence(1, "Copy", None, None),
-            Err(ProjectError::IdExhausted("annotation", u32::MAX))
+            Err(ProjectError::IdExhausted("annotation", id)) if id == u32::MAX - 1
         ));
         assert_eq!(
             p, before,
@@ -3465,22 +3668,24 @@ mod tests {
         // audio-only side would only fail inside ffmpeg. The clip rule
         // (`wrong_kind`) applies to transition sides too.
         let mut p = sample_project();
-        let (music, _) = p.add_asset(
-            "/media/music.m4a".into(),
-            RawProbe {
-                streams: vec![RawStream {
-                    index: 0,
-                    codec_type: Some("audio".into()),
-                    codec_name: Some("aac".into()),
-                    ..Default::default()
-                }],
-                format: RawFormat {
-                    format_name: "m4a".into(),
-                    duration: Some("10".into()),
-                    ..Default::default()
+        let (music, _) = p
+            .add_asset(
+                "/media/music.m4a".into(),
+                RawProbe {
+                    streams: vec![RawStream {
+                        index: 0,
+                        codec_type: Some("audio".into()),
+                        codec_name: Some("aac".into()),
+                        ..Default::default()
+                    }],
+                    format: RawFormat {
+                        format_name: "m4a".into(),
+                        duration: Some("10".into()),
+                        ..Default::default()
+                    },
                 },
-            },
-        );
+            )
+            .expect("asset");
         p.timeline
             .video_track_mut()
             .unwrap()
@@ -3510,10 +3715,12 @@ mod tests {
         // transition is still in use — `remove_asset` must refuse it. (The
         // integration trap: `asset_usage` used to walk only clips.)
         let mut p = sample_project();
-        let (spare, _) = p.add_asset(
-            "/x/spare.mp4".into(),
-            probe_report("5", 320, 240, "30/1", false),
-        );
+        let (spare, _) = p
+            .add_asset(
+                "/x/spare.mp4".into(),
+                probe_report("5", 320, 240, "30/1", false),
+            )
+            .expect("asset");
         p.timeline
             .video_track_mut()
             .unwrap()

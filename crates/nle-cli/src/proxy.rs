@@ -641,8 +641,12 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (wide, _) = p.add_asset("/media/wide.mp4".into(), probe_size(640, 360));
-        let (same, _) = p.add_asset("/media/same.mp4".into(), probe_size(320, 240));
+        let (wide, _) = p
+            .add_asset("/media/wide.mp4".into(), probe_size(640, 360))
+            .expect("asset");
+        let (same, _) = p
+            .add_asset("/media/same.mp4".into(), probe_size(320, 240))
+            .expect("asset");
         let clip_of = |asset| {
             Segment::Clip(Clip::new(
                 1,
@@ -671,7 +675,9 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_size(320, 240))
+            .expect("asset");
         // v1: a 2× clip reading source 0..8 → timeline [0,4).
         p.timeline.tracks[0].segments = vec![Segment::Clip(Clip {
             id: 1,
@@ -733,7 +739,9 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_size(320, 240))
+            .expect("asset");
         let key = |at: Seconds, x: f64| CropKey {
             at,
             x,
@@ -783,7 +791,9 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_size(320, 240))
+            .expect("asset");
         let mut c = Clip::new(1, a, secs(0), secs(3));
         c.effects = vec![
             Effect::Crop {
@@ -836,7 +846,9 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_size(320, 240))
+            .expect("asset");
         // [clip 0..1][transition 1..2][clip 2..3]
         p.timeline.tracks[0].segments = vec![
             Segment::Clip(Clip::new(1, a, secs(0), secs(1))),
@@ -973,7 +985,9 @@ mod tests {
             width: 320,
             height: 240,
         });
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        let (a, _) = p
+            .add_asset("/media/red.mp4".into(), probe_size(320, 240))
+            .expect("asset");
         p.timeline.tracks[0].segments = vec![Segment::Clip(Clip::new(1, a, secs(0), secs(2)))];
         let tracks = slice_tracks(&p, secs(0), secs(2));
         let span = |p: &Project| span_hash(p, &tracks, 320, 240);
