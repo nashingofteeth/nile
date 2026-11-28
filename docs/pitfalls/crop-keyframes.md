@@ -15,14 +15,16 @@ Read before touching `CropKey`, the keyframe action, or the keyed-crop graph.
   size is held and x/y move toward the first key, clamped to the available
   travel (the window never pre-shrinks); after the last key it holds.
 - **One planner.** `timeline::crop_passes` owns the ranges and windows: the
-  exporter only formats its passes and the CV checks sample
-  `CropPass::window_at`. Validation rejects negative/non-increasing keys, so the
-  planner debug-asserts that instead of filtering them (filtering used to drop
-  the head ramp).
+  exporter only formats its passes, the CV checks sample
+  `CropPass::window_at`, and `crop_window_at` (rebase) samples it too.
+  Validation rejects negative/non-increasing keys at load/save **and** the
+  effect edit boundary (`InvalidEffect`); the planner asserts that order
+  before sorting and skips a negative start defensively in release.
 - **The head is the origin.** Split/trim-in/head-extend re-base keys onto the
   new head (the cut value becomes the key at 0); retime scales key offsets so
-  the same source frame keeps its key. Tail trims leave keys after the new
-  end inert.
+  the same source frame keeps its key. A tail trim keeps a key after the new
+  end as the final pass's endpoint (interpolation runs to the clip end); a
+  lone past-end key leaves the base held.
 - **A keyed crop is alone.** Adding another effect to the clip is refused
   (`KeyedCropExclusive`), and so is a transition beside it
   (`KeyedCropTransition`); the renderer repeats the refusal as a backstop.
