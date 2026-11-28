@@ -4,8 +4,9 @@
 //! Unlike `nile export` (synchronous, file-based), a job is submitted to the
 //! running server, which snapshots the project and renders it in the
 //! background. These commands never open the project directly: with no server
-//! there is no queue to talk to, so the error says to start one. `batch` is
-//! only a client-side loop over `job.submit`: no queue or wire change.
+//! there is no queue to talk to, so the error says to start one. `batch` adds
+//! no wire method: it is a client-side loop over `job.submit`, which refuses
+//! an output a live job owns.
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
@@ -118,12 +119,10 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
                 bail!("no sequences to render");
             }
             let dir = absolute_path(output_dir)?;
-            // Refuse before `create_dir_all`: a bad selection or an existing
-            // file must not leave an empty directory (or half a batch) behind.
+            // Refuse before creating anything: a bad selection or an existing
+            // file must not leave a directory (or half a batch) behind.
             let plan = plan_outputs(&dir, &picked)?;
-            let created = !dir.exists();
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("create the output directory {}", dir.display()))?;
+            let created = create_output_dir(&dir)?;
             let export = JobExport {
                 preset: preset_of(*preset),
                 crf: *crf,
@@ -144,21 +143,15 @@ pub(crate) fn cmd_job(project: &Path, action: &JobCmd) -> Result<()> {
                     Err(error) => {
                         // The server may refuse a path a live job owns even
                         // though our `exists()` plan passed. If nothing was
-                        // queued, do not leave the directory this batch made.
+                        // queued, do not leave the components this batch made.
                         if queued.is_empty() {
-                            discard_empty_batch_dir(&dir, created);
+                            discard_created_dirs(&created);
                         }
-                        let error = anyhow::Error::msg(error)
-                            .context(format!("submit sequence #{sequence}"));
-                        return Err(if queued.is_empty() {
-                            error
-                        } else {
-                            error.context(format!(
-                                "queued {} job(s) before the batch failed: {}",
-                                queued.len(),
-                                id_list(&queued)
-                            ))
-                        });
+                        return Err(batch_submit_error(
+                            anyhow::Error::msg(error),
+                            sequence,
+                            &queued,
+                        ));
                     }
                 }
             }
@@ -215,13 +208,81 @@ fn plan_outputs(dir: &Path, sequences: &[u32]) -> Result<Vec<(u32, PathBuf)>> {
     Ok(plan)
 }
 
-/// Drop the directory a failed batch created, but only while it is still
-/// empty: `remove_dir` refuses a non-empty tree, which is the guard we want if
-/// another writer dropped a file in meanwhile. The submit error is the one to
-/// report, so a cleanup failure is ignored.
-fn discard_empty_batch_dir(dir: &Path, created: bool) {
-    if created {
+/// Create `dir` and its missing ancestors one component at a time, returning
+/// the components this call created (outermost first). `create_dir_all`
+/// cannot tell "I made it" from "someone else already had it", so a caller
+/// that may need to undo its work must own exactly these components.
+fn create_output_dir(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut current = dir;
+    loop {
+        match std::fs::metadata(current) {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    bail!("{} exists and is not a directory", current.display());
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(current.to_path_buf());
+                match current.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => current = parent,
+                    _ => break,
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect the output directory {}", current.display())
+                });
+            }
+        }
+    }
+    missing.reverse();
+
+    let mut created: Vec<PathBuf> = Vec::with_capacity(missing.len());
+    for path in missing {
+        match std::fs::create_dir(&path) {
+            Ok(()) => created.push(path),
+            // Another process won this component between the scan and the
+            // create; it is not ours to remove.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !path.is_dir() {
+                    discard_created_dirs(&created);
+                    bail!("{} exists and is not a directory", path.display());
+                }
+            }
+            Err(error) => {
+                discard_created_dirs(&created);
+                return Err(error)
+                    .with_context(|| format!("create the output directory {}", path.display()));
+            }
+        }
+    }
+    Ok(created)
+}
+
+/// Remove directories this batch created, innermost first. `remove_dir`
+/// refuses a non-empty tree, so a directory another writer filled is left
+/// alone; the submit error stays the one reported, so a cleanup failure is
+/// ignored.
+fn discard_created_dirs(created: &[PathBuf]) {
+    for dir in created.iter().rev() {
         let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// A failed batch submit: always names the sequence, and names the jobs
+/// already queued so a partial batch is actionable.
+fn batch_submit_error(error: anyhow::Error, sequence: u32, queued: &[u64]) -> anyhow::Error {
+    let error = error.context(format!("submit sequence #{sequence}"));
+    if queued.is_empty() {
+        error
+    } else {
+        error.context(format!(
+            "queued {} job(s) before the batch failed: {}",
+            queued.len(),
+            id_list(queued)
+        ))
     }
 }
 
@@ -344,29 +405,59 @@ mod tests {
     }
 
     #[test]
-    fn failed_batch_cleanup_removes_only_the_empty_directory_it_created() {
+    fn created_batch_directories_are_removed_in_reverse_and_never_beyond_them() {
         let parent = tempfile::tempdir().expect("tempdir");
 
-        let created = parent.path().join("created");
-        std::fs::create_dir(&created).expect("mkdir");
-        discard_empty_batch_dir(&created, true);
-        assert!(!created.exists(), "the batch's own empty directory goes");
-
-        let foreign = parent.path().join("foreign");
-        std::fs::create_dir(&foreign).expect("mkdir");
-        discard_empty_batch_dir(&foreign, false);
-        assert!(
-            foreign.exists(),
-            "a directory the batch did not create stays"
+        // A deep missing path: every component is ours, so all go.
+        let deep = parent.path().join("a").join("b").join("c");
+        let created = create_output_dir(&deep).expect("create deep");
+        assert_eq!(
+            created,
+            vec![
+                parent.path().join("a"),
+                parent.path().join("a").join("b"),
+                deep.clone()
+            ]
         );
+        assert!(deep.is_dir());
+        discard_created_dirs(&created);
+        assert!(!parent.path().join("a").exists(), "the whole chain goes");
 
+        // An existing prefix is not ours; only the missing suffix is undone.
+        let existing = parent.path().join("existing");
+        std::fs::create_dir(&existing).expect("mkdir");
+        let deeper = existing.join("x").join("y");
+        let created = create_output_dir(&deeper).expect("create under existing");
+        assert_eq!(created, vec![existing.join("x"), deeper.clone()]);
+        discard_created_dirs(&created);
+        assert!(existing.is_dir(), "the pre-existing directory stays");
+        assert!(!existing.join("x").exists(), "our suffix goes");
+
+        // A created directory another writer filled is left alone.
         let occupied = parent.path().join("occupied");
-        std::fs::create_dir(&occupied).expect("mkdir");
+        let created = create_output_dir(&occupied).expect("create occupied");
         std::fs::write(occupied.join("sequence-1.mp4"), b"a render").expect("write");
-        discard_empty_batch_dir(&occupied, true);
+        discard_created_dirs(&created);
         assert!(
             occupied.join("sequence-1.mp4").exists(),
-            "a non-empty directory is left alone"
+            "a non-empty directory is not removed"
         );
+    }
+
+    #[test]
+    fn a_partial_batch_names_the_sequence_and_the_jobs_already_queued() {
+        let error = batch_submit_error(anyhow::anyhow!("job #7 is rendering to x"), 1, &[8]);
+        let text = format!("{error:#}");
+        assert!(text.contains("submit sequence #1"), "{text}");
+        assert!(
+            text.contains("queued 1 job(s) before the batch failed: #8"),
+            "{text}"
+        );
+        assert!(text.contains("job #7"), "{text}");
+
+        let first = batch_submit_error(anyhow::anyhow!("boom"), 2, &[]);
+        let text = format!("{first:#}");
+        assert!(text.contains("submit sequence #2"), "{text}");
+        assert!(!text.contains("before the batch failed"), "{text}");
     }
 }
