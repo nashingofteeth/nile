@@ -499,7 +499,10 @@ pub fn insert_gap_on(
         Segment::Clip(c) => {
             // A split within a frame of either edge is that edge: no slivers.
             let (head_ok, tail_ok) = split_sides(project, c.duration(), off);
-            let pid = project.next_clip_id()?;
+            // Only a split (head present) gives the tail a fresh id; an
+            // insert-before keeps the original id. Keep the cursor lazy so a
+            // full id space does not refuse a legal no-id edit.
+            let mut next = project.next_clip_id().ok();
             let mut pieces: Vec<Segment> = Vec::new();
             if head_ok {
                 pieces.push(Segment::Clip(Clip {
@@ -515,8 +518,13 @@ pub fn insert_gap_on(
             if tail_ok {
                 // The tail keeps the id when the head is absent (insert-before),
                 // else gets a fresh one (a split).
+                let id = if head_ok {
+                    Project::take_clip_id(&mut next)?
+                } else {
+                    c.id
+                };
                 let mut tail = Clip {
-                    id: if head_ok { pid } else { c.id },
+                    id,
                     asset: c.asset,
                     asset_in: c.asset_in + source_span(c, off),
                     asset_out: c.asset_out,
@@ -1032,7 +1040,9 @@ pub fn insert_segments_on(
     at: f64,
     segments: &[Segment],
 ) -> Result<Batch, EditError> {
-    let mut next = Some(project.next_clip_id()?);
+    // A gap-only payload (or an insert with no split) takes no id; keep the
+    // cursor lazy so a full space only refuses when a payload/split needs one.
+    let mut next = project.next_clip_id().ok();
     insert_segments_on_with(project, track, at, segments, &mut next)
 }
 

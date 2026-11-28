@@ -313,7 +313,7 @@ fn append_timeline(
     video_track: Option<usize>,
 ) -> Result<()> {
     let start = project.timeline.end();
-    let mut next_id = Some(project.next_clip_id()?);
+    let mut next_id = project.next_clip_id().ok();
     for track in &mut incoming.tracks {
         for segment in &mut track.segments {
             match segment {

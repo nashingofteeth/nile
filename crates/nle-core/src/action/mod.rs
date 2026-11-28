@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::annotation::{Anchor, AnnotationKind, ClipPoint};
 use crate::edit::{self, EditError, EditOp, History};
 use crate::extend::{self, Armed};
-use crate::project::Project;
+use crate::project::{Project, ProjectError};
 use crate::time::{Seconds, checked_sub, frame_of, grid_time, secs_f64};
 use crate::timeline::{
     CropKey, Effect, Gap, MAX_TIMELINE_SECONDS, Segment, Track, TrackKind, TransitionKind,
@@ -685,7 +685,7 @@ pub fn run_action(
                     // The base batch already took ids from the project
                     // counter; start the sync above them so no two tracks
                     // share a split-half id.
-                    let mut next = Some(next_id_after(project, &batch)?);
+                    let mut next = next_id_after(project, &batch)?;
                     batch.ops.extend(edit::ripple_other_tracks(
                         project,
                         *track,
@@ -738,7 +738,7 @@ pub fn run_action(
                     .fold(Seconds::from_integer(0), |acc, s| acc + s.duration());
                 // The range insert already took ids from the project counter;
                 // start the sync above them (see the Paste branch).
-                let mut next = Some(next_id_after(project, &batch)?);
+                let mut next = next_id_after(project, &batch)?;
                 batch.ops.extend(edit::ripple_other_tracks(
                     project, *track, *at, dur, &mut next,
                 )?);
@@ -974,6 +974,17 @@ fn track_shift(old: &Track, new: &Track) -> Result<Option<(Seconds, Seconds)>, E
     }
 }
 
+/// Classify a sync-planning error. A missing clip id is fatal — the base edit
+/// already committed to a split, so skipping it would land a half-synced
+/// timeline. Any other unrepresentable boundary just leaves that track local.
+fn sync_error(error: EditError, skip: impl FnOnce(&EditError) -> String) -> SyncError {
+    if matches!(&error, EditError::Project(ProjectError::IdExhausted(..))) {
+        SyncError::Fatal(error)
+    } else {
+        SyncError::Skip(skip(&error))
+    }
+}
+
 /// Shift every other track by the base edit's delta. Growth inserts a gap;
 /// shrink removes the span `[at + delta, at)`.
 fn shift_other_tracks(
@@ -982,10 +993,10 @@ fn shift_other_tracks(
     at: Seconds,
     delta: Seconds,
     next_id: &mut Option<u32>,
-) -> Result<Vec<EditOp>, String> {
+) -> Result<Vec<EditOp>, SyncError> {
     if delta > Seconds::from_integer(0) {
         return edit::ripple_other_tracks(project, except, secs_f64(&at), delta, next_id)
-            .map_err(|e| e.to_string());
+            .map_err(|e| sync_error(e, |e| e.to_string()));
     }
     let zero = Seconds::from_integer(0);
     let start = {
@@ -997,24 +1008,30 @@ fn shift_other_tracks(
         if ti == except || tr.segments.is_empty() || tr.end() <= start {
             continue;
         }
-        let batch = edit::remove_span_on(project, ti, start, at, next_id)
-            .map_err(|e| format!("{}: {e}", track_label(project, ti)))?;
+        let batch = edit::remove_span_on(project, ti, start, at, next_id).map_err(|e| {
+            let label = track_label(project, ti);
+            sync_error(e, |e| format!("{label}: {e}"))
+        })?;
         ops.extend(batch.ops);
     }
     Ok(ops)
 }
 
-/// The first free clip id once `batch` has been applied. The base edit draws
-/// ids from the project counter when it is planned, so the sync ripple must
-/// start above them — otherwise a split on another track reuses an id the
-/// base edit just handed out, and a clip-addressed action (`--clip`, `x`,
-/// extend) resolves to the wrong track.
-fn next_id_after(project: &Project, batch: &edit::Batch) -> Result<u32, EditError> {
+/// The first free clip id once `batch` has been applied, or `None` when the
+/// id space is full. The base edit draws ids from the project counter when it
+/// is planned, so the sync ripple must start above them — otherwise a split on
+/// another track reuses an id the base edit just handed out, and a
+/// clip-addressed action (`--clip`, `x`, extend) resolves to the wrong track.
+///
+/// `None` is not an error here: a sync that only shifts/removes (or inserts a
+/// gap at a boundary) consumes no id. Only a sync split that actually takes one
+/// later turns the full space into `IdExhausted`.
+fn next_id_after(project: &Project, batch: &edit::Batch) -> Result<Option<u32>, EditError> {
     let mut after = project.clone();
     for op in &batch.ops {
         op.apply(&mut after)?;
     }
-    Ok(after.next_clip_id()?)
+    Ok(after.next_clip_id().ok())
 }
 
 /// Why the base edit's sync ripple could not be planned. `Skip` is the
@@ -1058,12 +1075,8 @@ fn sync_ops(
     } else {
         at
     };
-    let mut next = Some(
-        after
-            .next_clip_id()
-            .map_err(|e| SyncError::Fatal(EditError::Project(e)))?,
-    );
-    shift_other_tracks(project, track, at, delta, &mut next).map_err(SyncError::Skip)
+    let mut next = after.next_clip_id().ok();
+    shift_other_tracks(project, track, at, delta, &mut next)
 }
 
 /// Apply a batch, extending it with the other-track shift when the target is

@@ -201,7 +201,7 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
                 .context("project has no video track")?,
         };
 
-        let mut next_id = Some(project.next_clip_id()?);
+        let mut next_id = project.next_clip_id().ok();
         let video_segments = span_segments(&spans, asset_id, &mut next_id)?;
         append_spans(&mut project, video_ti, start, video_segments);
 
@@ -253,7 +253,7 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
     // + silence, and splitting audio at the video cuts keeps each shot a
     // movable pair. (No a/v linking yet, so reordering only the video still
     // desyncs — a model limit, not a detector bug.)
-    let mut next_id = Some(project.next_clip_id()?);
+    let mut next_id = project.next_clip_id().ok();
     let mut tracks = vec![Track {
         kind: TrackKind::Video,
         muted: false,
