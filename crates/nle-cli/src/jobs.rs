@@ -91,6 +91,24 @@ pub(crate) struct PruneReport {
     pub failed: Vec<(u64, String)>,
 }
 
+/// Durable identity of a render target: canonical parent + file name, so
+/// `dir/x.mp4`, `dir/../dir/x.mp4` and a symlinked `dir` all name one output.
+/// A record is created only after the handler made the parent, so
+/// `canonicalize` normally succeeds; a direct caller with a missing parent
+/// falls back to the lexical path and `store.create` reports the real error.
+fn output_identity(output: &Path) -> PathBuf {
+    let Some(name) = output.file_name() else {
+        return output.to_path_buf();
+    };
+    let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return output.to_path_buf();
+    };
+    parent
+        .canonicalize()
+        .map(|parent| parent.join(name))
+        .unwrap_or_else(|_| output.to_path_buf())
+}
+
 pub(crate) struct JobQueue {
     store: JobStore,
     state: Mutex<QueueState>,
@@ -171,7 +189,9 @@ impl JobQueue {
     ///
     /// The queue lock covers the live-output check and the record creation:
     /// two batches (or two clients) that picked the same path cannot both
-    /// submit, because the client's `exists()` check is only advisory.
+    /// submit, because the client's `exists()` check is only advisory. The
+    /// comparison is by [`output_identity`], not the literal `PathBuf`, so a
+    /// `..` or symlinked spelling cannot claim the same file twice.
     pub(crate) fn submit(
         &self,
         project: &Project,
@@ -180,11 +200,12 @@ impl JobQueue {
         export: JobExport,
     ) -> Result<JobRecord, QueueError> {
         let state = self.lock();
+        let identity = output_identity(&output);
         if let Some(live) = self
             .store
             .list()?
             .into_iter()
-            .find(|job| !job.state.is_terminal() && job.output == output)
+            .find(|job| !job.state.is_terminal() && output_identity(&job.output) == identity)
         {
             return Err(QueueError::Invalid(format!(
                 "job #{} already renders to {}; cancel it or pick another output",

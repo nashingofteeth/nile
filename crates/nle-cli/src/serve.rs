@@ -1490,7 +1490,8 @@ mod tests {
     fn job_submit_refuses_an_output_a_live_job_already_targets() {
         let (run, started, release) = gated_runner();
         let (dir, mut handler) = handler_with_runner(run);
-        let output = dir.path().join("same.mp4");
+        let out_dir = dir.path().join("out");
+        let output = out_dir.join("same.mp4");
         let revision = handler.session.revision();
         let active = handler.session.project().active_id();
         let Reply::Job(first) = handler
@@ -1512,25 +1513,37 @@ mod tests {
         );
 
         // The client-side plan cannot see another batch's live job; the queue
-        // refuses the shared path while its owner is non-terminal.
-        let error = handler
-            .job_submit(
-                revision,
-                &output,
-                active,
-                nle_core::jobs::JobExport::default(),
-            )
-            .expect_err("second submit");
-        assert_eq!(error.code, nle_protocol::INVALID_PARAMS);
-        assert!(
-            error.message.contains(&format!("job #{}", first.id)),
-            "{}",
-            error.message
-        );
+        // refuses the shared path while its owner is non-terminal. The
+        // comparison is canonical, not lexical: `..` and a symlinked parent
+        // are the same deliverable.
+        let respelled = out_dir.join("..").join("out").join("same.mp4");
+        let linked_dir = dir.path().join("linked");
+        std::os::unix::fs::symlink(&out_dir, &linked_dir).expect("symlink");
+        let linked = linked_dir.join("same.mp4");
+        for (label, path) in [
+            ("literal", output.clone()),
+            ("respelled", respelled),
+            ("symlinked", linked),
+        ] {
+            let error = handler
+                .job_submit(
+                    revision,
+                    &path,
+                    active,
+                    nle_core::jobs::JobExport::default(),
+                )
+                .expect_err(label);
+            assert_eq!(error.code, nle_protocol::INVALID_PARAMS, "{label}");
+            assert!(
+                error.message.contains(&format!("job #{}", first.id)),
+                "{label}: {}",
+                error.message
+            );
+        }
         let Reply::Jobs(list) = handler.job_list().expect("list") else {
             panic!("expected jobs");
         };
-        assert_eq!(list.jobs.len(), 1, "the refused submit left no record");
+        assert_eq!(list.jobs.len(), 1, "the refused submits left no records");
         assert_eq!(list.jobs[0].id, first.id);
 
         release.send(()).unwrap();
