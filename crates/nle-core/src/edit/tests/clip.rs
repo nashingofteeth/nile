@@ -952,9 +952,7 @@ fn inserting_a_gap_at_a_clip_head_needs_no_id() {
     let mut q = p.clone();
     let mut h = History::default();
     h.apply(&mut q, batch, 0).unwrap();
-    let ids = clip_ids(&q);
-    assert!(ids.contains(&last));
-    assert!(!ids.contains(&u32::MAX));
+    assert_eq!(clip_ids(&q), vec![last, 2]);
 }
 
 #[test]
@@ -969,9 +967,7 @@ fn a_gap_only_range_insert_needs_no_clip_id() {
     let mut q = p.clone();
     let mut h = History::default();
     h.apply(&mut q, batch, 0).unwrap();
-    let ids = clip_ids(&q);
-    assert!(ids.contains(&last));
-    assert!(!ids.contains(&u32::MAX));
+    assert_eq!(clip_ids(&q), vec![last, 2]);
 }
 
 #[test]

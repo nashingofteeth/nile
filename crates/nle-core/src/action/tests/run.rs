@@ -455,6 +455,26 @@ fn a_base_edit_at_the_last_id_needs_a_sync_id_only_for_a_split() {
         ));
         assert_eq!(p.timeline, before, "a failed sync applies nothing");
     }
+
+    // The growth arm goes through `ripple_other_tracks`: inserting at 2.0
+    // splits the audio clip 0..6, so a full id space must be fatal there too,
+    // not a skip that leaves the tracks out of sync.
+    let mut p = last_id_sync_project(true);
+    let before = p.timeline.clone();
+    let mut reg = None;
+    assert!(matches!(
+        run(
+            &mut p,
+            &mut reg,
+            &Action::InsertGap {
+                track: 0,
+                at: 2.0,
+                len: GapLen::Frames(30),
+            },
+        ),
+        Err(EditError::Project(ProjectError::IdExhausted("clip", id))) if id == last
+    ));
+    assert_eq!(p.timeline, before, "a failed growth sync applies nothing");
 }
 
 #[test]
