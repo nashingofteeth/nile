@@ -33,7 +33,7 @@ Read before touching `CropKey`, the keyframe action, or the keyed-crop graph.
   therefore meet on the same cut window. Every window `rebase_crop_keys`
   writes back is clamped the same way, because a pass keeps the earlier key's
   size while x/y move toward a differently sized next key.
-- **Deferred: cap-crossing size steps (F<NN>.3).** A pass with a shrinking
+- **Deferred: cap-crossing size steps.** A pass with a shrinking
   next key can cross the `100−w`/`100−h` cap *before* a cut. Cuts clamp the
   sampled endpoint so the written key is valid, but no key is synthesized at
   the crossing, so the left ramp before that cut can still differ from the
