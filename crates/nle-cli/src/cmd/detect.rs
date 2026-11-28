@@ -285,8 +285,9 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
 }
 
 /// Build the clip/gap segments for a run of spans, allocating clip ids from
-/// `next_id` (unique across tracks). The cursor reserves `u32::MAX`, so a
-/// project already holding `u32::MAX - 1` refuses instead of wrapping.
+/// `next_id` (unique across tracks). The cursor reserves `u32::MAX`: an
+/// all-gap run allocates nothing, and the first clip it must allocate refuses
+/// once `u32::MAX - 1` is in use.
 pub(crate) fn span_segments(
     spans: &[Span],
     asset: u32,
