@@ -4090,6 +4090,42 @@ mod tests {
     }
 
     #[test]
+    fn keyed_crop_checks_use_the_pass_plan_not_the_raw_key_times() {
+        // Key 2 sits past the clip end, so the final pass ends at 10 s: at
+        // 5 s the rendered x is 0 + 70 × 4/9 ≈ 31.1. Sampling raw key times
+        // (0 + 70 × 4/19 ≈ 14.7) would leave the 25 % margin and fail.
+        let effect = Effect::Crop {
+            x: 0.0,
+            y: 25.0,
+            w: 20.0,
+            h: 20.0,
+            keys: vec![
+                key(1, 0.0, 25.0, 20.0, 20.0),
+                key(20, 70.0, 25.0, 20.0, 20.0),
+            ],
+        };
+        let rendered = crop_passes(&effect, Seconds::from_integer(10))
+            .iter()
+            .rev()
+            .find(|pass| pass.start <= Seconds::from_integer(5))
+            .expect("a pass covers the sample")
+            .window_at(Seconds::from_integer(5));
+        assert!(
+            (rendered.x - 280.0 / 9.0).abs() < 1e-9,
+            "the pass runs to the clip end: {rendered:?}"
+        );
+
+        let project = with_crop(effect);
+        let report = report(&[(300, shot(1, 1))]);
+        let outcome = evaluate(
+            &project,
+            &report,
+            &point(Expectation::WorkInFrame { margin_pct: 25.0 }, 5),
+        );
+        assert_eq!(outcome.result, CheckResult::Pass, "{outcome:?}");
+    }
+
+    #[test]
     fn work_in_frame_checks_a_point_anchor() {
         let report = report(&[(150, shot(1, 1))]);
         let outside = with_crop(Effect::Crop {
